@@ -27,17 +27,21 @@
 </div> 
  
 <br />
+
+
+## Explore the Full Documentation
+
+📖 Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](link-to-full-documentation). Click the link and explore further!
   
 
 <!-- About the Project -->
 ## :star2: About the Project
+a device that can not only monitor network traffic but also scan for nearby Wi-Fi networks, simulate beacon frames, and detect deauthentication attacks.
 
 
-<!-- Pictures -->
-### :camera: Pictures
 
 <div align="center"> 
-  <img src="" alt="screenshot" width="Auto" height="Auto" />
+  <img src="https://github.com/cifertech/ESP32-DIV/assets/62047147/ed96e22f-f971-4d6a-95b0-993bf8d41a33" alt="screenshot" width="Auto" height="Auto" />
 </div>
 
 
@@ -48,65 +52,6 @@
 - WiFi Analyzer
 - Beacon Spam
 - Deauth Detector
-
-<!-- Getting Started -->
-## 	:toolbox: Getting Started
-
-- TFT Lcd st7735
-- ESP32
-- Micro Switch
-
-<img src="" alt="screenshot" width="Auto" height="300" />
-
-<!-- Schematic -->
-### :electric_plug: Schematic
-Make the connections according to the table and schematic below.
-
-* ESP32 / st7735 TFT LCD
-
-| ESP32 | TFT Lcd |  
-| ----  | ----- |
-| 14 | CS   |
-| 33 | RST  |
-| 27 | DC   |
-| 18 | CLK  |
-| 23 | DIN  |
-| 5V | VCC  |
-| 3V3 | LED |
-| GND | GND |
-
-
-* ESP32 / Micro Switch
-
-| Name | GPIO |
-| ----  | -----|
-| select  | 25    |
-| up      | 21    |
-| down    | 22    |
-
- 
-* Complete Schematic
-
-<img src="https://user-images.githubusercontent.com/62047147/196051634-6a0f5314-96a1-4bf7-8b82-00e6b0c39f1e.png" alt="screenshot" width="800" height="auto" />
-
-
-<!-- Installation -->
-### :gear: Installation
-
-
-<!-- Usage -->
-## :eyes: Usage
-
-  <img src="" alt="logo" width="300" height="auto" />
-
-
-
-<!-- Contributing -->
-## :wave: Contributing
-
-<a href="https://github.com/cifertech/WiFiBox/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=cifertech/WiFiBox" />
-</a>
 
 
 <!-- License --> 
