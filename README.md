@@ -29,9 +29,16 @@
 <br />
 
 
-## Explore the Full Documentation
+## 📖 Explore the Full Documentation
 
-📖 Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](link-to-full-documentation). Click the link and explore further!
+Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](link-to-full-documentation). Click the link and explore further!
+
+
+## ⚠ Future Changes
+- Fixing existing bugs (it has a lot * - *)
+- Adding De-Auth attack
+- Adding WiFi sniffer
+- Adding BLE scanner
   
 
 <!-- About the Project -->
