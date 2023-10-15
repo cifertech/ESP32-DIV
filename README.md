@@ -48,7 +48,7 @@ a device that can not only monitor network traffic but also scan for nearby Wi-F
 
 
 <div align="center"> 
-  <img src="https://github.com/cifertech/ESP32-DIV/assets/62047147/ed96e22f-f971-4d6a-95b0-993bf8d41a33" alt="screenshot" width="Auto" height="Auto" />
+  <img src="https://github.com/cifertech/ESP32-DIV/assets/62047147/335e1228-4cb5-4aa0-9b72-c09dcf7b02f9" alt="screenshot" width="Auto" height="Auto" />
 </div>
 
 
