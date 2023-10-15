@@ -31,7 +31,7 @@
 
 ## 📖 Explore the Full Documentation
 
-Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](link-to-full-documentation). Click the link and explore further!
+Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](https://cifertech.net/esp32-div-your-swiss-army-knife-for-wireless-networks/). Click the link and explore further!
 
 
 ## ⚠ Future Changes
@@ -79,5 +79,6 @@ Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifert
 
  - [802.11 Mgmt:Beacon Frame](https://mrncciew.com/2014/10/08/802-11-mgmt-beacon-frame/)
  - [spacehuhn](https://github.com/spacehuhn)
+ - [HCScreen](https://github.com/GerLech/HCScreen/tree/master)
  
  
