@@ -70,7 +70,9 @@ Distributed under the MIT License. See LICENSE.txt for more information.
 <!-- Contact -->
 ## :handshake: Contact 
 
-CiferTech - [@twitter](https://twitter.com/cifertech1) - CiferTech@gmali.com
+▶ Support me on Patreon [patreon.com/cifertech](patreon.com/cifertech)
+
+CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
 
 Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
 
