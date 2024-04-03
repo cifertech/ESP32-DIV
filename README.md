@@ -70,7 +70,7 @@ Distributed under the MIT License. See LICENSE.txt for more information.
 <!-- Contact -->
 ## :handshake: Contact 
 
-▶ Support me on Patreon [patreon.com/cifertech](patreon.com/cifertech)
+▶ Support me on Patreon [patreon.com/cifertech](https://www.patreon.com/cifertech)
 
 CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
 
