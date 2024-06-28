@@ -8,7 +8,7 @@
 
 extern Adafruit_ST7735 tft;
 
-arduinoFFT FFT = arduinoFFT();
+arduinoFFT FFT =ArduinoFFT();
 extern Adafruit_NeoPixel pixels;
 
 #define MAX_CH 14       
