@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "esp32_wifi_playground",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
