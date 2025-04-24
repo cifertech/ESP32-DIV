@@ -42,6 +42,8 @@ Ready to dive deeper into our project's details? Discover the full story, in-dep
 Welcome to **ESP32DIV**, a powerful open-source multi-band wireless toolkit built on the ESP32!  
 This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency bands and is designed for **wireless testing**, **signal analysis**, **jammer development**, and **protocol spoofing**.
 
+> ⚠️ This project is intended for **educational and research purposes only**. Do not use it for malicious activities or unauthorized access.
+
 <div align="center"> 
   <img src="https://github.com/user-attachments/assets/a3c46ee0-5da8-421e-aabf-b3120f21eb10" alt="screenshot" width="Auto" height="Auto" />
 </div>
