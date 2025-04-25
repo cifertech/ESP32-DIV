@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "ESP32DIV-platformIO",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
