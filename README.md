@@ -33,7 +33,7 @@
 
 ## 📖 Explore the Full Documentation
 
-Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](https://cifertech.net/esp32-div-your-swiss-army-knife-for-wireless-networks/). Click the link and explore further!
+Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](https://cifertech.net/esp32div-your-swiss-army-knife-for-wireless-networks/). Click the link and explore further!
 
 <div>&nbsp;</div>
 
@@ -141,7 +141,7 @@ Distributed under the MIT License. See LICENSE.txt for more information.
 
 - 📖 [Project Blog](https://cifertech.net/esp32div-your-swiss-army-knife-for-wireless-networks)
 - 🔗 [GitHub Releases](https://github.com/cifertech/ESP32-DIV/releases)
-- 🎥 [YouTube Video](https://youtube.com/techcifer)
+- 🎥 [YouTube Video](https://youtu.be/jVp1zlcsrOY)
 
 <div>&nbsp;</div>
 
