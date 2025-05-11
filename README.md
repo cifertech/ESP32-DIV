@@ -31,9 +31,10 @@
 
 <div>&nbsp;</div>
 
-## 📖 Explore the Full Documentation
+## 📖 Explore the ESP32-DIV Wiki
 
-Ready to dive deeper into our project's details? Discover the full story, in-depth tutorials, and all the exciting features in our comprehensive [documentation](https://cifertech.net/esp32div-your-swiss-army-knife-for-wireless-networks/). Click the link and explore further!
+Complete project story, in-depth tutorials, and all the features in [Wiki](https://github.com/cifertech/ESP32-DIV/wiki)! From Wi-Fi deauthentication attacks to Sub-GHz signal replay, the Wiki covers everything you need to get started. [Click here to explore now!](https://github.com/cifertech/ESP32-DIV/wiki)
+
 
 <div>&nbsp;</div>
 
