@@ -59,12 +59,15 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **Beacon Spammer** – Broadcast fake SSIDs (custom or random)
 - **Deauth Detector** – Monitor for Wi-Fi deauthentication attacks
 - **Wi-Fi Scanner** – List nearby Wi-Fi networks with extended details
+- **Wi-Fi Deauthentication Attack** - Send deauthentication frames to disrupt client connections
+- **Captive Portal** 
 
 #### 🔵 Bluetooth Tools
 - **BLE Jammer** – Disrupt BLE and classic Bluetooth channels
 - **BLE Spoofer** – Broadcast fake BLE advertisements
 - **Sour Apple** – Spoof Apple BLE advertisements (e.g., AirDrop)
 - **BLE Scanner** – Scan for hidden and visible BLE devices
+- **BLE Sniffer**
 
 #### 📶 2.4GHz Tools
 - **2.4GHz Scanner** – Spectrum analyzer for 128 channels (Zigbee, custom RF, etc.)
