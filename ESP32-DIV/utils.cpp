@@ -1,10 +1,7 @@
 #include "utils.h"
 #include "shared.h"
 #include "icon.h"
-
-// TFT and Touchscreen objects
-extern TFT_eSPI tft;
-extern XPT2046_Touchscreen ts;
+#include "Touchscreen.h"
 
 
 /*
@@ -12,6 +9,35 @@ extern XPT2046_Touchscreen ts;
  * Notification
  * 
  */
+
+
+/*
+    showNotification("New Message!", "Task Failed Successfully.");
+    
+    if (notificationVisible && ts.touched()) {
+      int x, y, z;
+        TS_Point p = ts.getPoint();
+        x = ::map(p.x, 300, 3800, 0, 239);
+        y = ::map(p.y, 3800, 300, 0, 319);
+        
+    if (x >= closeButtonX && x <= (closeButtonX + closeButtonSize) &&
+        y >= closeButtonY && y <= (closeButtonY + closeButtonSize)) {
+        hideNotification();
+    }
+    
+    if (x >= okButtonX && x <= (okButtonX + okButtonWidth) &&
+        y >= okButtonY && y <= (okButtonY + okButtonHeight)) {
+        hideNotification();
+    }
+     delay(100);
+  }
+  
+*/
+
+bool notificationVisible = true;
+int notifX, notifY, notifWidth, notifHeight;
+int closeButtonX, closeButtonY, closeButtonSize = 15;
+int okButtonX, okButtonY, okButtonWidth = 60, okButtonHeight = 20;
 
 extern bool notificationVisible;
 extern int notifX, notifY, notifWidth, notifHeight;
@@ -230,5 +256,310 @@ void updateStatusBar() {
     }
 
     lastStatusBarUpdate = currentMillis;
+  }
+}
+
+
+/*
+ * 
+ * Loading
+ * 
+ */
+
+void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, bool center) {
+  int16_t bitmapWidth = 100;
+  int16_t bitmapHeight = 120;
+  int16_t logoX = x;
+  int16_t logoY = y;
+
+  if (center) {
+    int16_t screenWidth = tft.width();
+    int16_t screenHeight = tft.height();
+    logoX = (screenWidth - bitmapWidth) / 2;   
+    logoY = (screenHeight - bitmapHeight) / 2; 
+  }
+
+  // Array of bitmaps
+  const unsigned char* bitmaps[] = {
+    bitmap_icon_skull_loading_1,
+    bitmap_icon_skull_loading_2,
+    bitmap_icon_skull_loading_3,
+    bitmap_icon_skull_loading_4,
+    bitmap_icon_skull_loading_5,
+    bitmap_icon_skull_loading_6,
+    bitmap_icon_skull_loading_7,
+    bitmap_icon_skull_loading_8,
+    bitmap_icon_skull_loading_9,
+    bitmap_icon_skull_loading_10
+  };
+  const int numFrames = 10; 
+
+  for (int r = 0; r < repeats; r++) {
+    for (int i = 0; i < numFrames; i++) {
+      tft.fillRect(logoX, logoY, bitmapWidth, bitmapHeight, TFT_BLACK); 
+      tft.drawBitmap(logoX, logoY, bitmaps[i], bitmapWidth, bitmapHeight, color);  
+      delay(frameDelay);
+    }
+  }
+}
+
+
+/*
+ * 
+ * Display Logo
+ * 
+ */
+
+void displayLogo(uint16_t color, int displayTime) {
+  int16_t bitmapWidth = 150;
+  int16_t bitmapHeight = 150;
+  int16_t screenWidth = tft.width();
+  int16_t screenHeight = tft.height();
+  int16_t logoX = (screenWidth - bitmapWidth) / 2;
+  int16_t logoY = (screenHeight - bitmapHeight) / 2 - 20;
+
+  tft.fillRect(logoX, logoY, bitmapWidth, bitmapHeight, TFT_BLACK);
+  tft.drawBitmap(logoX, logoY, bitmap_icon_cifer, bitmapWidth, bitmapHeight, color);
+
+  tft.setTextColor(color);
+  tft.setTextFont(1);
+
+  tft.setTextSize(2);
+  int16_t textWidth = tft.textWidth("ESP32-DIV", 2);
+  int16_t textX = screenWidth / 3.5;
+  int16_t textY = logoY + bitmapHeight + 10;
+  tft.setCursor(textX, textY);
+  tft.print("ESP32-DIV");
+
+  tft.setTextSize(1);
+  textWidth = tft.textWidth("by CiferTech", 1);
+  textX = screenWidth / 3.5;
+  textY += 20;
+  tft.setCursor(textX, textY);
+  tft.print("by CiferTech");
+
+  textWidth = tft.textWidth("v1.1.0", 1);
+  textX = screenWidth / 2.5;
+  textY += 50;
+  tft.setCursor(textX, textY);
+  tft.print("v1.1.0");
+
+  Serial.println("==================================");
+  Serial.println("ESP32-DIV                         ");
+  Serial.println("Developed by: CiferTech           ");
+  Serial.println("Version:      1.1.0               ");
+  Serial.println("Contact:      cifertech@gmail.com ");
+  Serial.println("GitHub:       github.com/cifertech");
+  Serial.println("Website:      CiferTech.net       ");
+  Serial.println("==================================");
+
+  delay(displayTime);
+}
+
+
+/*
+ * 
+ * Terminal
+ * 
+ */
+
+namespace Terminal {
+
+#define TEXT_HEIGHT 16
+#define BOT_FIXED_AREA 0
+#define TOP_FIXED_AREA 86
+#define DISPLAY_WIDTH 240
+#define DISPLAY_HEIGHT 320
+#define SCREEN_WIDTH 240
+#define SCREENHEIGHT 320
+
+static bool uiDrawn = false;
+
+uint16_t yStart = TOP_FIXED_AREA;
+uint16_t yArea = DISPLAY_HEIGHT - TOP_FIXED_AREA - BOT_FIXED_AREA;
+uint16_t yDraw = DISPLAY_HEIGHT - BOT_FIXED_AREA - TEXT_HEIGHT;
+
+uint16_t xPos = 0;
+
+byte data = 0;
+
+boolean change_colour = 1;
+boolean selected = 1;
+boolean terminalActive = true;
+
+int blank[19];
+
+long baudRates[] = {9600, 19200, 38400, 57600, 115200};
+byte baudIndex = 0;
+
+void runUI() {
+
+    #define STATUS_BAR_Y_OFFSET 20
+    #define STATUS_BAR_HEIGHT 16
+    #define ICON_SIZE 16
+    #define ICON_NUM 3 
+    
+    static int iconX[ICON_NUM] = {210, 170, 10}; 
+    static int iconY = STATUS_BAR_Y_OFFSET;
+    
+    static const unsigned char* icons[ICON_NUM] = {
+        bitmap_icon_sort_up_plus,    
+        bitmap_icon_power,      
+        bitmap_icon_go_back 
+    };
+
+    if (!uiDrawn) {
+        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+        tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+        
+        for (int i = 0; i < ICON_NUM; i++) {
+            if (icons[i] != NULL) {  
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            } 
+        }
+        tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
+        uiDrawn = true;               
+    }
+
+    static unsigned long lastAnimationTime = 0;
+    static int animationState = 0;  
+    static int activeIcon = -1;
+
+    if (animationState > 0 && millis() - lastAnimationTime >= 150) {
+        if (animationState == 1) {
+            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            animationState = 2;
+
+            switch (activeIcon) {
+                case 0:
+                  if (terminalActive) {
+                    terminalActive = false;
+                  } else if (!terminalActive) {
+                    baudIndex = (baudIndex + 1) % 5;
+                    Serial.end();
+                    delay(100);
+                    Serial.begin(baudRates[baudIndex]);
+                    tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
+                    tft.setTextColor(TFT_WHITE, TFT_WHITE);
+                    String baudMsg = " Serial Terminal - " + String(baudRates[baudIndex]) + " baud ";
+                    tft.drawCentreString(baudMsg, DISPLAY_WIDTH / 2, 37, 2);
+                    delay(10);
+                  }
+                    break;
+                case 1: 
+                    delay(10);
+                    tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
+                    tft.setTextColor(TFT_WHITE, TFT_WHITE);
+                    tft.drawCentreString(" Serial Terminal Active ", DISPLAY_WIDTH / 2, 37, 2);
+                    terminalActive = true;
+                    break;
+  
+                case 2: 
+                    feature_exit_requested = true;
+                    break;
+            }
+        } else if (animationState == 2) {
+            animationState = 0;
+            activeIcon = -1;
+        }
+        lastAnimationTime = millis();  
+    }
+
+    static unsigned long lastTouchCheck = 0;
+    const unsigned long touchCheckInterval = 50; 
+
+    if (millis() - lastTouchCheck >= touchCheckInterval) {
+        if (ts.touched() && feature_active) { 
+            TS_Point p = ts.getPoint();
+            int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
+            int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
+
+            if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+                for (int i = 0; i < ICON_NUM; i++) {
+                    if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+                        if (icons[i] != NULL && animationState == 0) {
+                            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                            animationState = 1;
+                            activeIcon = i;
+                            lastAnimationTime = millis();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        lastTouchCheck = millis();
+    }
+}
+
+void scrollAddress(uint16_t vsp) {
+  tft.writecommand(ILI9341_VSCRSADD);
+  tft.writedata(vsp >> 8);
+  tft.writedata(vsp);
+}
+
+int scroll_line() {
+  int yTemp = yStart;
+  tft.fillRect(0, yStart, blank[(yStart - TOP_FIXED_AREA) / TEXT_HEIGHT], TEXT_HEIGHT, TFT_BLACK);
+
+  yStart += TEXT_HEIGHT;
+  if (yStart >= DISPLAY_HEIGHT - BOT_FIXED_AREA) yStart = TOP_FIXED_AREA + (yStart - DISPLAY_HEIGHT + BOT_FIXED_AREA);
+  scrollAddress(yStart);
+  delay(1);
+  return yTemp;
+}
+
+void setupScrollArea(uint16_t tfa, uint16_t bfa) {
+  tft.writecommand(ILI9341_VSCRDEF);
+  tft.writedata(tfa >> 8);
+  tft.writedata(tfa);
+  tft.writedata((DISPLAY_HEIGHT - tfa - bfa) >> 8);
+  tft.writedata(DISPLAY_HEIGHT - tfa - bfa);
+  tft.writedata(bfa >> 8);
+  tft.writedata(bfa);
+}
+
+void terminalSetup() {
+
+  setupTouchscreen();
+  tft.fillScreen(TFT_BLACK); 
+
+  tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
+  tft.setTextColor(TFT_WHITE, TFT_WHITE);
+  String baudMsg = " Serial Terminal - " + String(baudRates[baudIndex]) + " baud ";
+  tft.drawCentreString(baudMsg, DISPLAY_WIDTH / 2, 37, 2);
+  
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, false);
+
+  uiDrawn = false;
+
+  Serial.begin(baudRates[baudIndex]);
+
+  setupScrollArea(TOP_FIXED_AREA, BOT_FIXED_AREA);
+
+  for (byte i = 0; i < 19; i++) blank[i] = 0;
+
+}
+
+void terminalLoop() {
+  
+  runUI();
+
+  if (terminalActive) {
+    byte charCount = 0;
+    while (Serial.available() && charCount < 10) {
+      data = Serial.read();
+      if (data == '\r' || xPos > 231) {
+        xPos = 0;
+        yDraw = scroll_line();
+      }
+      if (data > 31 && data < 128) {
+        xPos += tft.drawChar(data, xPos, yDraw, 2);
+        blank[(18 + (yStart - TOP_FIXED_AREA) / TEXT_HEIGHT) % 19] = xPos;
+      }
+      charCount++;
+      }
+    }
   }
 }

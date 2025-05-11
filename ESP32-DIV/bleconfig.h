@@ -10,6 +10,11 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_gap_bt_api.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <nRF24L01.h>
@@ -57,6 +62,11 @@ namespace Scanner {
 namespace ProtoKill {
   void prokillLoop();
   void prokillSetup();
+}
+
+namespace BleSniffer {
+  void blesnifferLoop();
+  void blesnifferSetup();
 }
 
 #endif // CONFIG_H

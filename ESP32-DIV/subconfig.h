@@ -25,7 +25,6 @@ extern PCF8574 pcf;
 #define XPT2046_CS    33
 
 
-
 namespace replayat {
   void ReplayAttackSetup();
   void ReplayAttackLoop();

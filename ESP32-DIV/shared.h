@@ -12,12 +12,18 @@ const uint16_t WHITE = 0xFFFF;
 const uint16_t LIGHT_GRAY = 0xC618;
 const uint16_t DARK_GRAY = 0x4208;
 
+#define TFT_DARKBLUE  0x3166  
+#define TFT_LIGHTBLUE 0x051F  
+#define TFTWHITE     0xFFFF  
+#define TFT_GRAY      0x8410  
+#define SELECTED_ICON_COLOR 0xfbe4
+
 void displaySubmenu();
 
-extern bool in_sub_menu;        // Declare in_sub_menu globally
-extern bool feature_active;     // Already declared in Touchscreen.h, but include for clarity
-extern bool submenu_initialized; // If used elsewhere, declare it here
-extern bool is_main_menu;       // If used, declare it here
+extern bool in_sub_menu;                
+extern bool feature_active;             
+extern bool submenu_initialized;        
+extern bool is_main_menu;              
 extern bool feature_exit_requested;
 
 
