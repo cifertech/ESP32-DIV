@@ -1,4 +1,4 @@
-Please export the files and replace them with your original libraries.
+Export the files and replace them with your original libraries.
 
 Existing libraries
 - TFT_eSPI
