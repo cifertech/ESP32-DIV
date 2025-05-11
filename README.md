@@ -140,7 +140,7 @@ Distributed under the MIT License. See LICENSE.txt for more information.
 <!-- Resources --> 
 ## 📎 Resources
 
-- 📖 [Project Blog](https://cifertech.net/esp32div-your-swiss-army-knife-for-wireless-networks)
+- 📖 [Project WiKi](https://github.com/cifertech/ESP32-DIV/wiki)
 - 🔗 [GitHub Releases](https://github.com/cifertech/ESP32-DIV/releases)
 - 🎥 [YouTube Video](https://youtu.be/jVp1zlcsrOY)
 
