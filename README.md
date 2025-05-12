@@ -105,7 +105,7 @@ ESP32DIV consists of two boards:
 
 ### 🧠 Main Board
 - **ESP32-U (16MB)** – Main microcontroller with Wi-Fi and BLE
-- **ILI9341 TFT Display** – 2.4" UI display
+- **ILI9341 TFT Display** – 2.8" UI display
 - **LF33** – 3.3V regulator
 - **TP4056** – Lithium battery charging and protection
 - **CP2102** – USB to serial for flashing
