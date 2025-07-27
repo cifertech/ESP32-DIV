@@ -220,7 +220,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
       }
     }
 
-    if (internalTemp = 53.33) {
+    if (internalTemp == 53.33) {
       tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_YELLOW);
     } else if (internalTemp > 55) {
       tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_RED);
