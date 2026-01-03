@@ -1,0 +1,108 @@
+================================================================================
+              ESP32-DIV FENRIR v2.0 - READY TO FLASH FIRMWARE
+================================================================================
+
+This package contains pre-compiled firmware ready to flash directly to your
+ESP32-DIV device. No compilation required!
+
+================================================================================
+                           INCLUDED FILES
+================================================================================
+
+  ESP32-DIV.bin       - Main firmware (1.9MB)
+  bootloader.bin      - ESP32 bootloader
+  partitions.bin      - Partition table (huge_app scheme)
+  boot_app0.bin       - Boot application
+
+================================================================================
+                      OPTION 1: ESP WEB FLASHER (EASIEST)
+================================================================================
+
+1. Go to: https://esp.huhn.me/
+2. Connect your ESP32-DIV via USB
+3. Click "Connect" and select your COM port
+4. Add these files with their addresses:
+
+   Address      File
+   -------      ----
+   0x1000       bootloader.bin
+   0x8000       partitions.bin
+   0xe000       boot_app0.bin
+   0x10000      ESP32-DIV.bin
+
+5. Click "Program"
+6. Wait for completion, device will reboot automatically
+
+================================================================================
+                    OPTION 2: ESPTOOL (COMMAND LINE)
+================================================================================
+
+WINDOWS:
+--------
+1. Install Python: https://www.python.org/downloads/
+2. Install esptool: pip install esptool
+3. Find your COM port (Device Manager > Ports)
+4. Run this command (replace COM3 with your port):
+
+   esptool.py --chip esp32 --port COM3 --baud 921600 write_flash ^
+     0x1000 bootloader.bin ^
+     0x8000 partitions.bin ^
+     0xe000 boot_app0.bin ^
+     0x10000 ESP32-DIV.bin
+
+MAC / LINUX:
+------------
+1. Install esptool: pip3 install esptool
+2. Find your port: ls /dev/cu.* (Mac) or ls /dev/ttyUSB* (Linux)
+3. Run this command (replace port as needed):
+
+   esptool.py --chip esp32 --port /dev/cu.usbserial-0001 --baud 921600 write_flash \
+     0x1000 bootloader.bin \
+     0x8000 partitions.bin \
+     0xe000 boot_app0.bin \
+     0x10000 ESP32-DIV.bin
+
+================================================================================
+                    OPTION 3: ARDUINO IDE
+================================================================================
+
+1. Open Arduino IDE
+2. Go to: Sketch > Export Compiled Binary (but we already did this for you!)
+3. Or use: Tools > ESP32 Sketch Data Upload with the .bin files
+
+================================================================================
+                         TROUBLESHOOTING
+================================================================================
+
+"Failed to connect":
+  - Hold BOOT button while connecting
+  - Try different USB cable (data cable, not charge-only)
+  - Check drivers are installed
+
+"Wrong chip":
+  - Make sure you select ESP32 (not ESP8266 or ESP32-S2)
+
+"Timeout":
+  - Reduce baud rate to 115200
+
+After flashing:
+  - Press RESET button or unplug/replug USB
+  - Device should show ESP32-DIV logo on screen
+
+================================================================================
+                            FLASH ADDRESSES
+================================================================================
+
+Address    Size       Description
+-------    ----       -----------
+0x1000     18KB       Bootloader
+0x8000     3KB        Partition Table
+0xe000     8KB        Boot App
+0x10000    1.9MB      Main Firmware (ESP32-DIV)
+
+Total: ~2MB of 4MB flash used
+
+================================================================================
+                    ESP32-DIV FENRIR v2.0 - January 2026
+                         HaleHound Security Division
+================================================================================
