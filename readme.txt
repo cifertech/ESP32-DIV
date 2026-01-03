@@ -318,7 +318,7 @@ Build Statistics:
 ================================================================================
 
 Original Firmware: CiferTech
-Upgrades & Audit:  HaleHound - JMFH (FENRIR)
+Upgrades & Audit:  HaleHound Security (FENRIR Division)
 Date:              January 3, 2026
 
 New Features Added:
