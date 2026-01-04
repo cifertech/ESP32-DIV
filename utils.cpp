@@ -139,11 +139,13 @@ float lastBatteryVoltage = 0.0;
 
 float readBatteryVoltage() {
   static bool adcInitialized = false;
+  static unsigned long lastDebugPrint = 0;
 
   // Initialize ADC attenuation on first call (11dB for 0-3.3V range)
   if (!adcInitialized) {
     analogSetPinAttenuation(36, ADC_11db);
     adcInitialized = true;
+    Serial.println("[BATTERY] ADC initialized on GPIO36 with 11dB attenuation");
   }
 
   const int sampleCount = 16;  // More samples for better accuracy
@@ -157,6 +159,16 @@ float readBatteryVoltage() {
   float avgMv = (float)sum / sampleCount;
   // Voltage divider ratio is 2:1, so multiply by 2 to get actual battery voltage
   float voltage = (avgMv / 1000.0) * 2.0;
+
+  // DEBUG: Print battery info every 5 seconds to help diagnose issues
+  if (millis() - lastDebugPrint > 5000) {
+    Serial.printf("[BATTERY] Raw mV: %.1f, Voltage: %.2fV, Expected range: 3.0-4.2V\n", avgMv, voltage);
+    if (avgMv < 100) {
+      Serial.println("[BATTERY] WARNING: Very low reading - check GPIO36 wiring to battery divider!");
+    }
+    lastDebugPrint = millis();
+  }
+
   return voltage;
 }
 

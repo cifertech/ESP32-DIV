@@ -17,6 +17,16 @@
 extern TFT_eSPI tft;
 extern PCF8574 pcf;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Radio Switching Support - Pin 16 shared between CC1101 GDO0 and NRF24 CE
+// ═══════════════════════════════════════════════════════════════════════════
+namespace replayat {
+  extern RCSwitch mySwitch;           // RCSwitch instance for SubGHz receive
+  extern bool subghz_receive_active;  // Flag: true when CC1101 has pin 16 interrupt
+}
+
+// Cleanup function - call BEFORE switching FROM SubGHz TO 2.4GHz modes
+void cleanupSubGHz();
 
 #define XPT2046_IRQ   34
 #define XPT2046_MOSI  32

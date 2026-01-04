@@ -14,6 +14,13 @@
 
 namespace replayat {
 
+// DEBUG: Interrupt counter to verify pin 16 is receiving transitions from CC1101
+volatile unsigned long gdo0_interrupt_count = 0;
+volatile unsigned long gdo0_last_state = 0;
+void IRAM_ATTR gdo0DebugISR() {
+    gdo0_interrupt_count++;
+}
+
 #define EEPROM_SIZE 1440
 #define ADDR_VALUE 1280    // 4 bytes
 #define ADDR_BITLEN 1284   // 2 bytes
@@ -65,13 +72,30 @@ struct Profile {
 
 #define PROFILE_SIZE sizeof(Profile) // Size of the updated Profile struct
 #define ADDR_PROFILE_START 1300
-#define MAX_PROFILES 5
+#define MAX_PROFILES 4  // Fixed: EEPROM only has 140 bytes, each profile is 32 bytes
 #define ADDR_PROFILE_COUNT 0 
 
 int profileCount = 0;
 
 RCSwitch mySwitch = RCSwitch();
 bool subghz_receive_active = false;  // Flag to track if RCSwitch receive is enabled (for safe cleanup)
+
+// Cleanup function for switching FROM SubGHz TO 2.4GHz modes
+void cleanupSubGHz() {
+    if (subghz_receive_active) {
+        mySwitch.disableReceive();
+        subghz_receive_active = false;
+    }
+    ELECHOUSE_cc1101.setSidle();  // Put CC1101 in idle mode
+    SPI.end();                     // Release SPI bus
+    delay(10);
+    pinMode(27, OUTPUT);
+    digitalWrite(27, HIGH);        // Deselect CC1101 CSN
+    pinMode(16, INPUT);            // Release GDO0/RX pin for NRF24 CE
+    pinMode(26, INPUT);            // Release GDO2/TX pin
+    Serial.println("[SubGHz] Cleanup complete - radios released for 2.4GHz");
+}
+
 arduinoFFT FFTSUB = arduinoFFT();
 
 const uint16_t samplesSUB = 256; 
@@ -679,9 +703,9 @@ void saveProfile() {
 }
 
 void loadProfileCount() {
-    EEPROM.get(ADDR_PROFILE_START, profileCount);
-    if (profileCount > MAX_PROFILES) {
-        profileCount = MAX_PROFILES;  
+    EEPROM.get(ADDR_PROFILE_START - 4, profileCount);  // Fixed: was reading wrong address (profile data, not count)
+    if (profileCount > MAX_PROFILES || profileCount < 0) {
+        profileCount = 0;  // Reset to safe value if corrupted
     }
 }
 
@@ -816,10 +840,18 @@ void runUI() {
     }
 }
 
-void ReplayAttackSetup() {  
+void ReplayAttackSetup() {
   Serial.begin(115200);
-  
-  tft.fillScreen(TFT_BLACK); 
+
+  // NRF24 cleanup - release pins and SPI bus before CC1101 init
+  pinMode(17, OUTPUT);
+  digitalWrite(17, HIGH);        // Deselect NRF24 CSN
+  SPI.end();                      // Release SPI bus
+  delay(10);
+  pinMode(16, INPUT);            // Reconfigure pin 16 for CC1101 GDO0/RX
+  Serial.println("[SubGHz] NRF24 cleanup - SPI released for CC1101");
+
+  tft.fillScreen(TFT_BLACK);
   tft.setRotation(0);
 
   setupTouchscreen();
@@ -832,12 +864,32 @@ void ReplayAttackSetup() {
   EEPROM.get(ADDR_PROTO, receivedProtocol);
   EEPROM.get(ADDR_FREQ, currentFrequencyIndex);
 
+  // Validate EEPROM data - reset garbage values to sane defaults
+  // Bit length must be 1-64 (RCSwitch max), Protocol must be 1-12
+  if (receivedBitLength < 1 || receivedBitLength > 64) {
+      Serial.printf("[EEPROM] Invalid bitLength %d, resetting to 0\n", receivedBitLength);
+      receivedBitLength = 0;
+      receivedValue = 0;
+  }
+  if (receivedProtocol < 0 || receivedProtocol > 12) {
+      Serial.printf("[EEPROM] Invalid protocol %d, resetting to 0\n", receivedProtocol);
+      receivedProtocol = 0;
+  }
   // Validate frequency index
   if (currentFrequencyIndex < 0 || currentFrequencyIndex >= numFrequenciesReplay) {
+      Serial.printf("[EEPROM] Invalid freq index %d, resetting to 0\n", currentFrequencyIndex);
       currentFrequencyIndex = 0;
   }
 
-  // Initialize CC1101 - MATCHING ORIGINAL SEQUENCE
+  // Initialize CC1101 - USE setGDO() for proper async mode pin config!
+  // Per agent audit: In async serial mode (setCCMode(0)):
+  //   - GDO0 = TX data INPUT to CC1101 (ESP32 should be OUTPUT)
+  //   - GDO2 = RX data OUTPUT from CC1101 (ESP32 should be INPUT)
+  // The library's GDO_Set() correctly sets: GDO0=OUTPUT, GDO2=INPUT
+  // CRITICAL: GPIO16 may conflict with PSRAM on 16MB ESP32!
+  ELECHOUSE_cc1101.setGDO(RX_PIN, TX_PIN);  // GDO0=16 (TX), GDO2=26 (RX)
+  Serial.printf("[CC1101] GDO pins: GDO0=%d (TX-OUTPUT), GDO2=%d (RX-INPUT)\n", RX_PIN, TX_PIN);
+
   ELECHOUSE_cc1101.Init();
 
   // ========== CC1101 DIAGNOSTIC CHECK ==========
@@ -850,22 +902,56 @@ void ReplayAttackSetup() {
   Serial.printf("[CC1101] Frequency Index: %d\n", currentFrequencyIndex);
   Serial.printf("[CC1101] Saved Freq: %.2f MHz\n", subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
 
-  // NOTE: NOT calling setModulation or setRxBW here - using library defaults
-  // Library defaults: modulation=2 (ASK/OOK), RxBW=default
-  // updateDisplay() will tune to saved frequency
+  // EXPLICIT CC1101 configuration for SubGHz RX
+  ELECHOUSE_cc1101.setCCMode(0);      // Raw/RCSwitch mode (IOCFG0=0x0D for serial data output)
+  ELECHOUSE_cc1101.setModulation(2);  // ASK/OOK modulation
+  ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);  // Tune to saved freq
+  ELECHOUSE_cc1101.setRxBW(812.50);   // Wide bandwidth for better sensitivity
+  ELECHOUSE_cc1101.SetRx();           // Enter RX mode
 
-  ELECHOUSE_cc1101.SetRx();  // Start in RX mode on default freq (433.92 MHz)
-  Serial.println("[CC1101] SetRx() called - RX mode on default 433.92 MHz");
+  float actualFreq = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
+  Serial.printf("[CC1101] Configured: Freq=%.2f MHz, Mod=ASK, RxBW=812.5kHz, Mode=RX\n", actualFreq);
+
+  // Pin modes already set by setGDO() via GDO_Set():
+  // GDO0 (pin 16) = OUTPUT (for TX to CC1101)
+  // GDO2 (pin 26) = INPUT (for RX from CC1101)
+  // Just verify they're correct:
+  Serial.printf("[CC1101] Pin modes: GPIO%d=%s, GPIO%d=%s\n",
+                RX_PIN, "OUTPUT(TX)", TX_PIN, "INPUT(RX)");
 
   // Test RSSI read
+  delay(50);  // Let CC1101 settle in RX mode
   int testRssi = ELECHOUSE_cc1101.getRssi();
-  Serial.printf("[CC1101] Initial RSSI: %d dBm\n", testRssi);
+  byte mode = ELECHOUSE_cc1101.getMode();
+  Serial.printf("[CC1101] Initial RSSI: %d dBm, Mode: %d (should be 2=RX)\n", testRssi, mode);
+
+  // DEBUG: Read back IOCFG0 register to verify async serial data output is configured
+  // IOCFG0 should be 0x0D for async serial data (what RCSwitch needs)
+  // If it's 0x06 that means sync mode (wrong for RCSwitch)
+  byte iocfg0 = ELECHOUSE_cc1101.SpiReadReg(0x02);  // CC1101_IOCFG0 = 0x02
+  byte iocfg2 = ELECHOUSE_cc1101.SpiReadReg(0x00);  // CC1101_IOCFG2 = 0x00
+  byte pktctrl0 = ELECHOUSE_cc1101.SpiReadReg(0x08);  // CC1101_PKTCTRL0 = 0x08
+  Serial.printf("[CC1101] IOCFG0=0x%02X (need 0x0D), IOCFG2=0x%02X, PKTCTRL0=0x%02X (need 0x32)\n", iocfg0, iocfg2, pktctrl0);
+  if (iocfg0 != 0x0D) {
+      Serial.println("[CC1101] ERROR: IOCFG0 wrong! Forcing to 0x0D...");
+      ELECHOUSE_cc1101.SpiWriteReg(0x02, 0x0D);  // Force async serial data output
+      iocfg0 = ELECHOUSE_cc1101.SpiReadReg(0x02);
+      Serial.printf("[CC1101] IOCFG0 now=0x%02X\n", iocfg0);
+      ELECHOUSE_cc1101.SetRx();  // Re-enter RX mode after register change
+      Serial.println("[CC1101] Re-entered RX mode after IOCFG0 fix");
+  }
+
+  // DEBUG: Check GDO2 (pin 26) state - this is RX data output in async mode
+  Serial.printf("[CC1101] Pin %d (GDO2/RX) current state: %d\n", TX_PIN, digitalRead(TX_PIN));
   Serial.println("========================================\n");
 
-  mySwitch.enableReceive(RX_PIN);
+  // CORRECT CONFIG per agent audit:
+  // In async serial mode, CC1101 OUTPUTS RX data on GDO2 (pin 26)
+  // RCSwitch should RECEIVE from GDO2, TRANSMIT to GDO0
+  mySwitch.enableReceive(TX_PIN);   // GDO2 = pin 26 = RX data FROM CC1101
   subghz_receive_active = true;
-  mySwitch.enableTransmit(TX_PIN);
-  Serial.printf("[RCSwitch] RX=%d, TX=%d\n", RX_PIN, TX_PIN);
+  mySwitch.enableTransmit(RX_PIN);  // GDO0 = pin 16 = TX data TO CC1101
+  Serial.printf("[RCSwitch] RX on GDO2=pin%d, TX on GDO0=pin%d\n", TX_PIN, RX_PIN);
       
   //ELECHOUSE_cc1101.setSpiPin (SCK, MISO, MOSI, CSN);
   //ELECHOUSE_cc1101.setSpiPin (18, 19, 23, 27);
@@ -972,10 +1058,39 @@ void ReplayAttackLoop() {
 
     // ========== LIVE DEBUG (bottom of screen) ==========
     static unsigned long lastRssiUpdate = 0;
-    if (millis() - lastRssiUpdate > 200) {
+    static unsigned long gdo2SampleCount = 0;
+    static unsigned long gdo2HighCount = 0;
+    static unsigned long gdo2TransitionCount = 0;
+    static int lastGdo2State = -1;
+
+    // Sample pin 26 (GDO2 - RX data output in async mode)
+    int currentPin = digitalRead(TX_PIN);  // GDO2 = pin 26 = RX data FROM CC1101
+    gdo2SampleCount++;
+    if (currentPin) gdo2HighCount++;
+    if (lastGdo2State != -1 && currentPin != lastGdo2State) {
+        gdo2TransitionCount++;
+    }
+    lastGdo2State = currentPin;
+
+    if (millis() - lastRssiUpdate > 500) {
         int liveRssi = ELECHOUSE_cc1101.getRssi();
         byte mode = ELECHOUSE_cc1101.getMode();  // 0=IDLE, 1=TX, 2=RX
 
+        // === UPDATE MAIN DISPLAY RSSI (top area) ===
+        // Clear and redraw RSSI in main display area (y=35 + 20 status bar offset)
+        tft.fillRect(170, 55, 50, 10, TFT_BLACK);  // Clear old RSSI value
+        tft.setCursor(170, 55);
+        tft.setTextSize(1);
+        if (liveRssi > -50) {
+            tft.setTextColor(TFT_GREEN);
+        } else if (liveRssi > -70) {
+            tft.setTextColor(TFT_YELLOW);
+        } else {
+            tft.setTextColor(TFT_WHITE);
+        }
+        tft.printf("%d", liveRssi);
+
+        // === UPDATE DEBUG AREA (bottom of screen) ===
         tft.fillRect(0, 305, 240, 15, TFT_BLACK);
         tft.setCursor(5, 305);
         tft.setTextSize(1);
@@ -992,11 +1107,16 @@ void ReplayAttackLoop() {
         } else {
             tft.setTextColor(TFT_WHITE);
         }
-        tft.printf("RSSI:%d ", liveRssi);
+        tft.printf("R:%d ", liveRssi);
 
-        // Frequency
-        tft.setTextColor(TFT_CYAN);
-        tft.printf("F:%.1f", subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
+        // Pin 26 (GDO2) state and transition count - RX data in async mode
+        tft.setTextColor(gdo2TransitionCount > 0 ? TFT_GREEN : TFT_RED);
+        tft.printf("P26:%d T:%lu", currentPin, gdo2TransitionCount);
+
+        // Serial debug with RCSwitch raw values
+        Serial.printf("[DEBUG] RSSI=%d GDO2=%d T=%lu avail=%d val=%lu bits=%u\n",
+                      liveRssi, currentPin, gdo2TransitionCount,
+                      mySwitch.available(), mySwitch.getReceivedValue(), mySwitch.getReceivedBitlength());
 
         lastRssiUpdate = millis();
     }
@@ -1435,6 +1555,15 @@ void runUI() {
 
 void saveSetup() {
     Serial.begin(115200);
+
+    // NRF24 cleanup - release pins and SPI bus before CC1101 init
+    pinMode(17, OUTPUT);
+    digitalWrite(17, HIGH);        // Deselect NRF24 CSN
+    SPI.end();                      // Release SPI bus
+    delay(10);
+    pinMode(16, INPUT);            // Reconfigure pin 16 for CC1101 GDO0/RX
+    Serial.println("[SubGHz] NRF24 cleanup - SPI released for CC1101");
+
     EEPROM.begin(EEPROM_SIZE);
     loadProfileCount();
     printProfiles();
@@ -1454,12 +1583,19 @@ void saveSetup() {
     drawStatusBar(currentBatteryVoltage, false);
     uiDrawn = false;
 
+    // Configure both GDO pins BEFORE Init()
+    // GDO0 (pin 16) = OUTPUT (TX data TO CC1101)
+    // GDO2 (pin 26) = INPUT (RX data FROM CC1101 in async mode)
+    ELECHOUSE_cc1101.setGDO(RX_PIN, TX_PIN);
     ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setCCMode(0);       // Async/RCSwitch mode (IOCFG0=0x0D)
+    ELECHOUSE_cc1101.setModulation(2);   // ASK/OOK
     ELECHOUSE_cc1101.SetRx();
 
-    mySwitch.enableReceive(RX_PIN);
+    // In async serial mode, CC1101 OUTPUTS RX data on GDO2 (pin 26)
+    mySwitch.enableReceive(TX_PIN);      // GDO2 = pin 26 = RX data FROM CC1101
     replayat::subghz_receive_active = true;
-    mySwitch.enableTransmit(TX_PIN);
+    mySwitch.enableTransmit(RX_PIN);     // GDO0 = pin 16 = TX data TO CC1101
 
     updateDisplay();
 }
@@ -1578,6 +1714,8 @@ void updateDisplay() {
         // Blinking sweep indicator
         if (jammingRunning && millis() % 1000 < 500) {
             tft.fillCircle(220, 22 + yshift, 2, TFT_GREEN);
+        } else {
+            tft.fillCircle(220, 22 + yshift, 2, TFT_BLACK);  // Clear when off
         }
     } else {
         tft.setTextColor(TFT_WHITE);
@@ -1796,35 +1934,45 @@ bool rmtNoiseBurst() {
 }
 
 /**
- * Run continuous RMT-based noise jamming
- * Generates random RF pulses with hardware-precise timing
+ * DEPRECATED: This function is no longer used.
+ * RMT noise jamming is now handled inline in subjammerLoop() via rmtNoiseBurst()
+ * Keeping code here for reference but it's not called anywhere.
+ * TODO: Remove in future cleanup or integrate if blocking mode is needed
  */
-void runRmtNoiseJam() {
-    Serial.println("[JAMMER-RMT] Starting hardware-timed noise jamming");
-    Serial.flush();
-
-    while (jammingRunning && !continuousMode) {
-        // Generate and transmit one noise burst
-        if (!rmtNoiseBurst()) {
-            break;  // User stopped jamming
-        }
-
-        // Quick button check between bursts
-        int btnUpState = pcf.digitalRead(BTN_UP);
-        if (btnUpState == LOW) {
-            // User pressed stop
-            break;
-        }
-    }
-
-    Serial.println("[JAMMER-RMT] Noise jamming stopped");
-    Serial.flush();
-}
+// void runRmtNoiseJam() {
+//     Serial.println("[JAMMER-RMT] Starting hardware-timed noise jamming");
+//     Serial.flush();
+//
+//     while (jammingRunning && !continuousMode) {
+//         // Generate and transmit one noise burst
+//         if (!rmtNoiseBurst()) {
+//             break;  // User stopped jamming
+//         }
+//
+//         // Quick button check between bursts
+//         int btnUpState = pcf.digitalRead(BTN_UP);
+//         if (btnUpState == LOW) {
+//             // User pressed stop
+//             break;
+//         }
+//     }
+//
+//     Serial.println("[JAMMER-RMT] Noise jamming stopped");
+//     Serial.flush();
+// }
 
 void subjammerSetup() {
     Serial.begin(115200);
     Serial.println("[JAMMER-SETUP] Initializing Sub-GHz Jammer...");
     Serial.flush();
+
+    // NRF24 cleanup - release pins and SPI bus before CC1101 init
+    pinMode(17, OUTPUT);
+    digitalWrite(17, HIGH);        // Deselect NRF24 CSN
+    SPI.end();                      // Release SPI bus
+    delay(10);
+    pinMode(16, INPUT);            // Reconfigure pin 16 for CC1101 GDO0/RX
+    Serial.println("[SubGHz] NRF24 cleanup - SPI released for CC1101");
 
     // Initialize RMT for hardware-timed noise jamming (shared with subbrute)
     if (!::subbrute::initRMT()) {
@@ -1834,12 +1982,15 @@ void subjammerSetup() {
     }
     Serial.flush();
 
+    // Set GDO0 pin BEFORE Init()
+    ELECHOUSE_cc1101.setGDO0(RX_PIN);
     ELECHOUSE_cc1101.Init();
     ELECHOUSE_cc1101.setModulation(2);  // ASK/OOK modulation (0=2-FSK, 1=GFSK, 2=ASK, 3=4-FSK, 4=MSK)
     ELECHOUSE_cc1101.setRxBW(500.0);
     ELECHOUSE_cc1101.setPA(12);         // Max power +12 dBm
     ELECHOUSE_cc1101.setMHZ(targetFrequency);
-    ELECHOUSE_cc1101.SetTx();
+    // NOTE: Don't call SetTx() here - wait for user to press start button
+    // SetTx() is called in subjammerLoop when jammingRunning becomes true
 
     randomSeed(analogRead(0));
 
@@ -1922,6 +2073,7 @@ void subjammerLoop() {
                 currentFrequencyIndex = (currentFrequencyIndex + 1) % numFrequencies;
                 targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
                 ELECHOUSE_cc1101.setMHZ(targetFrequency);
+                ELECHOUSE_cc1101.SetTx();  // Re-enter TX mode after frequency change
                 Serial.print("Sweeping: ");
                 Serial.print(targetFrequency);
                 Serial.println(" MHz");
@@ -1929,8 +2081,8 @@ void subjammerLoop() {
                 lastSweepTime = millis();
             }
         }
-
-        ELECHOUSE_cc1101.SetTx();
+        // NOTE: SetTx() is called when jamming starts (button handler) and after freq change (above)
+        // No need to call it every loop iteration - wastes SPI cycles
 
         if (continuousMode) {
             // Continuous carrier mode - hold TX_PIN HIGH
@@ -2971,9 +3123,19 @@ void runUI() {
 void subBruteSetup() {
     Serial.begin(115200);
 
+    // NRF24 cleanup - release pins and SPI bus before CC1101 init
+    pinMode(17, OUTPUT);
+    digitalWrite(17, HIGH);        // Deselect NRF24 CSN
+    SPI.end();                      // Release SPI bus
+    delay(10);
+    pinMode(16, INPUT);            // Reconfigure pin 16 for CC1101 GDO0/RX
+    Serial.println("[SubGHz] NRF24 cleanup - SPI released for CC1101");
+
     // FIX BUG 5: Clean up any leftover De Bruijn state from previous run
     cleanupDeBruijn();
 
+    // Set GDO0 pin BEFORE Init()
+    ELECHOUSE_cc1101.setGDO0(RX_PIN);
     ELECHOUSE_cc1101.Init();
     ELECHOUSE_cc1101.setModulation(2);  // ASK/OOK
     ELECHOUSE_cc1101.setMHZ(protocols[currentProtocol].frequency / 1000000.0);

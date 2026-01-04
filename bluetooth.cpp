@@ -1089,6 +1089,23 @@ void blejamSetup() {
 
   setupTouchscreen();
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SubGHz Cleanup - Release pin 16 and SPI bus before NRF24 init
+  // Pin 16 is shared: CC1101 GDO0/RX (with interrupt) AND NRF24 CE (GPIO output)
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (replayat::subghz_receive_active) {
+      replayat::mySwitch.disableReceive();     // Detach interrupt from pin 16
+      ELECHOUSE_cc1101.setSidle();             // Put CC1101 in idle mode
+      replayat::subghz_receive_active = false; // Reset flag
+      Serial.println("[BLEJammer] SubGHz cleanup - Pin 16 released");
+  }
+
+  // ALWAYS reset SPI bus and deselect CC1101 before NRF24 init
+  SPI.end();
+  delay(10);
+  pinMode(27, OUTPUT);
+  digitalWrite(27, HIGH);        // Deselect CC1101 CSN
+
   float currentBatteryVoltage = readBatteryVoltage();
   drawStatusBar(currentBatteryVoltage, false);
   updateTFT();
@@ -1926,10 +1943,11 @@ void scannerLoop() {
     scanChannels();
     outputChannels();
     display();
-    delay(5);  
-    }
+    delay(5);
   }
 }
+
+}  // namespace Scanner
 
 
 /*
@@ -2795,6 +2813,23 @@ void checkButtons() {
 void wlanjammerSetup() {
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SubGHz Cleanup - Release pin 16 and SPI bus before NRF24 init
+    // Pin 16 is shared: CC1101 GDO0/RX (with interrupt) AND NRF24 CE (GPIO output)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (replayat::subghz_receive_active) {
+        replayat::mySwitch.disableReceive();     // Detach interrupt from pin 16
+        ELECHOUSE_cc1101.setSidle();             // Put CC1101 in idle mode
+        replayat::subghz_receive_active = false; // Reset flag
+        Serial.println("[WLANJammer] SubGHz cleanup - Pin 16 released");
+    }
+
+    // ALWAYS reset SPI bus and deselect CC1101 before NRF24 init
+    SPI.end();
+    delay(10);
+    pinMode(27, OUTPUT);
+    digitalWrite(27, HIGH);        // Deselect CC1101 CSN
 
     // Initialize SPI for NRF24 - EXACT same as working Analyzer!
     SPI.begin(18, 19, 23, 17);

@@ -2,6 +2,7 @@
 #define BLECONFIG_H
 
 #include "utils.h"
+#include "subconfig.h"  // For cleanupSubGHz() and subghz_receive_active
 
 #include <TFT_eSPI.h> 
 #include <PCF8574.h>
