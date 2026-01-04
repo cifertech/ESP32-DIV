@@ -60,14 +60,15 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **Deauth Detector** – Monitor for Wi-Fi deauthentication attacks
 - **Wi-Fi Scanner** – List nearby Wi-Fi networks with extended details
 - **Wi-Fi Deauthentication Attack** - Send deauthentication frames to disrupt client connections
-- **Captive Portal** 
+- **Captive Portal**  - ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages, all before HTTPS/authentication
 
 #### 🔵 Bluetooth Tools
 - **BLE Jammer** – Disrupt BLE and classic Bluetooth channels
 - **BLE Spoofer** – Broadcast fake BLE advertisements
 - **Sour Apple** – Spoof Apple BLE advertisements (e.g., AirDrop)
 - **BLE Scanner** – Scan for hidden and visible BLE devices
-- **BLE Sniffer**
+- **BLE Sniffer** - Scans BLE advertisements, tracking MAC, RSSI, packet count, and last-seen time. Suspicious devices are highlighted
+- **BLE Rubber Ducky** - Acts as a BLE keyboard and executes SD card scripts. Keys are released and advertising stops on exit
 
 #### 📶 2.4GHz Tools
 - **2.4GHz Scanner** – Spectrum analyzer for 128 channels (Zigbee, custom RF, etc.)
@@ -77,6 +78,10 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **Replay Attack** – Capture and replay Sub-GHz commands (e.g., door remotes)
 - **Sub-GHz Jammer** – Disrupt Sub-GHz communication across various bands
 - **Saved Profiles** – Store and manage captured signal profiles
+
+#### 📺 Infrared (IR) Tools
+- **IR Replay Attack** - Capture real IR remote presses, visualize, replay, and save to SD
+- **IR Saved Profiles** - Browser for IR captures, preserving signal and carrier frequency for accurate retransmission
 
 <div>&nbsp;</div>
 
@@ -104,19 +109,23 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 ESP32DIV consists of two boards:
 
 ### 🧠 Main Board
-- **ESP32-U (16MB)** – Main microcontroller with Wi-Fi and BLE
+- **ESP32-S3** – Main microcontroller with Wi-Fi and BLE
 - **ILI9341 TFT Display** – 2.8" UI display
 - **LF33** – 3.3V regulator
-- **TP4056** – Lithium battery charging and protection
+- **IP5306** – Lithium battery charging and protection
 - **CP2102** – USB to serial for flashing
 - **PCF8574** – I/O expander for buttons
 - **SD Card Slot** – Stores logs and captured signals
 - **Push Buttons** – Navigation and interaction
 - **Antenna Connector** – External antenna support
+- **WS2812 NeoPixels** - Giving better feedback
+- **Buzzer** - It shares a GPIO with the battery voltage divider, so using it is optional.
 
 ### 🛡️ Shield
 - **3x NRF24 Modules** – 2.4GHz jamming and spoofing
 - **1x CC1101 Module** – Sub-GHz jamming and replay
+- **Multiple antennas**
+- **Infrared**
 
 <table>
   <tr>
