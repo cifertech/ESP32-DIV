@@ -1,45 +1,38 @@
 #ifndef WIFICONFIG_H
 #define WIFICONFIG_H
 
-#include "arduinoFFT.h"
-#include "utils.h"
-
-#include <WiFi.h>
-#include <TFT_eSPI.h> 
+#include <DNSServer.h>
+#include <EEPROM.h>
+#include <ESPmDNS.h>
 #include <PCF8574.h>
+#include <Preferences.h>
+#include <SD.h>
+#include <TFT_eSPI.h>
+#include <Update.h>
+#include <WebServer.h>
+#include <WiFi.h>
+#include <Wire.h>
 #include <XPT2046_Touchscreen.h>
+#include <cstddef>
+#include <esp_wifi.h>
+#include <nvs_flash.h>
+#include <stdio.h>
+#include <string>
+#include "WiFi.h"
+#include "arduinoFFT.h"
+#include "esp_event.h"
+#include "esp_event_loop.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_wifi_types.h"
+#include "nvs_flash.h"
+#include "shared.h"
+#include "utils.h"
 
 extern TFT_eSPI tft;
 extern PCF8574 pcf;
 
-#define XPT2046_IRQ   34
-#define XPT2046_MOSI  32
-#define XPT2046_MISO  35
-#define XPT2046_CLK   25
-#define XPT2046_CS    33
-
-#include "WiFi.h"
-#include <esp_wifi.h>
-#include "esp_wifi.h"
-#include "esp_wifi_types.h"
-#include "esp_system.h"
-#include "esp_event.h"
-#include "esp_event_loop.h"
-#include "nvs_flash.h"
-#include <nvs_flash.h>
-#include <stdio.h>
-#include <string>
-#include <cstddef>
-#include <Wire.h>
-#include <Preferences.h>
-#include <WebServer.h>
-#include <DNSServer.h>
-#include <EEPROM.h>
-#include <SD.h>
-#include <Update.h>
-#include <ESPmDNS.h>
 using namespace std;
-
 
 namespace PacketMonitor {
   void ptmSetup();
@@ -59,8 +52,8 @@ namespace DeauthDetect {
 namespace WifiScan {
   void wifiscanSetup();
   void wifiscanLoop();
+  int  getLastCount();
 }
-
 
 namespace CaptivePortal {
   void cportalSetup();
@@ -77,5 +70,4 @@ namespace FirmwareUpdate {
   void updateLoop();
 }
 
-
-#endif // WIFICONFIG_H
+#endif

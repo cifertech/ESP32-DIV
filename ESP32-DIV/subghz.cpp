@@ -1,22 +1,413 @@
-#include "subconfig.h"
-#include "shared.h"
-#include "icon.h"
+#include <algorithm>
+#include <vector>
+#include "KeyboardUI.h"
 #include "Touchscreen.h"
+#include "config.h"
+#include "icon.h"
+#include "shared.h"
 
-/*
- * ReplayAttack
- * 
- * 
- * 
- */
+
+namespace {
+  static constexpr const char* SUBGHZ_DIR = "/subghz";
+  static constexpr const char* SUBGHZ_EXPORT_PREFIX = "/subghz/profiles_";
+  static constexpr const char* SUBGHZ_CURRENT_PATH = "/subghz/profiles_current.bin";
+  static constexpr uint32_t SUBGHZ_EXPORT_MAGIC = 0x315A4753;
+
+  struct __attribute__((packed)) SubGhzProfile {
+    uint32_t frequency;
+    uint32_t value;
+    uint16_t bitLength;
+    uint16_t protocol;
+    char     name[16];
+  };
+
+  static constexpr uint16_t MAX_NAME_LENGTH = 16;
+  static constexpr uint16_t PROFILE_SIZE = sizeof(SubGhzProfile);
+
+  static constexpr uint16_t ADDR_VALUE = 1280;
+  static constexpr uint16_t ADDR_BITLEN = 1284;
+  static constexpr uint16_t ADDR_PROTO = 1286;
+  static constexpr uint16_t ADDR_FREQ = 1288;
+  static constexpr uint16_t ADDR_PROFILE_COUNT = 1296;
+  static constexpr uint16_t ADDR_PROFILE_START = 1300;
+  static constexpr uint16_t MAX_PROFILES = 5;
+
+  struct __attribute__((packed)) SubGhzExportHeader {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t count;
+    uint16_t profileSize;
+    uint16_t reserved;
+  };
+
+  static bool subghz_sd_mounted = false;
+  static bool subghzMountSD() {
+    if (subghz_sd_mounted) {
+      if (SD.exists("/")) return true;
+      subghz_sd_mounted = false;
+    }
+
+    #ifdef SD_CD
+    pinMode(SD_CD, INPUT_PULLUP);
+    if (digitalRead(SD_CD)) return false;
+    #endif
+
+    #ifdef SD_SCLK
+    #ifdef SD_MISO
+    #ifdef SD_MOSI
+    #ifdef SD_CS
+    SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+    #endif
+    #endif
+    #endif
+    #endif
+
+    #ifdef SD_CS
+    if (SD.begin(SD_CS)) { subghz_sd_mounted = true; return true; }
+    #endif
+
+    #ifdef SD_CS_PIN
+    #ifdef CC1101_CS
+    if (SD_CS_PIN != CC1101_CS) {
+      if (SD.begin(SD_CS_PIN)) { subghz_sd_mounted = true; return true; }
+    }
+    #else
+    if (SD.begin(SD_CS_PIN)) { subghz_sd_mounted = true; return true; }
+    #endif
+    #endif
+
+    return false;
+  }
+
+  static bool subghzEnsureDir(const char* dirPath) {
+    if (!subghzMountSD()) return false;
+    if (SD.exists(dirPath)) return true;
+    if (SD.mkdir(dirPath)) return true;
+    if (dirPath && dirPath[0] == '/') return SD.mkdir(dirPath + 1);
+    return false;
+  }
+
+  static void clearProfilesInEeprom() {
+
+    uint16_t zero = 0;
+    EEPROM.put(ADDR_PROFILE_COUNT, zero);
+    SubGhzProfile empty{};
+    for (uint16_t i = 0; i < MAX_PROFILES; i++) {
+      EEPROM.put(ADDR_PROFILE_START + (i * PROFILE_SIZE), empty);
+    }
+    EEPROM.commit();
+  }
+
+  static bool makeNextExportPath(String& outPath) {
+
+    for (uint16_t i = 0; i < 10000; i++) {
+      char buf[48];
+      snprintf(buf, sizeof(buf), "%s%04u.bin", SUBGHZ_EXPORT_PREFIX, (unsigned)i);
+      if (!SD.exists(buf)) { outPath = String(buf); return true; }
+    }
+    return false;
+  }
+
+  static bool findLatestExportPath(String& outPath) {
+
+    for (int i = 9999; i >= 0; i--) {
+      char buf[48];
+      snprintf(buf, sizeof(buf), "%s%04u.bin", SUBGHZ_EXPORT_PREFIX, (unsigned)i);
+      if (SD.exists(buf)) { outPath = String(buf); return true; }
+    }
+    return false;
+  }
+
+  static bool exportProfilesToSD(String& outPath, String* errOut = nullptr) {
+    if (!subghzEnsureDir(SUBGHZ_DIR)) {
+      if (errOut) *errOut = "SD not mounted";
+      return false;
+    }
+
+    uint16_t count = 0;
+    EEPROM.get(ADDR_PROFILE_COUNT, count);
+    if (count > MAX_PROFILES) count = MAX_PROFILES;
+
+    if (!makeNextExportPath(outPath)) {
+      if (errOut) *errOut = "No free filename";
+      return false;
+    }
+
+    File f = SD.open(outPath.c_str(), FILE_WRITE);
+    if (!f) {
+      if (errOut) *errOut = "Open failed";
+      return false;
+    }
+
+    SubGhzExportHeader h{};
+    h.magic = SUBGHZ_EXPORT_MAGIC;
+    h.version = 1;
+    h.count = count;
+    h.profileSize = PROFILE_SIZE;
+    h.reserved = 0;
+
+    bool ok = (f.write((const uint8_t*)&h, sizeof(h)) == sizeof(h));
+    for (uint16_t i = 0; ok && i < count; i++) {
+      SubGhzProfile p{};
+      int addr = ADDR_PROFILE_START + (i * PROFILE_SIZE);
+      EEPROM.get(addr, p);
+      ok = (f.write((const uint8_t*)&p, sizeof(p)) == sizeof(p));
+    }
+    f.close();
+
+    if (!ok && errOut) *errOut = "Write failed";
+    return ok;
+  }
+
+  static bool syncCurrentProfilesToSD(String* errOut = nullptr) {
+
+    if (!subghzEnsureDir(SUBGHZ_DIR)) {
+      if (errOut) *errOut = "SD not mounted";
+      return false;
+    }
+
+    uint16_t count = 0;
+    EEPROM.get(ADDR_PROFILE_COUNT, count);
+    if (count > MAX_PROFILES) count = MAX_PROFILES;
+
+    if (SD.exists(SUBGHZ_CURRENT_PATH)) SD.remove(SUBGHZ_CURRENT_PATH);
+    File f = SD.open(SUBGHZ_CURRENT_PATH, FILE_WRITE);
+    if (!f) {
+      if (errOut) *errOut = "Open failed";
+      return false;
+    }
+
+    SubGhzExportHeader h{};
+    h.magic = SUBGHZ_EXPORT_MAGIC;
+    h.version = 1;
+    h.count = count;
+    h.profileSize = PROFILE_SIZE;
+    h.reserved = 0;
+
+    bool ok = (f.write((const uint8_t*)&h, sizeof(h)) == sizeof(h));
+    for (uint16_t i = 0; ok && i < count; i++) {
+      SubGhzProfile p{};
+      int addr = ADDR_PROFILE_START + (i * PROFILE_SIZE);
+      EEPROM.get(addr, p);
+      ok = (f.write((const uint8_t*)&p, sizeof(p)) == sizeof(p));
+    }
+    f.close();
+    if (!ok && errOut) *errOut = "Write failed";
+    return ok;
+  }
+
+  static bool importProfilesFromSD(const String& path, String* errOut = nullptr) {
+    if (!subghzMountSD()) {
+      if (errOut) *errOut = "SD not mounted";
+      return false;
+    }
+    if (path.isEmpty() || !SD.exists(path.c_str())) {
+      if (errOut) *errOut = "File not found";
+      return false;
+    }
+
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f) {
+      if (errOut) *errOut = "Open failed";
+      return false;
+    }
+
+    SubGhzExportHeader h{};
+    if (f.read((uint8_t*)&h, sizeof(h)) != sizeof(h)) { f.close(); if (errOut) *errOut="Bad header"; return false; }
+    if (h.magic != SUBGHZ_EXPORT_MAGIC || h.version != 1) { f.close(); if (errOut) *errOut="Wrong file"; return false; }
+    if (h.profileSize != PROFILE_SIZE) { f.close(); if (errOut) *errOut="Size mismatch"; return false; }
+
+    uint16_t count = h.count;
+    if (count > MAX_PROFILES) count = MAX_PROFILES;
+
+    clearProfilesInEeprom();
+    for (uint16_t i = 0; i < count; i++) {
+      SubGhzProfile p{};
+      if (f.read((uint8_t*)&p, sizeof(p)) != sizeof(p)) { f.close(); if (errOut) *errOut="Read failed"; return false; }
+      p.name[MAX_NAME_LENGTH - 1] = '\0';
+      EEPROM.put(ADDR_PROFILE_START + (i * PROFILE_SIZE), p);
+    }
+    EEPROM.put(ADDR_PROFILE_COUNT, count);
+    EEPROM.commit();
+    f.close();
+    return true;
+  }
+
+  struct SubGhzFileEntry {
+    String path;
+    uint16_t count = 0;
+    bool isCurrent = false;
+  };
+
+  static bool readExportHeader(File& f, SubGhzExportHeader& out, String* errOut = nullptr) {
+    if (f.read((uint8_t*)&out, sizeof(out)) != sizeof(out)) { if (errOut) *errOut="Bad header"; return false; }
+    if (out.magic != SUBGHZ_EXPORT_MAGIC || out.version != 1) { if (errOut) *errOut="Wrong file"; return false; }
+    if (out.profileSize != PROFILE_SIZE) { if (errOut) *errOut="Size mismatch"; return false; }
+    return true;
+  }
+
+  static bool readProfileAt(const String& path, uint16_t localIndex, SubGhzProfile& out, String* errOut = nullptr) {
+    if (!subghzMountSD()) { if (errOut) *errOut="SD not mounted"; return false; }
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f) { if (errOut) *errOut="Open failed"; return false; }
+    SubGhzExportHeader h{};
+    if (!readExportHeader(f, h, errOut)) { f.close(); return false; }
+    uint16_t count = h.count; if (count > MAX_PROFILES) count = MAX_PROFILES;
+    if (localIndex >= count) { f.close(); if (errOut) *errOut="Index OOR"; return false; }
+    uint32_t off = (uint32_t)sizeof(SubGhzExportHeader) + (uint32_t)localIndex * (uint32_t)PROFILE_SIZE;
+    if (!f.seek(off)) { f.close(); if (errOut) *errOut="Seek failed"; return false; }
+    if (f.read((uint8_t*)&out, sizeof(out)) != sizeof(out)) { f.close(); if (errOut) *errOut="Read failed"; return false; }
+    out.name[MAX_NAME_LENGTH - 1] = '\0';
+    f.close();
+    return true;
+  }
+
+  static bool listAllProfileFiles(std::vector<SubGhzFileEntry>& out, String* errOut = nullptr) {
+    out.clear();
+    if (!subghzMountSD()) { if (errOut) *errOut="SD not mounted"; return false; }
+    if (!SD.exists(SUBGHZ_DIR)) { if (errOut) *errOut="No /subghz"; return false; }
+    File d = SD.open(SUBGHZ_DIR);
+    if (!d) { if (errOut) *errOut="Open dir failed"; return false; }
+
+    for (;;) {
+      File f = d.openNextFile();
+      if (!f) break;
+      if (f.isDirectory()) { f.close(); continue; }
+      String name = String(f.name());
+
+      String fullPath = String(SUBGHZ_DIR) + "/" + name;
+
+      bool isCurrent = (name == "profiles_current.bin");
+      bool isArchive = name.startsWith("profiles_") && name.endsWith(".bin") && !isCurrent;
+      if (!isCurrent && !isArchive) { f.close(); continue; }
+
+      SubGhzExportHeader h{};
+      String herr;
+      bool ok = readExportHeader(f, h, &herr);
+      f.close();
+      if (!ok) continue;
+
+      uint16_t cnt = h.count;
+      if (cnt > MAX_PROFILES) cnt = MAX_PROFILES;
+      if (cnt == 0) continue;
+
+      SubGhzFileEntry e;
+      e.path = fullPath;
+      e.count = cnt;
+      e.isCurrent = isCurrent;
+      out.push_back(e);
+    }
+    d.close();
+
+    std::sort(out.begin(), out.end(), [](const SubGhzFileEntry& a, const SubGhzFileEntry& b) {
+      if (a.isCurrent != b.isCurrent) return a.isCurrent > b.isCurrent;
+      return a.path > b.path;
+    });
+    return true;
+  }
+
+  static uint16_t totalProfilesInIndex(const std::vector<SubGhzFileEntry>& files) {
+    uint32_t total = 0;
+    for (auto& f : files) total += f.count;
+    if (total > 65535) total = 65535;
+    return (uint16_t)total;
+  }
+
+  static bool locateGlobalIndex(const std::vector<SubGhzFileEntry>& files, uint16_t globalIndex,
+                                String& outPath, uint16_t& outLocalIdx) {
+    uint32_t idx = globalIndex;
+    for (auto& fe : files) {
+      if (idx < fe.count) {
+        outPath = fe.path;
+        outLocalIdx = (uint16_t)idx;
+        return true;
+      }
+      idx -= fe.count;
+    }
+    return false;
+  }
+
+  static bool deleteProfileFromFile(const String& path, uint16_t localIndex, String* errOut = nullptr) {
+    if (!subghzMountSD()) { if (errOut) *errOut="SD not mounted"; return false; }
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f) { if (errOut) *errOut="Open failed"; return false; }
+    SubGhzExportHeader h{};
+    if (!readExportHeader(f, h, errOut)) { f.close(); return false; }
+    uint16_t count = h.count; if (count > MAX_PROFILES) count = MAX_PROFILES;
+    if (localIndex >= count) { f.close(); if (errOut) *errOut="Index OOR"; return false; }
+
+    SubGhzProfile buf[MAX_PROFILES]{};
+    for (uint16_t i = 0; i < count; i++) {
+      if (f.read((uint8_t*)&buf[i], sizeof(SubGhzProfile)) != sizeof(SubGhzProfile)) { f.close(); if (errOut) *errOut="Read failed"; return false; }
+      buf[i].name[MAX_NAME_LENGTH - 1] = '\0';
+    }
+    f.close();
+
+    for (uint16_t i = localIndex; i + 1 < count; i++) buf[i] = buf[i + 1];
+    count--;
+
+    if (SD.exists(path.c_str())) SD.remove(path.c_str());
+    File w = SD.open(path.c_str(), FILE_WRITE);
+    if (!w) { if (errOut) *errOut="Open write failed"; return false; }
+
+    SubGhzExportHeader nh{};
+    nh.magic = SUBGHZ_EXPORT_MAGIC;
+    nh.version = 1;
+    nh.count = count;
+    nh.profileSize = PROFILE_SIZE;
+    nh.reserved = 0;
+    bool ok = (w.write((const uint8_t*)&nh, sizeof(nh)) == sizeof(nh));
+    for (uint16_t i = 0; ok && i < count; i++) {
+      ok = (w.write((const uint8_t*)&buf[i], sizeof(SubGhzProfile)) == sizeof(SubGhzProfile));
+    }
+    w.close();
+    if (!ok && errOut) *errOut="Write failed";
+
+    if (ok && path.endsWith("profiles_current.bin")) {
+      importProfilesFromSD(path, nullptr);
+    }
+    return ok;
+  }
+}
+
+#ifdef TFT_BLACK
+#undef TFT_BLACK
+#endif
+#define TFT_BLACK FEATURE_BG
+
+#ifndef FEATURE_TEXT
+#define FEATURE_TEXT ORANGE
+#endif
+#ifndef FEATURE_WHITE
+#define FEATURE_WHITE 0xFFFF
+#endif
+
+#ifdef TFT_WHITE
+#undef TFT_WHITE
+#endif
+#define TFT_WHITE FEATURE_TEXT
+
+#ifdef WHITE
+#undef WHITE
+#endif
+#define WHITE FEATURE_WHITE
+
+#ifdef DARK_GRAY
+#undef DARK_GRAY
+#endif
+#define DARK_GRAY UI_FG
 
 namespace replayat {
 
 #define EEPROM_SIZE 1440
-#define ADDR_VALUE 1280    // 4 bytes
-#define ADDR_BITLEN 1284   // 2 bytes
-#define ADDR_PROTO 1286    // 2 bytes
-#define ADDR_FREQ 1288     // 4 bytes 
+
+#define ADDR_VALUE         1280
+#define ADDR_BITLEN        1284
+#define ADDR_PROTO         1286
+#define ADDR_FREQ          1288
+#define ADDR_PROFILE_COUNT 1296
+#define ADDR_PROFILE_START 1300
+#define MAX_PROFILES       5
 
 #define SCREEN_WIDTH  240
 #define SCREENHEIGHT 320
@@ -24,56 +415,37 @@ namespace replayat {
 
 static bool uiDrawn = false;
 
-#define MAX_NAME_LENGTH 16 // Maximum length for profile name (including null terminator)
+#define MAX_NAME_LENGTH 16
 
-// Keyboard layout (4 rows)
-const char* keyboardLayout[] = {
+const char* profileKeyboardRows[] = {
   "1234567890",
   "QWERTYUIOP",
   "ASDFGHJKL",
-  "ZXCVBNM<-" // '<' for backspace, '-' for clear
+  "ZXCVBNM<-"
 };
 
-// Random name suggestions for shuffle
 const char* randomNames[] = {
   "Signal", "Remote", "KeyFob", "GateOpener", "DoorLock",
   "RFTest", "Profile", "Control", "Switch", "Beacon"
 };
-const int numRandomNames = 10;
-int randomNameIndex = 0;
+const uint8_t numRandomNames = 10;
 
-// Keyboard dimensions
-const int keyWidth = 22;
-const int keyHeight = 22;
-const int keySpacing = 2;
-const int yOffsetStart = 95;
-
-// Cursor blink state
-static bool cursorState = true;
-static unsigned long lastCursorBlink = 0;
-const unsigned long cursorBlinkInterval = 500;
-
-struct Profile {
+struct __attribute__((packed)) Profile {
     uint32_t frequency;
-    unsigned long value;
-    int bitLength;
-    int protocol;
-    char name[MAX_NAME_LENGTH]; // Custom name field
+    uint32_t value;
+    uint16_t bitLength;
+    uint16_t protocol;
+    char name[MAX_NAME_LENGTH];
 };
 
-#define PROFILE_SIZE sizeof(Profile) // Size of the updated Profile struct
-#define ADDR_PROFILE_START 1300
-#define MAX_PROFILES 5
-#define ADDR_PROFILE_COUNT 0 
+#define PROFILE_SIZE sizeof(Profile)
 
-#define MAX_PROFILES 5         
-
-int profileCount = 0;
+uint16_t profileCount = 0;
 
 RCSwitch mySwitch = RCSwitch();
 arduinoFFT FFTSUB = arduinoFFT();
 
-const uint16_t samplesSUB = 256; 
+const uint16_t samplesSUB = 256;
 const double FrequencySUB = 5000;
 
 double attenuation_num = 10;
@@ -91,36 +463,103 @@ unsigned int colorcursor = 2016;
 
 int rssi;
 
-#define RX_PIN 16         
-#define TX_PIN 26 
+static constexpr uint8_t REPLAY_RX_PIN = SUBGHZ_RX_PIN;
+static constexpr uint8_t REPLAY_TX_PIN = SUBGHZ_TX_PIN;
 
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-#define BTN_UP     6
-#define BTN_DOWN   3
-
-unsigned long receivedValue = 0; 
-int receivedBitLength = 0;       
-int receivedProtocol = 0;       
-const int rssi_threshold = -75; 
+uint32_t receivedValue = 0;
+uint16_t receivedBitLength = 0;
+uint16_t receivedProtocol = 0;
+const int rssi_threshold = -75;
 
 static const uint32_t subghz_frequency_list[] = {
-    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,  
-    390000000, 418000000, 433075000, 433420000, 433920000, 434420000, 
+    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,
+    390000000, 418000000, 433075000, 433420000, 433920000, 434420000,
     434775000, 438900000, 868350000, 915000000, 925000000
 };
 
-int currentFrequencyIndex = 0; 
+uint16_t currentFrequencyIndex = 0;
 int yshift = 20;
 
+static bool autoScanEnabled = false;
+static uint16_t scanIndex = 0;
+static uint32_t lastHopMs = 0;
+static uint32_t lockUntilMs = 0;
+static constexpr uint32_t SCAN_DWELL_MS = 110;
+static constexpr uint32_t LOCK_HOLD_MS  = 2500;
+static constexpr uint32_t RSSI_LOCK_MS  = 1200;
+static constexpr int      RSSI_DETECT_THRESHOLD = -72;
+static constexpr int      RSSI_CLEAR_THRESHOLD  = -78;
+static constexpr uint32_t UI_SCAN_UPDATE_MS = 250;
+static uint32_t lastUiScanUpdateMs = 0;
+static bool     rssiHot = false;
+
+static uint32_t lastDetectAlertMs = 0;
+static uint16_t lastDetectAlertFreq = 0xFFFF;
+static uint32_t notifHideAtMs = 0;
+static bool notifActive = false;
+
+static constexpr uint8_t BUZZER_LEDC_CH = 7;
+static bool buzzerArmed = false;
+static uint32_t buzzerOffAtMs = 0;
+static void replayBeep(uint16_t hz = 2200, uint16_t ms = 60) {
+  #ifdef BUZZER_PIN
+  ledcSetup(BUZZER_LEDC_CH, 4000, 8);
+  ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
+  ledcWriteTone(BUZZER_LEDC_CH, hz);
+  buzzerArmed = true;
+  buzzerOffAtMs = millis() + ms;
+  #endif
+}
+
+static void replayBeepPoll() {
+  #ifdef BUZZER_PIN
+  if (!buzzerArmed) return;
+  if ((int32_t)(millis() - buzzerOffAtMs) < 0) return;
+  ledcWriteTone(BUZZER_LEDC_CH, 0);
+
+  ledcDetachPin(BUZZER_PIN);
+  buzzerArmed = false;
+  #endif
+}
+
+static void replayShowDetectNotice(const String& reason, int rssi = 0) {
+  uint32_t now = millis();
+
+  if (now - lastDetectAlertMs < 1200 && lastDetectAlertFreq == currentFrequencyIndex) return;
+  lastDetectAlertMs = now;
+  lastDetectAlertFreq = currentFrequencyIndex;
+
+  char msg[96];
+  float mhz = subghz_frequency_list[currentFrequencyIndex] / 1000000.0f;
+
+  snprintf(msg, sizeof(msg), "%s @ %.2f MHz | RSSI %d", reason.c_str(), mhz, rssi);
+  showNotificationActions("SubGHz Detected", msg, true);
+  replayBeep(reason == "DECODE" ? 2600 : 2000, 70);
+  notifActive = true;
+  notifHideAtMs = 0;
+}
+
+static inline uint16_t freqCount() {
+  return (uint16_t)(sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
+}
+
+static void tuneToIndex(uint16_t idx, bool persist = true) {
+  currentFrequencyIndex = idx % freqCount();
+  ELECHOUSE_cc1101.setSidle();
+  ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
+  ELECHOUSE_cc1101.SetRx();
+  if (persist) {
+    EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+    EEPROM.commit();
+  }
+}
 
 void updateDisplay() {
     uiDrawn = false;
 
-    tft.fillRect(0, 40, 240, 40, TFT_BLACK);  
+    tft.fillRect(0, 40, 240, 40, TFT_BLACK);
     tft.drawLine(0, 80, 240, 80, TFT_WHITE);
 
-    // Frequency
     tft.setCursor(5, 20 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("Freq:");
@@ -128,8 +567,16 @@ void updateDisplay() {
     tft.setCursor(50, 20 + yshift);
     tft.print(subghz_frequency_list[currentFrequencyIndex] / 1000000.0, 2);
     tft.print(" MHz");
-    
-    // Bit Length
+
+    tft.setCursor(175, 20 + yshift);
+    bool locked = (autoScanEnabled && lockUntilMs != 0 && (int32_t)(millis() - lockUntilMs) < 0);
+    tft.setTextColor(autoScanEnabled ? ORANGE : TFT_WHITE);
+    if (locked) {
+      tft.print("LOCK");
+    } else {
+      tft.print(autoScanEnabled ? "AUTO" : "MAN ");
+    }
+
     tft.setCursor(5, 35 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("Bit:");
@@ -137,15 +584,13 @@ void updateDisplay() {
     tft.setCursor(50, 35 + yshift);
     tft.printf("%d", receivedBitLength);
 
-    // RSSI
     tft.setCursor(130, 35 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("RSSI:");
     tft.setTextColor(TFT_WHITE);
     tft.setCursor(170, 35 + yshift);
-    tft.printf("%d", ELECHOUSE_cc1101.getRssi());    
+    tft.printf("%d", ELECHOUSE_cc1101.getRssi());
 
-    // Protocol
     tft.setCursor(130, 20 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("Ptc:");
@@ -153,7 +598,6 @@ void updateDisplay() {
     tft.setCursor(170, 20 + yshift);
     tft.printf("%d", receivedProtocol);
 
-    // Received Value
     tft.setCursor(5, 50 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("Val:");
@@ -161,217 +605,79 @@ void updateDisplay() {
     tft.setCursor(50, 50 + yshift);
     tft.print(receivedValue);
 
-    ELECHOUSE_cc1101.setSidle();  
+    ELECHOUSE_cc1101.setSidle();
     ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
-    ELECHOUSE_cc1101.SetRx();     
-}
-
-
-void drawInputField(String& inputName) {
-  tft.fillRect(10, 55, 220, 25, TFT_DARKGREY);
-  tft.drawRect(9, 54, 222, 27, ORANGE);
-  tft.setTextColor(TFT_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(15, 60);
-  String displayText = inputName;
-  if (cursorState) {
-    displayText += "|";
-  }
-  tft.println(displayText);
-}
-
-void drawKeyboard(String& inputName) {
-  tft.fillRect(0, 37, SCREEN_WIDTH, SCREEN_HEIGHT - 37, TFT_BLACK);
-
-  // Instructional text
-  tft.setTextColor(ORANGE);
-  tft.setTextSize(1);
-  tft.setCursor(1, 235);
-  tft.println("[!] Set a name for the saved profile.");
-  tft.setCursor(23, 250);
-  tft.println("(max 15 chars)");
-
-  tft.setCursor(1, 275);
-  tft.println("[!] Shuffle: Suggests random profile");
-  tft.setCursor(23, 290);
-  tft.println("names for your signal.");
-
-  drawInputField(inputName);
-
-  // Draw keyboard
-  int yOffset = yOffsetStart;
-  for (int row = 0; row < 4; row++) {
-    int xOffset = 1;
-    for (int col = 0; col < strlen(keyboardLayout[row]); col++) {
-      tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, TFT_DARKGREY);
-      tft.setTextColor(TFT_WHITE);
-      tft.setTextSize(1);
-      tft.setCursor(xOffset + 6, yOffset + 5);
-      tft.print(keyboardLayout[row][col]);
-      xOffset += keyWidth + keySpacing;
-    }
-    yOffset += keyHeight + keySpacing;
-  }
-
-  // Draw buttons
-  tft.setTextColor(ORANGE);
-  tft.setTextSize(1);
-  tft.setTextDatum(MC_DATUM);
-
-  // Back Button
-  tft.fillRoundRect(5, 195, 70, 25, 4, DARK_GRAY);
-  tft.drawRoundRect(5, 195, 70, 25, 4, ORANGE);
-  tft.drawString("Back", 40, 208);
-
-  // Shuffle Button
-  tft.fillRoundRect(85, 195, 70, 25, 4, DARK_GRAY);
-  tft.drawRoundRect(85, 195, 70, 25, 4, ORANGE);
-  tft.drawString("Shuffle", 120, 208);
-
-  // OK Button
-  tft.fillRoundRect(165, 195, 70, 25, 4, DARK_GRAY);
-  tft.drawRoundRect(165, 195, 70, 25, 4, ORANGE);
-  tft.drawString("OK", 200, 208);
-
-  tft.setTextDatum(TL_DATUM); // Reset to top-left for other text
+    ELECHOUSE_cc1101.SetRx();
 }
 
 String getUserInputName() {
-  String inputName = "";
-  bool keyboardActive = true;
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1     = "[!] Set a name for the saved profile.";
+  cfg.titleLine2     = "(max 15 chars)";
+  cfg.rows           = profileKeyboardRows;
+  cfg.rowCount       = 4;
+  cfg.maxLen         = MAX_NAME_LENGTH - 1;
+  cfg.shuffleNames   = randomNames;
+  cfg.shuffleCount   = numRandomNames;
+  cfg.buttonsY       = 195;
+  cfg.backLabel      = "Back";
+  cfg.middleLabel    = "Shuffle";
+  cfg.okLabel        = "OK";
+  cfg.enableShuffle  = true;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg  = "Name cannot be empty!";
 
-  drawKeyboard(inputName);
+  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "");
 
-  while (keyboardActive) {
-    // Blink cursor
-    if (millis() - lastCursorBlink >= cursorBlinkInterval) {
-      cursorState = !cursorState;
-      drawInputField(inputName);
-      lastCursorBlink = millis();
-    }
+  if (!r.accepted) {
 
-    if (ts.touched()) {
-      TS_Point p = ts.getPoint();
-      int x = map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-      int y = map(p.y, 3800, 300, 0, SCREEN_HEIGHT - 1);
-
-      // Handle keyboard keys
-      int yOffset = yOffsetStart;
-      for (int row = 0; row < 4; row++) {
-        int xOffset = 1;
-        for (int col = 0; col < strlen(keyboardLayout[row]); col++) {
-          if (x >= xOffset && x <= xOffset + keyWidth && y >= yOffset && y <= yOffset + keyHeight) {
-            char c = keyboardLayout[row][col];
-            // Highlight key
-            tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, ORANGE);
-            tft.setTextColor(TFT_WHITE);
-            tft.setTextSize(1);
-            tft.setCursor(xOffset + 6, yOffset + 5);
-            tft.print(c);
-            delay(100); // Visual feedback
-            tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, TFT_DARKGREY);
-            tft.setTextColor(TFT_WHITE);
-            tft.setCursor(xOffset + 6, yOffset + 5);
-            tft.print(c);
-
-            if (c == '<') { // Backspace
-              if (inputName.length() > 0) {
-                inputName = inputName.substring(0, inputName.length() - 1);
-              }
-            } else if (c == '-') { // Clear
-              inputName = "";
-            } else if (inputName.length() < MAX_NAME_LENGTH - 1) {
-              inputName += c;
-            }
-            drawInputField(inputName);
-            delay(200); // Debounce
-          }
-          xOffset += keyWidth + keySpacing;
-        }
-        yOffset += keyHeight + keySpacing;
-      }
-
-      // Handle buttons
-      if (x >= 5 && x <= 75 && y >= 195 && y <= 210) { // Back
-        keyboardActive = false;
-        inputName = ""; // Cancel input
-        tft.fillScreen(TFT_BLACK);
-        updateDisplay();
-      }
-
-      if (x >= 85 && x <= 155 && y >= 195 && y <= 210) { // Shuffle
-        inputName = randomNames[randomNameIndex];
-        randomNameIndex = (randomNameIndex + 1) % numRandomNames;
-        drawInputField(inputName);
-        delay(200); // Debounce
-      }
-
-      if (x >= 165 && x <= 235 && y >= 195 && y <= 210) { // OK
-        if (inputName.length() > 0) {
-          keyboardActive = false;
-          return inputName;
-        } else {
-          tft.fillRect(10, 80, 220, 10, TFT_BLACK);
-          tft.setTextColor(TFT_RED);
-          tft.setTextSize(1);
-          tft.setCursor(10, 85);
-          tft.println("Name cannot be empty!");
-          tft.setTextColor(TFT_WHITE);
-          delay(500);
-          drawInputField(inputName); // Redraw to clear error
-          delay(200); // Debounce
-        }
-      }
-    }
-    delay(10);
+    tft.fillScreen(TFT_BLACK);
+    updateDisplay();
   }
-  return inputName; // Return empty string if cancelled
+  return r.text;
 }
 
-
-
-
 void sendSignal() {
-  
-    mySwitch.disableReceive(); 
+
+    mySwitch.disableReceive();
     delay(100);
-    mySwitch.enableTransmit(TX_PIN); 
+    mySwitch.enableTransmit(REPLAY_TX_PIN);
     ELECHOUSE_cc1101.SetTx();
 
     tft.fillRect(0,40,240,37, TFT_BLACK);
-    
+
     tft.setCursor(10, 30 + yshift);
     tft.print("Sending...");
     tft.setCursor(10, 40 + yshift);
     tft.print(receivedValue);
 
     mySwitch.setProtocol(receivedProtocol);
-    mySwitch.send(receivedValue, receivedBitLength); 
+    mySwitch.send(receivedValue, receivedBitLength);
 
     delay(500);
     tft.fillRect(0,40,240,37, TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.print("Done!");
 
-    ELECHOUSE_cc1101.SetRx(); 
-    mySwitch.disableTransmit(); 
+    ELECHOUSE_cc1101.SetRx();
+    mySwitch.disableTransmit();
     delay(100);
-    mySwitch.enableReceive(RX_PIN);
-    
+    mySwitch.enableReceive(REPLAY_RX_PIN);
+
     delay(500);
     updateDisplay();
 }
 
 void do_sampling() {
-  
+
   micro_s = micros();
 
-  #define ALPHA 0.2  
-  float ewmaRSSI = -50;  
+  #define ALPHA 0.2
+  float ewmaRSSI = -50;
 
 for (int i = 0; i < samplesSUB; i++) {
     int rssi = ELECHOUSE_cc1101.getRssi();
-    rssi += 100;  
+    rssi += 100;
 
     ewmaRSSI = (ALPHA * rssi) + ((1 - ALPHA) * ewmaRSSI);
 
@@ -383,33 +689,33 @@ for (int i = 0; i < samplesSUB; i++) {
 }
 
   double mean = 0;
-  
+
   for (uint16_t i = 0; i < samplesSUB; i++)
         mean += vRealSUB[i];
         mean /= samplesSUB;
   for (uint16_t i = 0; i < samplesSUB; i++)
         vRealSUB[i] -= mean;
-    
+
   micro_s = micros();
-  
-  FFTSUB.Windowing(vRealSUB, samplesSUB, FFT_WIN_TYP_HAMMING, FFT_FORWARD); 
-  FFTSUB.Compute(vRealSUB, vImagSUB, samplesSUB, FFT_FORWARD); 
-  FFTSUB.ComplexToMagnitude(vRealSUB, vImagSUB, samplesSUB); 
+
+  FFTSUB.Windowing(vRealSUB, samplesSUB, FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+  FFTSUB.Compute(vRealSUB, vImagSUB, samplesSUB, FFT_FORWARD);
+  FFTSUB.ComplexToMagnitude(vRealSUB, vImagSUB, samplesSUB);
 
 unsigned int left_x = 120;
-unsigned int graph_y_offset = 81; 
+unsigned int graph_y_offset = 81;
 int max_k = 0;
 
 for (int j = 0; j < samplesSUB >> 1; j++) {
-    int k = vRealSUB[j] / attenuation_num; 
+    int k = vRealSUB[j] / attenuation_num;
     if (k > max_k)
-        max_k = k; 
-    if (k > 127) k = 127; 
+        max_k = k;
+    if (k > 127) k = 127;
 
     unsigned int color = red[k] << 11 | green[k] << 5 | blue[k];
-    unsigned int vertical_x = left_x + j; 
+    unsigned int vertical_x = left_x + j;
 
-    tft.drawPixel(vertical_x, epochSUB + graph_y_offset, color); 
+    tft.drawPixel(vertical_x, epochSUB + graph_y_offset, color);
 }
 
 for (int j = 0; j < samplesSUB >> 1; j++) {
@@ -419,50 +725,76 @@ for (int j = 0; j < samplesSUB >> 1; j++) {
     if (k > 127) k = 127;
 
     unsigned int color = red[k] << 11 | green[k] << 5 | blue[k];
-    unsigned int mirrored_x = left_x - j; 
+    unsigned int mirrored_x = left_x - j;
     tft.drawPixel(mirrored_x, epochSUB + graph_y_offset, color);
 }
 
   double tattenuation = max_k / 127.0;
-  
+
   if (tattenuation > attenuation_num)
     attenuation_num = tattenuation;
-                     
+
     delay(10);
 }
 
 void readProfileCount() {
-    EEPROM.get(ADDR_PROFILE_START - sizeof(int), profileCount);
-    if (profileCount > MAX_PROFILES || profileCount < 0) {
-        profileCount = 0;  
-    }
+    EEPROM.get(ADDR_PROFILE_COUNT, profileCount);
+    if (profileCount > MAX_PROFILES) profileCount = 0;
 }
 
 void saveProfile() {
-    readProfileCount();  
+    readProfileCount();
+
+    if (profileCount >= MAX_PROFILES) {
+
+        String err, outPath;
+        if (exportProfilesToSD(outPath, &err)) {
+            clearProfilesInEeprom();
+            profileCount = 0;
+
+            syncCurrentProfilesToSD(nullptr);
+        } else {
+            tft.fillScreen(TFT_BLACK);
+            tft.setCursor(10, 30 + yshift);
+            tft.setTextColor(UI_WARN);
+            tft.print("Storage full!");
+            tft.setCursor(10, 45 + yshift);
+            tft.setTextColor(TFT_WHITE);
+            tft.print("Insert SD / export fail");
+            tft.setCursor(10, 60 + yshift);
+            tft.print(err);
+            delay(2000);
+            updateDisplay();
+            float currentBatteryVoltage = readBatteryVoltage();
+            drawStatusBar(currentBatteryVoltage, true);
+            return;
+        }
+    }
 
     if (profileCount < MAX_PROFILES) {
-        // Get custom name from user
+
         String customName = getUserInputName();
 
         tft.setTextSize(1);
 
         Profile newProfile;
         newProfile.frequency = subghz_frequency_list[currentFrequencyIndex];
-        newProfile.value = receivedValue;
-        newProfile.bitLength = receivedBitLength;
-        newProfile.protocol = receivedProtocol;
+        newProfile.value = (uint32_t)receivedValue;
+        newProfile.bitLength = (uint16_t)receivedBitLength;
+        newProfile.protocol = (uint16_t)receivedProtocol;
         strncpy(newProfile.name, customName.c_str(), MAX_NAME_LENGTH - 1);
-        newProfile.name[MAX_NAME_LENGTH - 1] = '\0'; // Ensure null termination
+        newProfile.name[MAX_NAME_LENGTH - 1] = '\0';
 
         int addr = ADDR_PROFILE_START + (profileCount * PROFILE_SIZE);
-        EEPROM.put(addr, newProfile); 
+        EEPROM.put(addr, newProfile);
         EEPROM.commit();
 
-        profileCount++;  
+        profileCount++;
 
-        EEPROM.put(ADDR_PROFILE_START - sizeof(int), profileCount);
-        EEPROM.commit();  
+        EEPROM.put(ADDR_PROFILE_COUNT, profileCount);
+        EEPROM.commit();
+
+        syncCurrentProfilesToSD(nullptr);
 
         tft.fillScreen(TFT_BLACK);
         tft.setCursor(10, 30 + yshift);
@@ -479,18 +811,16 @@ void saveProfile() {
         tft.setCursor(10, 30 + yshift);
         tft.print("Profile storage full!");
     }
-    
+
     delay(2000);
     updateDisplay();
     float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, false);
+    drawStatusBar(currentBatteryVoltage, true);
 }
 
 void loadProfileCount() {
-    EEPROM.get(ADDR_PROFILE_START, profileCount);
-    if (profileCount > MAX_PROFILES) {
-        profileCount = MAX_PROFILES;  
-    }
+
+    readProfileCount();
 }
 
 void runUI() {
@@ -498,34 +828,35 @@ void runUI() {
     #define STATUS_BAR_Y_OFFSET 20
     #define STATUS_BAR_HEIGHT 16
     #define ICON_SIZE 16
-    #define ICON_NUM 5 // Increased to include the back icon
-    
-    static int iconX[ICON_NUM] = {90, 130, 170, 210, 10}; // Added back icon at x=10
+    #define ICON_NUM 6
+
+    static int iconX[ICON_NUM] = {90, 130, 170, 210, 50, 10};
     static int iconY = STATUS_BAR_Y_OFFSET;
-    
+
     static const unsigned char* icons[ICON_NUM] = {
-        bitmap_icon_sort_up_plus,    
-        bitmap_icon_sort_down_minus,      
-        bitmap_icon_antenna,    
+        bitmap_icon_sort_up_plus,
+        bitmap_icon_sort_down_minus,
+        bitmap_icon_antenna,
         bitmap_icon_floppy,
-        bitmap_icon_go_back // Added back icon
+        bitmap_icon_random,
+        bitmap_icon_go_back
     };
 
     if (!uiDrawn) {
         tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-        
+
         for (int i = 0; i < ICON_NUM; i++) {
-            if (icons[i] != NULL) {  
+            if (icons[i] != NULL) {
                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-            } 
+            }
         }
         tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
-        uiDrawn = true;               
+        uiDrawn = true;
     }
 
     static unsigned long lastAnimationTime = 0;
-    static int animationState = 0;  
+    static int animationState = 0;
     static int activeIcon = -1;
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -535,57 +866,60 @@ void runUI() {
 
             switch (activeIcon) {
                 case 0:
+                    autoScanEnabled = false;
                     currentFrequencyIndex = (currentFrequencyIndex + 1) % (sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
-                    ELECHOUSE_cc1101.setSidle();
-                    ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
-                    ELECHOUSE_cc1101.SetRx();
-                    EEPROM.put(ADDR_FREQ, currentFrequencyIndex);  
-                    EEPROM.commit();
+                    tuneToIndex(currentFrequencyIndex, true);
                     updateDisplay();
                     break;
-                case 1: 
+                case 1:
+                    autoScanEnabled = false;
                     currentFrequencyIndex = (currentFrequencyIndex - 1 + (sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]))) % (sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
-                    ELECHOUSE_cc1101.setSidle();
-                    ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
-                    ELECHOUSE_cc1101.SetRx();
-                    EEPROM.put(ADDR_FREQ, currentFrequencyIndex);  
-                    EEPROM.commit();
+                    tuneToIndex(currentFrequencyIndex, true);
                     updateDisplay();
                     break;
-                case 2: 
+                case 2:
                     sendSignal();
                     break;
-                case 3: 
+                case 3:
                     saveProfile();
                     break;
-                case 4: // Back icon action (exit to submenu)
-                    feature_exit_requested = true;
+                case 4:
+                    autoScanEnabled = !autoScanEnabled;
+                    scanIndex = currentFrequencyIndex;
+                    lastHopMs = 0;
+                    lockUntilMs = 0;
+                    lastUiScanUpdateMs = 0;
+                    rssiHot = false;
+                    updateDisplay();
                     break;
             }
         } else if (animationState == 2) {
             animationState = 0;
             activeIcon = -1;
         }
-        lastAnimationTime = millis();  
+        lastAnimationTime = millis();
     }
 
     static unsigned long lastTouchCheck = 0;
-    const unsigned long touchCheckInterval = 50; 
+    const unsigned long touchCheckInterval = 50;
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
-        if (ts.touched() && feature_active) { 
-            TS_Point p = ts.getPoint();
-            int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-            int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+        int x, y;
+        if (feature_active && readTouchXY(x, y)) {
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
                         if (icons[i] != NULL && animationState == 0) {
-                            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-                            animationState = 1;
-                            activeIcon = i;
-                            lastAnimationTime = millis();
+
+                            if (i == 5) {
+                                feature_exit_requested = true;
+                            } else {
+
+                                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                                animationState = 1;
+                                activeIcon = i;
+                                lastAnimationTime = millis();
+                            }
                         }
                         break;
                     }
@@ -596,44 +930,42 @@ void runUI() {
     }
 }
 
-void ReplayAttackSetup() {  
+void ReplayAttackSetup() {
   Serial.begin(115200);
-  
-  tft.fillScreen(TFT_BLACK); 
-  tft.setRotation(0);
 
-  setupTouchscreen();
+  ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 
-  ELECHOUSE_cc1101.Init(); 
-  
-  //ELECHOUSE_cc1101.setModulation(0);
-  //ELECHOUSE_cc1101.setRxBW(812);    
-  
+  ELECHOUSE_cc1101.Init();
+
+  ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
+
   ELECHOUSE_cc1101.SetRx();
 
-  mySwitch.enableReceive(RX_PIN); 
-  mySwitch.enableTransmit(TX_PIN); 
+  mySwitch.enableReceive(REPLAY_RX_PIN);
+  mySwitch.enableTransmit(REPLAY_TX_PIN);
+  mySwitch.setRepeatTransmit(8);
 
-  EEPROM.begin(EEPROM_SIZE);  
-  readProfileCount();        
+  EEPROM.begin(EEPROM_SIZE);
+  readProfileCount();
 
   EEPROM.get(ADDR_VALUE, receivedValue);
   EEPROM.get(ADDR_BITLEN, receivedBitLength);
   EEPROM.get(ADDR_PROTO, receivedProtocol);
   EEPROM.get(ADDR_FREQ, currentFrequencyIndex);
-      
-  //ELECHOUSE_cc1101.setSpiPin (SCK, MISO, MOSI, CSN);
-  //ELECHOUSE_cc1101.setSpiPin (18, 19, 23, 27);
 
-  //ELECHOUSE_cc1101.setGDO(gdo0, gdo2);
-  //ELECHOUSE_cc1101.setGDO(26, 16);
-  //mySwitch.enableReceive(16); 
-  //mySwitch.enableTransmit(26); 
-  
+  const uint16_t freqCount = (uint16_t)(sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
+  if (currentFrequencyIndex >= freqCount) currentFrequencyIndex = 0;
+
+  tuneToIndex(currentFrequencyIndex, false);
+
+    tft.fillScreen(TFT_BLACK);
+  tft.setRotation(2);
+
   pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
   pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
+  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
 
   sampling_period = round(1000000*(1.0/FrequencySUB));
 
@@ -650,16 +982,16 @@ void ReplayAttackSetup() {
   for (int i = 64; i < 96; i++) {
     red[i] = 31;
     green[i] = (i - 64) * 2;
-    blue[i] = 0;        
+    blue[i] = 0;
   }
   for (int i = 96; i < 128; i++) {
     red[i] = 31;
     green[i] = 63;
-    blue[i] = i - 96;        
+    blue[i] = i - 96;
   }
-  
+
    float currentBatteryVoltage = readBatteryVoltage();
-   drawStatusBar(currentBatteryVoltage, false);
+   drawStatusBar(currentBatteryVoltage, true);
    updateDisplay();
    uiDrawn = false;
 
@@ -667,175 +999,488 @@ void ReplayAttackSetup() {
 
 void ReplayAttackLoop() {
 
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+        feature_exit_requested = true;
+        return;
+    }
+
     runUI();
-    //updateStatusBar();
-  
+
     static unsigned long lastDebounceTime = 0;
     const unsigned long debounceDelay = 200;
 
-    int btnLeftState = pcf.digitalRead(BTN_LEFT);
-    int btnRightState = pcf.digitalRead(BTN_RIGHT);
-    int btnSelectState = pcf.digitalRead(BTN_UP);
-    int btndownState = pcf.digitalRead(BTN_DOWN);
-    
+    static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
+    const bool leftPressed  = isButtonPressed(BTN_LEFT);
+    const bool rightPressed = isButtonPressed(BTN_RIGHT);
+    const bool upPressed    = isButtonPressed(BTN_UP);
+    const bool downPressed  = isButtonPressed(BTN_DOWN);
+
+    replayBeepPoll();
+
+    if (notifActive && isNotificationVisible()) {
+      int x, y;
+      if (readTouchXY(x, y)) {
+        NotificationAction act = notificationHandleTouch(x, y);
+        if (act == NotificationAction::Save) {
+          notifActive = false;
+
+          tft.fillScreen(TFT_BLACK);
+          uiDrawn = false;
+          float v = readBatteryVoltage();
+          drawStatusBar(v, true);
+          runUI();
+          updateDisplay();
+
+          autoScanEnabled = false;
+          saveProfile();
+
+          tft.fillScreen(TFT_BLACK);
+          uiDrawn = false;
+          v = readBatteryVoltage();
+          drawStatusBar(v, true);
+          runUI();
+          updateDisplay();
+        } else if (act == NotificationAction::Ok || act == NotificationAction::Close) {
+          notifActive = false;
+
+          lastDetectAlertMs = millis();
+          lastDetectAlertFreq = currentFrequencyIndex;
+          lockUntilMs = millis() + 1500;
+          rssiHot = true;
+
+          tft.fillScreen(TFT_BLACK);
+          uiDrawn = false;
+          float v = readBatteryVoltage();
+          drawStatusBar(v, true);
+          runUI();
+          updateDisplay();
+        }
+      }
+
+      return;
+    } else if (notifActive && !isNotificationVisible()) {
+
+      notifActive = false;
+      tft.fillScreen(TFT_BLACK);
+      uiDrawn = false;
+      float v = readBatteryVoltage();
+      drawStatusBar(v, true);
+      runUI();
+      updateDisplay();
+    }
+
+    if (rightPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
+        autoScanEnabled = false;
+        lockUntilMs = 0;
+        rssiHot = false;
+        tuneToIndex((uint16_t)((currentFrequencyIndex + 1) % freqCount()), true);
+        updateDisplay();
+        lastDebounceTime = millis();
+    }
+    if (leftPressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
+        autoScanEnabled = false;
+        lockUntilMs = 0;
+        rssiHot = false;
+        tuneToIndex((uint16_t)((currentFrequencyIndex + freqCount() - 1) % freqCount()), true);
+        updateDisplay();
+        lastDebounceTime = millis();
+    }
+    if (upPressed && !prevUp && receivedValue != 0 && millis() - lastDebounceTime > debounceDelay) {
+
+        autoScanEnabled = false;
+        lockUntilMs = 0;
+        rssiHot = false;
+        sendSignal();
+        lastDebounceTime = millis();
+    }
+    if (downPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
+
+        autoScanEnabled = !autoScanEnabled;
+        scanIndex = currentFrequencyIndex;
+        lastHopMs = 0;
+        lockUntilMs = 0;
+        lastUiScanUpdateMs = 0;
+        rssiHot = false;
+        updateDisplay();
+        lastDebounceTime = millis();
+    }
+
+    prevLeft = leftPressed;
+    prevRight = rightPressed;
+    prevUp = upPressed;
+    prevDown = downPressed;
+
+    if (autoScanEnabled) {
+      uint32_t now = millis();
+      if (lockUntilMs != 0 && (int32_t)(now - lockUntilMs) < 0) {
+
+      } else {
+
+        if (lastHopMs == 0 || (now - lastHopMs) >= SCAN_DWELL_MS) {
+          scanIndex = (uint16_t)((scanIndex + 1) % freqCount());
+
+          tuneToIndex(scanIndex, false);
+          lastHopMs = now;
+
+          int rssi = ELECHOUSE_cc1101.getRssi();
+          if (!rssiHot && rssi > RSSI_DETECT_THRESHOLD) {
+            rssiHot = true;
+            lockUntilMs = now + RSSI_LOCK_MS;
+
+            EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+            EEPROM.commit();
+            replayShowDetectNotice("RSSI", rssi);
+          } else if (rssiHot && rssi < RSSI_CLEAR_THRESHOLD) {
+            rssiHot = false;
+          }
+
+          if (lastUiScanUpdateMs == 0 || (now - lastUiScanUpdateMs) >= UI_SCAN_UPDATE_MS) {
+            updateDisplay();
+            lastUiScanUpdateMs = now;
+          }
+        }
+      }
+    }
+
     do_sampling();
     delay(10);
     epochSUB++;
-    
+
     if (epochSUB >= tft.width())
       epochSUB = 0;
 
-    if (btnRightState == LOW && millis() - lastDebounceTime > debounceDelay) {
-        currentFrequencyIndex = (currentFrequencyIndex + 1) % (sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
-        ELECHOUSE_cc1101.setSidle();
-        ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
-        ELECHOUSE_cc1101.SetRx();
-        EEPROM.put(ADDR_FREQ, currentFrequencyIndex);  
-        EEPROM.commit();
-        updateDisplay();
-        lastDebounceTime = millis();
-    }
-    
-    if (btnLeftState == LOW && millis() - lastDebounceTime > debounceDelay) {       
-        currentFrequencyIndex = (currentFrequencyIndex - 1 + (sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]))) % (sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
-        ELECHOUSE_cc1101.setSidle();
-        ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
-        ELECHOUSE_cc1101.SetRx();
-        EEPROM.put(ADDR_FREQ, currentFrequencyIndex);  
-        EEPROM.commit();
-        updateDisplay();
-        lastDebounceTime = millis();
-    }
-
-    if (mySwitch.available()) { 
-        receivedValue = mySwitch.getReceivedValue(); 
-        receivedBitLength = mySwitch.getReceivedBitlength(); 
-        receivedProtocol = mySwitch.getReceivedProtocol(); 
+    if (mySwitch.available()) {
+        receivedValue = mySwitch.getReceivedValue();
+        receivedBitLength = mySwitch.getReceivedBitlength();
+        receivedProtocol = mySwitch.getReceivedProtocol();
 
         EEPROM.put(ADDR_VALUE, receivedValue);
         EEPROM.put(ADDR_BITLEN, receivedBitLength);
         EEPROM.put(ADDR_PROTO, receivedProtocol);
         EEPROM.commit();
-        
+
         updateDisplay();
-        mySwitch.resetAvailable(); 
+
+        if (autoScanEnabled) {
+          lockUntilMs = millis() + LOCK_HOLD_MS;
+          scanIndex = currentFrequencyIndex;
+          rssiHot = false;
+
+          EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+          EEPROM.commit();
+          replayShowDetectNotice("DECODE", ELECHOUSE_cc1101.getRssi());
+        }
+        mySwitch.resetAvailable();
     }
 
-     if (btnSelectState == LOW && receivedValue != 0 && millis() - lastDebounceTime > debounceDelay) {
-        sendSignal();
-        lastDebounceTime = millis();
-    }
-     if (pcf.digitalRead(BTN_DOWN) == LOW && millis() - lastDebounceTime > debounceDelay) {
-         saveProfile();
-         lastDebounceTime = millis();
-    }
-  } 
+  }
 }
-
-
-/*
- * 
- * Saved Profile
- * 
- * 
- */
 
 namespace SavedProfile {
 
 static bool uiDrawn = false;
 
-#define RX_PIN 16         
-#define TX_PIN 26        
+#define EEPROM_SIZE 1440
 
-#define EEPROM_SIZE 1440  // Increased to accommodate larger profiles
-#define ADDR_PROFILE_START 1300 
-#define MAX_PROFILES 5         
-#define MAX_NAME_LENGTH 16 // Maximum length for profile name (including null terminator)
+#define ADDR_PROFILE_COUNT 1296
+#define ADDR_PROFILE_START 1300
+#define MAX_PROFILES       5
+#define MAX_NAME_LENGTH    16
 
-#define BTN_UP     6
-#define BTN_DOWN   3
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-
-#define SCREEN_WIDTH 240 
-#define SCREEN_HEIGHT 320 
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 320
 
 RCSwitch mySwitch = RCSwitch();
-
-struct Profile {
+struct __attribute__((packed)) Profile {
     uint32_t frequency;
-    unsigned long value;
-    int bitLength;
-    int protocol;
-    char name[MAX_NAME_LENGTH]; // Custom name field
+    uint32_t value;
+    uint16_t bitLength;
+    uint16_t protocol;
+    char name[MAX_NAME_LENGTH];
 };
 
-#define PROFILE_SIZE sizeof(Profile) // Size of the updated Profile struct
+#define PROFILE_SIZE sizeof(Profile)
 
-int profileCount = 0;
-int currentProfileIndex = 0;
-int yshift = 40;
+uint16_t profileCount = 0;
+uint16_t currentProfileIndex = 0;
+
+int yshift = 16;
+
+static std::vector<SubGhzFileEntry> sdFiles;
+static uint16_t sdTotalProfiles = 0;
+static String sdLastErr = "";
+static String selectedPath = "";
+static uint16_t selectedLocalIdx = 0;
+static Profile selectedProfile{};
+static bool selectedValid = false;
+
+static constexpr uint8_t ITEMS_PER_PAGE = 7;
+static constexpr int LIST_X = 6;
+static constexpr int LIST_W = 228;
+
+static constexpr int LIST_Y = 64;
+static constexpr int ROW_H  = 18;
+static constexpr int BOT_H = 32;
+static constexpr int BOT_Y = 320 - BOT_H;
+
+static constexpr int UI_GAP_Y = 6;
+static constexpr int DETAILS_H = (BOT_Y - (LIST_Y + (ITEMS_PER_PAGE * ROW_H)) - (2 * UI_GAP_Y));
+static constexpr int DETAILS_Y = BOT_Y - UI_GAP_Y - DETAILS_H;
+static constexpr int BOT_GAP = 8;
+static constexpr int BOT_BTN_W = (240 - 10 - 10 - BOT_GAP) / 2;
+static constexpr int BOT_BTN_H = 24;
+static constexpr int BOT_BTN_Y = BOT_Y + 4;
+static constexpr int BOT_TX_X  = 10;
+static constexpr int BOT_DEL_X = BOT_TX_X + BOT_BTN_W + BOT_GAP;
+
+static uint16_t cachedPageStart = 0xFFFF;
+static SubGhzProfile cachedPage[ITEMS_PER_PAGE]{};
+static bool cachedOk[ITEMS_PER_PAGE]{};
+static bool cacheDirty = true;
+
+static bool deleteArmed = false;
+static uint32_t deleteArmUntilMs = 0;
+
+static void drawBottomButtons() {
+
+  tft.fillRect(0, BOT_Y, 240, BOT_H, TFT_BLACK);
+
+  FeatureUI::drawButtonRect(BOT_TX_X, BOT_BTN_Y, BOT_BTN_W, BOT_BTN_H,
+                            "Transmit", FeatureUI::ButtonStyle::Primary);
+
+  const bool armed = deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0;
+  const char* delLabel = armed ? "Delete?" : "Delete";
+  FeatureUI::drawButtonRect(BOT_DEL_X, BOT_BTN_Y, BOT_BTN_W, BOT_BTN_H,
+                            delLabel, FeatureUI::ButtonStyle::Danger);
+}
+
+static void refreshSdIndex(bool keepSelection = true) {
+    uint16_t oldIdx = currentProfileIndex;
+    String err;
+    if (!listAllProfileFiles(sdFiles, &err)) {
+        sdFiles.clear();
+        sdTotalProfiles = 0;
+        currentProfileIndex = 0;
+        selectedValid = false;
+        sdLastErr = err;
+        cacheDirty = true;
+        return;
+    }
+    sdLastErr = "";
+    sdTotalProfiles = totalProfilesInIndex(sdFiles);
+    if (sdTotalProfiles == 0) {
+        currentProfileIndex = 0;
+        selectedValid = false;
+        sdLastErr = "No profiles found";
+        cacheDirty = true;
+        return;
+    }
+    if (keepSelection) currentProfileIndex = oldIdx;
+    if (currentProfileIndex >= sdTotalProfiles) currentProfileIndex = (uint16_t)(sdTotalProfiles - 1);
+    selectedValid = false;
+    cacheDirty = true;
+}
+
+static bool loadSelectedFromSd(String* errOut = nullptr) {
+    if (sdTotalProfiles == 0) { selectedValid = false; return false; }
+    if (!locateGlobalIndex(sdFiles, currentProfileIndex, selectedPath, selectedLocalIdx)) {
+        selectedValid = false; if (errOut) *errOut="Locate failed"; return false;
+    }
+    SubGhzProfile p{};
+    if (!readProfileAt(selectedPath, selectedLocalIdx, p, errOut)) {
+        selectedValid = false; return false;
+    }
+
+    selectedProfile.frequency = p.frequency;
+    selectedProfile.value = p.value;
+    selectedProfile.bitLength = p.bitLength;
+    selectedProfile.protocol = p.protocol;
+    memcpy(selectedProfile.name, p.name, MAX_NAME_LENGTH);
+    selectedProfile.name[MAX_NAME_LENGTH - 1] = '\0';
+    selectedValid = true;
+    return true;
+}
+
+static uint16_t pageStartForIndex(uint16_t idx) {
+  return (uint16_t)((idx / ITEMS_PER_PAGE) * ITEMS_PER_PAGE);
+}
+
+static void ensurePageCache() {
+  if (sdTotalProfiles == 0) return;
+  uint16_t start = pageStartForIndex(currentProfileIndex);
+  if (!cacheDirty && cachedPageStart == start) return;
+  cachedPageStart = start;
+  for (uint8_t i = 0; i < ITEMS_PER_PAGE; i++) {
+    cachedOk[i] = false;
+    uint16_t globalIdx = (uint16_t)(start + i);
+    if (globalIdx >= sdTotalProfiles) continue;
+    String pth; uint16_t li = 0;
+    if (!locateGlobalIndex(sdFiles, globalIdx, pth, li)) continue;
+    String err;
+    cachedOk[i] = readProfileAt(pth, li, cachedPage[i], &err);
+    if (!cachedOk[i]) memset(&cachedPage[i], 0, sizeof(SubGhzProfile));
+  }
+  cacheDirty = false;
+}
+
+static void drawHeaderLine() {
+
+  int hy = 30 + yshift;
+  tft.fillRect(0, hy, 240, 14, TFT_BLACK);
+  tft.setCursor(10, hy);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.printf("Profile %d/%d", (int)currentProfileIndex + 1, (int)sdTotalProfiles);
+}
+
+static void drawRow(uint16_t pageStart, uint8_t row) {
+  uint16_t globalIdx = (uint16_t)(pageStart + row);
+  if (globalIdx >= sdTotalProfiles) return;
+
+  bool isSel = (globalIdx == currentProfileIndex);
+  int y = LIST_Y + (row * ROW_H);
+
+  uint16_t bg = isSel ? DARK_GRAY : TFT_BLACK;
+  uint16_t fg = isSel ? TFT_WHITE : TFT_LIGHTGREY;
+  tft.fillRect(LIST_X, y, LIST_W, ROW_H - 1, bg);
+  tft.setTextColor(fg, bg);
+  tft.setCursor(LIST_X + 2, y + 4);
+  tft.printf("%2d.", (int)globalIdx + 1);
+  tft.setCursor(LIST_X + 34, y + 4);
+
+  if (cachedOk[row]) {
+
+    char nameBuf[17];
+    memcpy(nameBuf, cachedPage[row].name, 16);
+    nameBuf[16] = '\0';
+    String nm = String(nameBuf);
+    if (nm.length() > 10) nm = nm.substring(0, 10);
+    tft.print(nm);
+
+    char fbuf[16];
+    snprintf(fbuf, sizeof(fbuf), "%.2f", cachedPage[row].frequency / 1000000.0);
+    int tw = tft.textWidth(fbuf, 1);
+    tft.setCursor(LIST_X + LIST_W - 4 - tw, y + 4);
+    tft.print(fbuf);
+  } else {
+    tft.print("<?>");
+  }
+}
+
+static void drawListPage(uint16_t pageStart) {
+  ensurePageCache();
+
+  tft.fillRect(LIST_X, LIST_Y, LIST_W, (ITEMS_PER_PAGE * ROW_H), TFT_BLACK);
+  for (uint8_t row = 0; row < ITEMS_PER_PAGE; row++) {
+    if ((uint16_t)(pageStart + row) >= sdTotalProfiles) break;
+    drawRow(pageStart, row);
+  }
+}
+
+static void drawDetails() {
+
+  tft.fillRect(0, DETAILS_Y, 240, (DETAILS_H + UI_GAP_Y), TFT_BLACK);
+
+  String err;
+  if (!selectedValid) loadSelectedFromSd(&err);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, DETAILS_Y);
+  if (!selectedValid) {
+    tft.print("Read failed: ");
+    tft.print(err);
+    return;
+  }
+
+  tft.print("Name: "); tft.print(selectedProfile.name);
+  tft.setCursor(10, DETAILS_Y + 14);
+  tft.printf("Freq: %.2f MHz  P:%d", selectedProfile.frequency / 1000000.0, selectedProfile.protocol);
+  tft.setCursor(10, DETAILS_Y + 28);
+  tft.printf("Val: %lu  Bit:%d", selectedProfile.value, selectedProfile.bitLength);
+
+  tft.setCursor(10, DETAILS_Y + 42);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (selectedPath.endsWith("profiles_current.bin")) {
+    tft.print("SRC: current");
+  } else {
+    tft.print("SRC: ");
+    int slash = selectedPath.lastIndexOf('/');
+    tft.print(slash >= 0 ? selectedPath.substring(slash + 1) : selectedPath);
+  }
+
+  if (deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0) {
+
+    int hintY = DETAILS_Y + 56;
+    if (hintY >= BOT_Y) hintY = BOT_Y - 12;
+    tft.setCursor(10, hintY);
+    tft.setTextColor(UI_WARN, TFT_BLACK);
+    tft.print("Press delete again to confirm");
+  }
+
+  drawBottomButtons();
+}
+
+static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw = false) {
+  if (sdTotalProfiles == 0) return;
+  uint16_t oldPage = pageStartForIndex(oldIndex);
+  uint16_t newPage = pageStartForIndex(currentProfileIndex);
+
+  tft.startWrite();
+  drawHeaderLine();
+
+  if (forceListRedraw || oldPage != newPage) {
+    drawListPage(newPage);
+  } else {
+
+    uint8_t oldRow = (uint8_t)(oldIndex - oldPage);
+    uint8_t newRow = (uint8_t)(currentProfileIndex - newPage);
+    ensurePageCache();
+
+    drawRow(newPage, oldRow);
+    drawRow(newPage, newRow);
+  }
+
+  drawDetails();
+  tft.endWrite();
+}
 
 void updateDisplay() {
-    tft.fillRect(0, 40, 240, 280, TFT_BLACK); // Adjusted to clear only necessary area
-    tft.setCursor(5, 5 + yshift);
-    tft.setTextColor(TFT_YELLOW);
-    tft.print("Saved Profiles");
 
-    if (profileCount == 0) {
+    tft.startWrite();
+    tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+
+    if (sdTotalProfiles == 0) {
         tft.setCursor(10, 35 + yshift);
         tft.setTextColor(TFT_WHITE);
-        tft.print("No profiles saved.");
+        tft.print("No profiles on SD.");
+        if (sdLastErr.length()) {
+          tft.setCursor(10, 48 + yshift);
+          tft.setTextColor(TFT_DARKGREY);
+          tft.print(sdLastErr);
+        }
         return;
     }
 
-    Profile selectedProfile;
-    int addr = ADDR_PROFILE_START + (currentProfileIndex * PROFILE_SIZE);
-    EEPROM.get(addr, selectedProfile);
-
-    if (selectedProfile.value == 0) {
-        tft.setCursor(10, 50 + yshift);
-        tft.setTextColor(TFT_WHITE);
-        tft.print("No valid profile.");
-        return;
-    }
-
-    tft.setCursor(10, 30 + yshift);
-    tft.setTextColor(TFT_CYAN);
-    tft.printf("Profile %d/%d", currentProfileIndex + 1, profileCount);
-
-    tft.setCursor(10, 50 + yshift);
-    tft.setTextColor(TFT_WHITE);
-    tft.print("Name: ");
-    tft.print(selectedProfile.name);
-
-    tft.setCursor(10, 70 + yshift);
-    tft.printf("Freq: %.2f MHz", selectedProfile.frequency / 1000000.0);
-
-    tft.setCursor(10, 90 + yshift);
-    tft.printf("Val: %lu", selectedProfile.value);
-
-    tft.setCursor(10, 110 + yshift);
-    tft.printf("BitLen: %d", selectedProfile.bitLength);
-
-    tft.setCursor(10, 130 + yshift);
-    tft.printf("Protocol: %d", selectedProfile.protocol);
+    drawHeaderLine();
+    drawListPage(pageStartForIndex(currentProfileIndex));
+    drawDetails();
+    tft.endWrite();
 }
 
 void transmitProfile(int index) {
-    Profile profileToSend;
-    int addr = ADDR_PROFILE_START + (index * PROFILE_SIZE);
-    EEPROM.get(addr, profileToSend);
+    (void)index;
+    String err;
+    loadSelectedFromSd(&err);
+    if (!selectedValid) return;
+    Profile profileToSend = selectedProfile;
 
     ELECHOUSE_cc1101.setSidle();
     ELECHOUSE_cc1101.setMHZ(profileToSend.frequency / 1000000.0);
 
-    mySwitch.disableReceive(); 
+    mySwitch.disableReceive();
     delay(100);
-    mySwitch.enableTransmit(TX_PIN); 
+    mySwitch.enableTransmit(SUBGHZ_TX_PIN);
     ELECHOUSE_cc1101.SetTx();
 
-    tft.fillRect(0, 40, 240, 280, TFT_BLACK); 
+    tft.fillRect(0, 40, 240, 280, TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.setTextColor(TFT_WHITE);
     tft.print("Sending ");
@@ -846,85 +1491,81 @@ void transmitProfile(int index) {
     tft.print(profileToSend.value);
 
     mySwitch.setProtocol(profileToSend.protocol);
-    mySwitch.send(profileToSend.value, profileToSend.bitLength); 
+    mySwitch.send(profileToSend.value, profileToSend.bitLength);
 
     delay(500);
     tft.fillRect(0, 40, 240, 280, TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.print("Done!");
 
-    ELECHOUSE_cc1101.SetRx(); 
-    mySwitch.disableTransmit(); 
+    ELECHOUSE_cc1101.SetRx();
+    mySwitch.disableTransmit();
     delay(100);
-    mySwitch.enableReceive(RX_PIN);
-    
+    mySwitch.enableReceive(SUBGHZ_RX_PIN);
+
     delay(500);
     updateDisplay();
 }
 
 void loadProfileCount() {
-    EEPROM.get(ADDR_PROFILE_START - 4, profileCount);
 
-    if (profileCount < 0 || profileCount > MAX_PROFILES) {
-        profileCount = 0;
-        EEPROM.put(ADDR_PROFILE_START - 4, profileCount);  
-        EEPROM.commit();  
-    }
+    refreshSdIndex(true);
 }
 
 void printProfiles() {
-    Serial.println("Saved Profiles:");
-    for (int i = 0; i < profileCount; i++) {
-        Profile savedProfile;
-        int addr = ADDR_PROFILE_START + (i * PROFILE_SIZE);
-        EEPROM.get(addr, savedProfile);
+    Serial.println("Saved Profiles (SD index):");
+    String err;
+    refreshSdIndex(false);
+    Serial.printf("Total profiles: %d\n", (int)sdTotalProfiles);
+    if (!sdTotalProfiles) return;
 
-        if (savedProfile.value != 0) {
-            Serial.printf("Profile %d:\n", i + 1);
-            Serial.printf("  Name: %s\n", savedProfile.name);
-            Serial.printf("  Frequency: %.2f MHz\n", savedProfile.frequency / 1000000.0);
-            Serial.printf("  Value: %lu\n", savedProfile.value);
-            Serial.printf("  Bit Length: %d\n", savedProfile.bitLength);
-            Serial.printf("  Protocol: %d\n", savedProfile.protocol);
-            Serial.println("-------------------------");
-        }
+    uint16_t n = sdTotalProfiles > 10 ? 10 : sdTotalProfiles;
+    for (uint16_t i = 0; i < n; i++) {
+      String pth; uint16_t li = 0;
+      if (!locateGlobalIndex(sdFiles, i, pth, li)) continue;
+      SubGhzProfile p{};
+      if (!readProfileAt(pth, li, p, &err)) continue;
+      Serial.printf("  [%d] %s @ %.2f MHz (val=%lu)\n", (int)i, p.name, p.frequency/1000000.0, (unsigned long)p.value);
     }
 }
 
 void deleteProfile(int index) {
-    if (index >= profileCount || index < 0) return;  
+    (void)index;
+    if (sdTotalProfiles == 0) return;
+    String err;
+    loadSelectedFromSd(&err);
+    if (!selectedValid) return;
 
-    Profile deletedProfile;
-    int addr = ADDR_PROFILE_START + (index * PROFILE_SIZE);
-    EEPROM.get(addr, deletedProfile); // Get profile for display
+    String path = selectedPath;
+    uint16_t local = selectedLocalIdx;
 
-    for (int i = index; i < profileCount - 1; i++) {
-        Profile nextProfile;
-        int addr = ADDR_PROFILE_START + ((i + 1) * PROFILE_SIZE);
-        EEPROM.get(addr, nextProfile);
+    uint32_t now = millis();
+    if (!deleteArmed || (int32_t)(now - deleteArmUntilMs) >= 0) {
+      deleteArmed = true;
+      deleteArmUntilMs = now + 3000;
+      updateDisplay();
+      return;
+    }
+    deleteArmed = false;
 
-        addr = ADDR_PROFILE_START + (i * PROFILE_SIZE);
-        EEPROM.put(addr, nextProfile);
+    if (!deleteProfileFromFile(path, local, &err)) {
+      tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.setTextColor(UI_WARN);
+      tft.print("Delete FAILED");
+      tft.setCursor(10, 45 + yshift);
+      tft.setTextColor(TFT_WHITE);
+      tft.print(err);
+      delay(1200);
+      updateDisplay();
+      return;
     }
 
-    Profile emptyProfile = {0, 0, 0, 0, ""};
-    EEPROM.put(ADDR_PROFILE_START + ((profileCount - 1) * PROFILE_SIZE), emptyProfile);
-
-    profileCount--;
-    EEPROM.put(ADDR_PROFILE_START - 4, profileCount);  
-    EEPROM.commit();
-
-    if (currentProfileIndex >= profileCount) {
-        currentProfileIndex = profileCount - 1;  
-    }
-
-    tft.fillRect(0, 40, 240, 280, TFT_BLACK);
-    tft.setCursor(10, 30 + yshift);
-    tft.setTextColor(TFT_WHITE);
-    tft.print("Removed: ");
-    tft.print(deletedProfile.name);
-
-    delay(1000);
+    refreshSdIndex(false);
+    if (sdTotalProfiles == 0) currentProfileIndex = 0;
+    else if (currentProfileIndex >= sdTotalProfiles) currentProfileIndex = (uint16_t)(sdTotalProfiles - 1);
+    selectedValid = false;
+    cacheDirty = true;
     updateDisplay();
 }
 
@@ -932,34 +1573,35 @@ void runUI() {
     #define STATUS_BAR_Y_OFFSET 20
     #define STATUS_BAR_HEIGHT 16
     #define ICON_SIZE 16
-    #define ICON_NUM 5
-    
-    static int iconX[ICON_NUM] = {90, 130, 170, 210, 10};
+    #define ICON_NUM 6
+
+    static int iconX[ICON_NUM] = {90, 130, 170, 210, 50, 10};
     static int iconY = STATUS_BAR_Y_OFFSET;
-    
+
     static const unsigned char* icons[ICON_NUM] = {
-        bitmap_icon_sort_down_minus,    
-        bitmap_icon_sort_up_plus,       
-        bitmap_icon_antenna,     
+        bitmap_icon_sort_down_minus,
+        bitmap_icon_sort_up_plus,
+        bitmap_icon_antenna,
         bitmap_icon_recycle,
-        bitmap_icon_go_back // Back icon
+        bitmap_icon_sdcard,
+        bitmap_icon_go_back
     };
 
     if (!uiDrawn) {
         tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-        
+
         for (int i = 0; i < ICON_NUM; i++) {
-            if (icons[i] != NULL) {  
+            if (icons[i] != NULL) {
                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-            } 
+            }
         }
         tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
         uiDrawn = true;
     }
 
     static unsigned long lastAnimationTime = 0;
-    static int animationState = 0;  
+    static int animationState = 0;
     static int activeIcon = -1;
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -968,31 +1610,45 @@ void runUI() {
             animationState = 2;
 
             switch (activeIcon) {
-                case 0: // Next profile
-                    if (profileCount > 0) {
-                        currentProfileIndex = (currentProfileIndex + 1) % profileCount;
-                        updateDisplay();
+                case 0:
+                    if (sdTotalProfiles > 0) {
+                        uint16_t oldIdx = currentProfileIndex;
+                        currentProfileIndex = (uint16_t)((currentProfileIndex + 1) % sdTotalProfiles);
+                        selectedValid = false;
+                        cacheDirty = true;
+                        deleteArmed = false;
+
+                        updateSelectionUI(oldIdx, false);
                     }
                     break;
-                case 1: // Previous profile
-                    if (profileCount > 0) {
-                        currentProfileIndex = (currentProfileIndex - 1 + profileCount) % profileCount;
-                        updateDisplay();
+                case 1:
+                    if (sdTotalProfiles > 0) {
+                        uint16_t oldIdx = currentProfileIndex;
+                        currentProfileIndex = (uint16_t)((currentProfileIndex + sdTotalProfiles - 1) % sdTotalProfiles);
+                        selectedValid = false;
+                        cacheDirty = true;
+                        deleteArmed = false;
+                        updateSelectionUI(oldIdx, false);
                     }
                     break;
-                case 2: // Transmit profile
-                    if (profileCount > 0) {
+                case 2:
+                    if (sdTotalProfiles > 0) {
                         transmitProfile(currentProfileIndex);
                     }
                     break;
-                case 3: // Delete profile
-                    if (profileCount > 0) {
+                case 3:
+                    if (sdTotalProfiles > 0) {
                         deleteProfile(currentProfileIndex);
                     }
                     break;
-                case 4: // Back icon (exit to submenu)
-                    feature_exit_requested = true;
+                case 4: {
+                    refreshSdIndex(true);
+                    selectedValid = false;
+                    cacheDirty = true;
+                    deleteArmed = false;
+                    updateDisplay();
                     break;
+                }
             }
         } else if (animationState == 2) {
             animationState = 0;
@@ -1002,22 +1658,49 @@ void runUI() {
     }
 
     static unsigned long lastTouchCheck = 0;
-    const unsigned long touchCheckInterval = 50;  
+    const unsigned long touchCheckInterval = 50;
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
-        if (ts.touched() && feature_active) {
-            TS_Point p = ts.getPoint();
-            int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-            int y = ::map(p.y, 3800, 300, 0, SCREEN_HEIGHT - 1);
+        int x, y;
+        if (feature_active && readTouchXY(x, y)) {
 
+            if (y >= BOT_Y && y < (BOT_Y + BOT_H)) {
+              if (x >= BOT_TX_X && x < (BOT_TX_X + BOT_BTN_W)) {
+                if (sdTotalProfiles > 0) transmitProfile(currentProfileIndex);
+              } else if (x >= BOT_DEL_X && x < (BOT_DEL_X + BOT_BTN_W)) {
+                if (sdTotalProfiles > 0) deleteProfile(currentProfileIndex);
+              }
+              lastTouchCheck = millis();
+              return;
+            }
+
+            if (y >= LIST_Y && y < (LIST_Y + (ITEMS_PER_PAGE * ROW_H)) && x >= LIST_X && x < (LIST_X + LIST_W)) {
+              uint8_t row = (uint8_t)((y - LIST_Y) / ROW_H);
+              uint16_t oldIdx = currentProfileIndex;
+              uint16_t start = pageStartForIndex(currentProfileIndex);
+              uint16_t idx = (uint16_t)(start + row);
+              if (idx < sdTotalProfiles) {
+                currentProfileIndex = idx;
+                selectedValid = false;
+                cacheDirty = true;
+                deleteArmed = false;
+                updateSelectionUI(oldIdx, false);
+              }
+            }
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
                         if (icons[i] != NULL && animationState == 0) {
-                            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-                            animationState = 1;
-                            activeIcon = i;
-                            lastAnimationTime = millis();
+
+                            if (i == 5) {
+                                feature_exit_requested = true;
+                            } else {
+
+                                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                                animationState = 1;
+                                activeIcon = i;
+                                lastAnimationTime = millis();
+                            }
                         }
                         break;
                     }
@@ -1030,84 +1713,99 @@ void runUI() {
 
 void saveSetup() {
     Serial.begin(115200);
+
+    ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+
     EEPROM.begin(EEPROM_SIZE);
     loadProfileCount();
     printProfiles();
 
+    pcf.pinMode(BTN_UP, INPUT_PULLUP);
+    pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
     pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
     pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
-    pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
-    pcf.pinMode(BTN_UP, INPUT_PULLUP);
+    pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
 
-    tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_WHITE);
 
     setupTouchscreen();
 
     float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, false);
+    drawStatusBar(currentBatteryVoltage, true);
     uiDrawn = false;
 
     ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
     ELECHOUSE_cc1101.SetRx();
 
-    mySwitch.enableReceive(RX_PIN);
-    mySwitch.enableTransmit(TX_PIN);
+    mySwitch.enableReceive(SUBGHZ_RX_PIN);
+    mySwitch.enableTransmit(SUBGHZ_TX_PIN);
+    mySwitch.setRepeatTransmit(8);
 
+    refreshSdIndex(false);
+    cacheDirty = true;
+    deleteArmed = false;
     updateDisplay();
 }
 
 void saveLoop() {
+
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+        feature_exit_requested = true;
+        return;
+    }
+
     runUI();
-    
+
     static unsigned long lastDebounceTime = 0;
     const unsigned long debounceDelay = 200;
 
-    int btnLeftState = pcf.digitalRead(BTN_LEFT);
-    int btnRightState = pcf.digitalRead(BTN_RIGHT);
-    int btnSelectState = pcf.digitalRead(BTN_DOWN);
-    int btnUpState = pcf.digitalRead(BTN_UP);
+    bool prevPressed    = isButtonPressed(BTN_UP);
+    bool nextPressed    = isButtonPressed(BTN_DOWN);
+    bool txPressed      = isButtonPressed(BTN_RIGHT);
+    bool refreshPressed = isButtonPressed(BTN_LEFT);
 
-    if (profileCount > 0) {
-        if (btnRightState == LOW && millis() - lastDebounceTime > debounceDelay) {
-            currentProfileIndex = (currentProfileIndex + 1) % profileCount;
-            updateDisplay();
+    if (sdTotalProfiles > 0) {
+
+        if (nextPressed && millis() - lastDebounceTime > debounceDelay) {
+            uint16_t oldIdx = currentProfileIndex;
+            currentProfileIndex = (uint16_t)((currentProfileIndex + 1) % sdTotalProfiles);
+            selectedValid = false;
+            updateSelectionUI(oldIdx, false);
             lastDebounceTime = millis();
         }
 
-        if (btnLeftState == LOW && millis() - lastDebounceTime > debounceDelay) {
-            currentProfileIndex = (currentProfileIndex - 1 + profileCount) % profileCount;
-            updateDisplay();
+        if (prevPressed && millis() - lastDebounceTime > debounceDelay) {
+            uint16_t oldIdx = currentProfileIndex;
+            currentProfileIndex = (uint16_t)((currentProfileIndex + sdTotalProfiles - 1) % sdTotalProfiles);
+            selectedValid = false;
+            updateSelectionUI(oldIdx, false);
             lastDebounceTime = millis();
         }
 
-        if (btnSelectState == LOW && millis() - lastDebounceTime > debounceDelay) {
+        if (txPressed && millis() - lastDebounceTime > debounceDelay) {
             transmitProfile(currentProfileIndex);
             lastDebounceTime = millis();
         }
 
-        if (btnUpState == LOW && millis() - lastDebounceTime > debounceDelay) {
-            deleteProfile(currentProfileIndex);  
+        if (refreshPressed && millis() - lastDebounceTime > debounceDelay) {
+            refreshSdIndex(true);
+            selectedValid = false;
+            cacheDirty = true;
+            deleteArmed = false;
+            updateDisplay();
             lastDebounceTime = millis();
         }
     } else {
-        //tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+
         tft.setCursor(10, 50 + yshift);
         tft.setTextColor(TFT_WHITE);
-        tft.print("No profiles to select.");
+        tft.print("No profiles on SD.");
     }
 }
 
 }
-
-
-/*
- * 
- * subGHz jammer
- * 
- * 
- */
 
 namespace subjammer {
 
@@ -1116,41 +1814,36 @@ static bool uiDrawn = false;
 static unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 200;
 
-#define TX_PIN 26        
- 
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 64
 
-#define BTN_LEFT   4
-#define BTN_RIGHT  5
-#define BTN_DOWN   3
-#define BTN_UP     6
-
+static constexpr uint8_t JAM_BTN_LEFT  = 4;
+static constexpr uint8_t JAM_BTN_RIGHT = 5;
+static constexpr uint8_t JAM_BTN_DOWN  = 3;
+static constexpr uint8_t JAM_BTN_UP    = 6;
 
 bool jammingRunning = false;
 bool continuousMode = true;
-bool autoMode = false;     
+bool autoMode = false;
 unsigned long lastSweepTime = 0;
-const unsigned long sweepInterval = 1000; 
+const unsigned long sweepInterval = 1000;
 
 static const uint32_t subghz_frequency_list[] = {
-    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,  
-    390000000, 418000000, 433075000, 433420000, 433920000, 434420000, 
+    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,
+    390000000, 418000000, 433075000, 433420000, 433920000, 434420000,
     434775000, 438900000, 868350000, 915000000, 925000000
 };
 const int numFrequencies = sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]);
-int currentFrequencyIndex = 4; 
+int currentFrequencyIndex = 4;
 float targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
-
 
 void updateDisplay() {
 
     int yshift = 20;
-    
-    tft.fillRect(0, 40, 240, 80, TFT_BLACK); 
+
+    tft.fillRect(0, 40, 240, 80, TFT_BLACK);
     tft.drawLine(0, 79, 235, 79, TFT_WHITE);
 
-    // Frequency section
     tft.setTextSize(1);
     tft.setCursor(5, 22 + yshift);
     tft.setTextColor(TFT_CYAN);
@@ -1161,11 +1854,11 @@ void updateDisplay() {
         tft.print("Auto: ");
         tft.setTextColor(TFT_WHITE);
         tft.print(targetFrequency, 1);
-        // Progress bar
-        int progress = map(currentFrequencyIndex, 0, numFrequencies - 1, 0, 240);
+
+        int progress = ::map(currentFrequencyIndex, 0, numFrequencies - 1, 0, 240);
         tft.fillRect(0, 60 + yshift, 240, 4, TFT_BLACK);
         tft.fillRect(0, 60 + yshift, progress, 4, ORANGE);
-        // Blinking sweep indicator
+
         if (jammingRunning && millis() % 1000 < 500) {
             tft.fillCircle(220, 22 + yshift, 2, TFT_GREEN);
         }
@@ -1175,7 +1868,6 @@ void updateDisplay() {
         tft.print(" MHz");
     }
 
-    // Mode section
     tft.setCursor(130, 22 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("Mode:");
@@ -1183,21 +1875,19 @@ void updateDisplay() {
     tft.setTextColor(continuousMode ? TFT_GREEN : TFT_YELLOW);
     tft.print(continuousMode ? "Cont" : "Noise");
 
-    // Status section
     tft.setCursor(5, 42 + yshift);
     tft.setTextColor(TFT_CYAN);
     tft.print("Status:");
     tft.setCursor(50, 42 + yshift);
     if (jammingRunning) {
-        tft.setTextColor(TFT_RED);
+        tft.setTextColor(UI_WARN);
         tft.print("Jamming");
 
     } else {
         tft.setTextColor(TFT_GREEN);
-        tft.print("Idle   "); 
+        tft.print("Idle   ");
     }
 }
-
 
 void runUI() {
     #define SCREEN_WIDTH  240
@@ -1205,35 +1895,35 @@ void runUI() {
     #define STATUS_BAR_Y_OFFSET 20
     #define STATUS_BAR_HEIGHT 16
     #define ICON_SIZE 16
-    #define ICON_NUM 6 
-    
-    static int iconX[ICON_NUM] = {50, 90, 130, 170, 210, 10}; // Added back icon at x=10
+    #define ICON_NUM 6
+
+    static int iconX[ICON_NUM] = {50, 90, 130, 170, 210, 10};
     static int iconY = STATUS_BAR_Y_OFFSET;
-    
+
     static const unsigned char* icons[ICON_NUM] = {
-        bitmap_icon_power,    
-        bitmap_icon_antenna,      
-        bitmap_icon_random,    
+        bitmap_icon_power,
+        bitmap_icon_antenna,
+        bitmap_icon_random,
         bitmap_icon_sort_down_minus,
         bitmap_icon_sort_up_plus,
-        bitmap_icon_go_back // Added back icon
+        bitmap_icon_go_back
     };
 
     if (!uiDrawn) {
         tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-        
+
         for (int i = 0; i < ICON_NUM; i++) {
-            if (icons[i] != NULL) {  
+            if (icons[i] != NULL) {
                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-            } 
+            }
         }
         tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
-        uiDrawn = true;               
+        uiDrawn = true;
     }
 
     static unsigned long lastAnimationTime = 0;
-    static int animationState = 0;  
+    static int animationState = 0;
     static int activeIcon = -1;
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
@@ -1256,14 +1946,14 @@ void runUI() {
                     updateDisplay();
                     lastDebounceTime = millis();
                     break;
-                case 1: 
+                case 1:
                  continuousMode = !continuousMode;
                   Serial.print("Jamming mode: ");
                   Serial.println(continuousMode ? "Continuous Carrier" : "Noise");
                   updateDisplay();
                   lastDebounceTime = millis();
                     break;
-                case 2: 
+                case 2:
                   autoMode = !autoMode;
                   Serial.print("Frequency mode: ");
                   Serial.println(autoMode ? "Automatic" : "Manual");
@@ -1275,7 +1965,7 @@ void runUI() {
                   updateDisplay();
                   lastDebounceTime = millis();
                     break;
-                case 3: 
+                case 3:
                   currentFrequencyIndex = (currentFrequencyIndex - 1 + numFrequencies) % numFrequencies;
                   targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
                   ELECHOUSE_cc1101.setMHZ(targetFrequency);
@@ -1285,7 +1975,7 @@ void runUI() {
                   updateDisplay();
                   lastDebounceTime = millis();
                     break;
-                 case 4: 
+                 case 4:
                   currentFrequencyIndex = (currentFrequencyIndex + 1) % numFrequencies;
                   targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
                   ELECHOUSE_cc1101.setMHZ(targetFrequency);
@@ -1295,7 +1985,7 @@ void runUI() {
                   updateDisplay();
                   lastDebounceTime = millis();
                     break;
-                case 5: // Back icon action (exit to submenu)
+                case 5:
                     feature_exit_requested = true;
                     break;
             }
@@ -1303,26 +1993,29 @@ void runUI() {
             animationState = 0;
             activeIcon = -1;
         }
-        lastAnimationTime = millis();  
+        lastAnimationTime = millis();
     }
 
     static unsigned long lastTouchCheck = 0;
-    const unsigned long touchCheckInterval = 50; 
+    const unsigned long touchCheckInterval = 50;
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
-        if (ts.touched() && feature_active) { 
-            TS_Point p = ts.getPoint();
-            int x = ::map(p.x, 300, 3800, 0, SCREEN_WIDTH - 1);
-            int y = ::map(p.y, 3800, 300, 0, SCREENHEIGHT - 1);
-
+        int x, y;
+        if (feature_active && readTouchXY(x, y)) {
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
                         if (icons[i] != NULL && animationState == 0) {
-                            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-                            animationState = 1;
-                            activeIcon = i;
-                            lastAnimationTime = millis();
+
+                            if (i == 5) {
+                                feature_exit_requested = true;
+                            } else {
+
+                                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                                animationState = 1;
+                                activeIcon = i;
+                                lastAnimationTime = millis();
+                            }
                         }
                         break;
                     }
@@ -1336,10 +2029,12 @@ void runUI() {
 void subjammerSetup() {
     Serial.begin(115200);
 
-    ELECHOUSE_cc1101.Init(); 
-    ELECHOUSE_cc1101.setModulation(0); 
-    ELECHOUSE_cc1101.setRxBW(500.0);  
-    ELECHOUSE_cc1101.setPA(12);       
+    ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+
+    ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setModulation(0);
+    ELECHOUSE_cc1101.setRxBW(500.0);
+    ELECHOUSE_cc1101.setPA(12);
     ELECHOUSE_cc1101.setMHZ(targetFrequency);
     ELECHOUSE_cc1101.SetTx();
 
@@ -1351,25 +2046,29 @@ void subjammerSetup() {
     pcf.pinMode(BTN_UP, INPUT_PULLUP);
     delay(100);
 
-    tft.setRotation(0); 
     tft.fillScreen(TFT_BLACK);
 
     setupTouchscreen();
 
    float currentBatteryVoltage = readBatteryVoltage();
-   drawStatusBar(currentBatteryVoltage, false);
+   drawStatusBar(currentBatteryVoltage, true);
    updateDisplay();
    uiDrawn = false;
 }
 
 void subjammerLoop() {
-  
+
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+        feature_exit_requested = true;
+        return;
+    }
+
     runUI();
-    
-    int btnLeftState = pcf.digitalRead(BTN_LEFT);
-    int btnRightState = pcf.digitalRead(BTN_RIGHT);
-    int btnUpState = pcf.digitalRead(BTN_UP);
-    int btnDownState = pcf.digitalRead(BTN_DOWN);
+
+    int btnLeftState = pcf.digitalRead(JAM_BTN_LEFT);
+    int btnRightState = pcf.digitalRead(JAM_BTN_RIGHT);
+    int btnUpState = pcf.digitalRead(JAM_BTN_UP);
+    int btnDownState = pcf.digitalRead(JAM_BTN_DOWN);
 
     if (btnUpState == LOW && millis() - lastDebounceTime > debounceDelay) {
         jammingRunning = !jammingRunning;
@@ -1396,7 +2095,7 @@ void subjammerLoop() {
         updateDisplay();
         lastDebounceTime = millis();
     }
-      
+
     if (btnLeftState == LOW && !autoMode && millis() - lastDebounceTime > debounceDelay) {
         continuousMode = !continuousMode;
         Serial.print("Jamming mode: ");
@@ -1449,5 +2148,5 @@ void subjammerLoop() {
               }
           }
       }
-  } 
+  }
 }
