@@ -1,16 +1,15 @@
 <div align="center">
 
-  <img src="https://user-images.githubusercontent.com/62047147/195847997-97553030-3b79-4643-9f2c-1f04bba6b989.png" alt="logo" width="100" height="auto" />
-  <h1>ESP32-DIV</h1>
-   
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/a30bde48-e39d-4b11-8749-3401bcb82a68" width="150">
+  <h1><span>ESP32-DIV</span></h1>
+</div>
+
   <p>
     ESP32DIV - Advanced Wireless Toolkit
   </p>
    
-
- 
 <!-- Badges -->
-
 <a href="https://github.com/cifertech/ESP32-DIV" title="Go to GitHub repo"><img src="https://img.shields.io/static/v1?label=cifertech&message=ESP32-DIV&color=purple&logo=github" alt="cifertech - ESP32-DIV"></a>
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/cifertech/esp32-div/total)
 <a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/github/stars/cifertech/ESP32-DIV?style=social" alt="stars - ESP32-DIV"></a>
