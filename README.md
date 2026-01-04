@@ -29,8 +29,6 @@
  
 <br />
 
-<div>&nbsp;</div>
-
 ## 📖 Explore the ESP32-DIV Wiki
 
 Complete project story, in-depth tutorials, and all the features in [Wiki](https://github.com/cifertech/ESP32-DIV/wiki)! From Wi-Fi deauthentication attacks to Sub-GHz signal replay, the Wiki covers everything you need to get started. [Click here to explore now!](https://github.com/cifertech/ESP32-DIV/wiki)
@@ -46,7 +44,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 > ⚠️ This project is intended for **educational and research purposes only**. Do not use it for malicious activities or unauthorized access.
 
 <div align="center"> 
-  <img src="https://github.com/user-attachments/assets/a3c46ee0-5da8-421e-aabf-b3120f21eb10" alt="screenshot" width="Auto" height="Auto" />
+  <img src="https://github.com/user-attachments/assets/2a6250cc-270d-460a-9875-5c2654d10fcf" alt="screenshot" width="Auto" height="Auto" />
 </div>
 
 <div>&nbsp;</div>
@@ -86,7 +84,14 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 <div>&nbsp;</div>
 
 <!-- ESP32-DIV --> 
-## :eyes: ESP32-DIV Versions:
+<table>
+  <tr>
+    <td style="text-align: center;">
+      <img src="https://github.com/user-attachments/assets/52e5be67-9dc7-4b08-bd2a-0a4e4235cf9d" alt="ESP32-DIV Beta" style="width: 1920px; border: 1px solid #ccc; border-radius: 5px;">
+      <p style="font-style: italic; font-size: 14px; margin-top: 5px;">ESP32-DIV v2</p>
+    </td>    
+  </tr>
+</table>
 
 <table>
   <tr>
@@ -147,7 +152,6 @@ ESP32DIV consists of two boards:
  
 Distributed under the MIT License. See LICENSE.txt for more information.
 
-<div>&nbsp;</div>
 
 <!-- Resources --> 
 ## 📎 Resources
@@ -156,7 +160,6 @@ Distributed under the MIT License. See LICENSE.txt for more information.
 - 🔗 [GitHub Releases](https://github.com/cifertech/ESP32-DIV/releases)
 - 🎥 [YouTube Video](https://youtu.be/jVp1zlcsrOY)
 
-<div>&nbsp;</div>
 
 <!-- Contact -->
 ## :handshake: Contact 
@@ -167,7 +170,6 @@ CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
 
 Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
 
-<div>&nbsp;</div>
 
 <!-- Support & Contributions -->
 ## 💬 Support & Contributions
