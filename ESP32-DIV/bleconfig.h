@@ -19,7 +19,6 @@
 #include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
-#include "esp_bt.h"
 #include "esp_wifi.h"
 #include <Wire.h>
 
@@ -56,7 +55,17 @@ namespace BleScan {
 
 namespace Scanner {
   void scannerSetup();
-  void scannerLoop();  
+  void scannerLoop();
+}
+
+namespace Analyzer {
+  void analyzerSetup();
+  void analyzerLoop();
+}
+
+namespace WLANJammer {
+  void wlanjammerSetup();
+  void wlanjammerLoop();
 }
 
 namespace ProtoKill {
@@ -67,6 +76,7 @@ namespace ProtoKill {
 namespace BleSniffer {
   void blesnifferLoop();
   void blesnifferSetup();
+  void blesnifferCleanup();
 }
 
 #endif // CONFIG_H

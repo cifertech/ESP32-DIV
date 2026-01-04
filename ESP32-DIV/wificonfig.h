@@ -18,15 +18,12 @@ extern PCF8574 pcf;
 #define XPT2046_CLK   25
 #define XPT2046_CS    33
 
-#include "WiFi.h"
 #include <esp_wifi.h>
-#include "esp_wifi.h"
 #include "esp_wifi_types.h"
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
 #include "nvs_flash.h"
-#include <nvs_flash.h>
 #include <stdio.h>
 #include <string>
 #include <cstddef>

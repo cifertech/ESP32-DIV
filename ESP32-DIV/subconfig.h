@@ -40,6 +40,10 @@ namespace subjammer {
   void subjammerLoop();
 }
 
+namespace subbrute {
+  void subBruteSetup();
+  void subBruteLoop();
+}
 
 
 #endif // SUBCONFIG_H

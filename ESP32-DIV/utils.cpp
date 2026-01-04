@@ -2,6 +2,7 @@
 #include "shared.h"
 #include "icon.h"
 #include "Touchscreen.h"
+#include <WiFi.h>  // For WiFi.RSSI() and WiFi.status()
 
 
 /*
@@ -38,11 +39,6 @@ bool notificationVisible = true;
 int notifX, notifY, notifWidth, notifHeight;
 int closeButtonX, closeButtonY, closeButtonSize = 15;
 int okButtonX, okButtonY, okButtonWidth = 60, okButtonHeight = 20;
-
-extern bool notificationVisible;
-extern int notifX, notifY, notifWidth, notifHeight;
-extern int closeButtonX, closeButtonY, closeButtonSize;
-extern int okButtonX, okButtonY, okButtonWidth, okButtonHeight;
 
 
 void showNotification(const char* title, const char* message) {
@@ -140,20 +136,27 @@ uint8_t temprature_sens_read();
 unsigned long lastStatusBarUpdate = 0;
 const int STATUS_BAR_UPDATE_INTERVAL = 1000; 
 float lastBatteryVoltage = 0.0;
-bool sdAvailable = false;
 
 float readBatteryVoltage() {
-  uint8_t temprature_sens_read();
-  const int sampleCount = 10;  
-  long sum = 0;
-  
-  for (int i = 0; i < sampleCount; i++) {
-    sum += analogRead(36);  
-    delay(5);  
+  static bool adcInitialized = false;
+
+  // Initialize ADC attenuation on first call (11dB for 0-3.3V range)
+  if (!adcInitialized) {
+    analogSetPinAttenuation(36, ADC_11db);
+    adcInitialized = true;
   }
-  
-  float averageADC = sum / sampleCount;
-  float voltage = (averageADC / 4095.0) * 3.3 * 2;  
+
+  const int sampleCount = 16;  // More samples for better accuracy
+  uint32_t sum = 0;
+
+  for (int i = 0; i < sampleCount; i++) {
+    sum += analogReadMilliVolts(36);  // Use calibrated millivolt reading
+    delayMicroseconds(500);  // Faster sampling
+  }
+
+  float avgMv = (float)sum / sampleCount;
+  // Voltage divider ratio is 2:1, so multiply by 2 to get actual battery voltage
+  float voltage = (avgMv / 1000.0) * 2.0;
   return voltage;
 }
 
@@ -172,11 +175,26 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
   static int lastWiFiStrength = -1;
   static String lastDisplayedTime = "";
 
-  int batteryPercentage = map(batteryVoltage * 100, 300, 420, 0, 100);
+  // IGNORE the passed voltage - read FRESH every time!
+  // The caller passes a stale global that's set once at startup
+  float freshVoltage = readBatteryVoltage();
+
+  int batteryPercentage = map(freshVoltage * 100, 300, 420, 0, 100);
   batteryPercentage = constrain(batteryPercentage, 0, 100);
 
-  int wifiStrength = random(0, 101);
-  wifiStrength = constrain(wifiStrength, 0, 100);
+  // Get REAL WiFi signal strength (not random!)
+  int wifiStrength = 0;
+  wifi_mode_t wifiMode = WiFi.getMode();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    int rssi = WiFi.RSSI();
+    // Map RSSI (-100 to -30 dBm) to percentage (0-100%)
+    wifiStrength = constrain(map(rssi, -100, -30, 0, 100), 0, 100);
+  } else if (wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA) {
+    // In AP mode, show full bars (we ARE the access point)
+    wifiStrength = 100;
+  }
+  // If not connected and not in AP mode, wifiStrength stays 0
 
   float internalTemp = readInternalTemperature();
   bool sdAvailable = false;
@@ -192,8 +210,8 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
     //tft.fillRect(0, barHeight - 2, tft.width(), 3, ORANGE); 
 
     // **Draw Battery Icon (Hacker/Techy Look)**
-    tft.drawRoundRect(x, y, 22, 10, 2, TFT_WHITE);        // Battery border
-    tft.fillRect(x + 22, y + 3, 2, 4, TFT_WHITE);         // Battery terminal
+    tft.drawRoundRect(x, y, 22, 10, 2, SHREDDY_TEAL);        // Battery border
+    tft.fillRect(x + 22, y + 3, 2, 4, SHREDDY_TEAL);         // Battery terminal
     
     int batteryLevelWidth = map(batteryPercentage, 0, 100, 0, 20);
     uint16_t batteryColor = (batteryPercentage > 20) ? TFT_GREEN : TFT_RED;  
@@ -216,16 +234,17 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
       if (wifiStrength > i * 25) {
         tft.fillRoundRect(barX, wifiY - barHeight, barWidth, barHeight, 1, TFT_GREEN);  
       } else {
-        tft.drawRoundRect(barX, wifiY - barHeight, barWidth, barHeight, 1, TFT_WHITE);  
+        tft.drawRoundRect(barX, wifiY - barHeight, barWidth, barHeight, 1, SHREDDY_TEAL);  
       }
     }
 
-    if (internalTemp = 53.33) {
-      tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_YELLOW);
-    } else if (internalTemp > 55) {
-      tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_RED);
+    // Temperature indicator: Green (cool), Yellow (warm), Red (hot)
+    if (internalTemp >= 55) {
+      tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_RED);      // HOT - danger zone
+    } else if (internalTemp >= 50) {
+      tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_YELLOW);   // WARM - caution
     } else {
-      tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_GREEN);
+      tft.drawBitmap(203, y - 3, bitmap_icon_temp, 16, 16, TFT_GREEN);    // COOL - normal
     }
 
     // **Display SD Card Icon (If Available)**
@@ -409,12 +428,12 @@ void runUI() {
     };
 
     if (!uiDrawn) {
-        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+        tft.drawLine(0, 19, 240, 19, SHREDDY_TEAL);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
         
         for (int i = 0; i < ICON_NUM; i++) {
             if (icons[i] != NULL) {  
-                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, SHREDDY_TEAL);
             } 
         }
         tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
@@ -427,7 +446,7 @@ void runUI() {
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
         if (animationState == 1) {
-            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, SHREDDY_TEAL);
             animationState = 2;
 
             switch (activeIcon) {
@@ -440,7 +459,7 @@ void runUI() {
                     delay(100);
                     Serial.begin(baudRates[baudIndex]);
                     tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
-                    tft.setTextColor(TFT_WHITE, TFT_WHITE);
+                    tft.setTextColor(SHREDDY_TEAL, SHREDDY_TEAL);
                     String baudMsg = " Serial Terminal - " + String(baudRates[baudIndex]) + " baud ";
                     tft.drawCentreString(baudMsg, DISPLAY_WIDTH / 2, 37, 2);
                     delay(10);
@@ -449,7 +468,7 @@ void runUI() {
                 case 1: 
                     delay(10);
                     tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
-                    tft.setTextColor(TFT_WHITE, TFT_WHITE);
+                    tft.setTextColor(SHREDDY_TEAL, SHREDDY_TEAL);
                     tft.drawCentreString(" Serial Terminal Active ", DISPLAY_WIDTH / 2, 37, 2);
                     terminalActive = true;
                     break;
@@ -525,7 +544,7 @@ void terminalSetup() {
   tft.fillScreen(TFT_BLACK); 
 
   tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
-  tft.setTextColor(TFT_WHITE, TFT_WHITE);
+  tft.setTextColor(SHREDDY_TEAL, SHREDDY_TEAL);
   String baudMsg = " Serial Terminal - " + String(baudRates[baudIndex]) + " baud ";
   tft.drawCentreString(baudMsg, DISPLAY_WIDTH / 2, 37, 2);
   
