@@ -1,0 +1,44 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Run Static Code Analysis
+        run: pio check --fail-on-defect=high
+
+      - name: Build Firmware
+        run: pio run
+
+      - name: Rename firmware binary
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cp .pio/build/esp32-s3-devkitc-1/firmware.bin ESP32-DIV-${{ github.ref_name }}.bin
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ESP32-DIV-${{ github.ref_name }}.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
