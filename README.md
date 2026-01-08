@@ -134,11 +134,11 @@ ESP32DIV consists of two boards:
 <table>
   <tr>
     <td style="text-align: center;">
-      <img src="https://github.com/user-attachments/assets/c3997481-b547-4bac-adbf-6d94012139cf" alt="ESP32-DIV Beta" style="width: 600px; border: 1px solid #ccc; border-radius: 5px;">
+      <img src="https://github.com/user-attachments/assets/0aeca1bb-9023-43a0-9f62-f89ced53098f" alt="ESP32-DIV Beta" style="width: 600px; border: 1px solid #ccc; border-radius: 5px;">
       <p style="font-style: italic; font-size: 14px; margin-top: 5px;">ESP32-DIV v2 Main Board</p>
     </td>    
     <td style="text-align: center;">
-      <img src="https://github.com/user-attachments/assets/03c99b1f-4b9c-4957-9c18-e3396659e380" alt="ESP32-DIV v1" style="width: 600px; border: 1px solid #ccc; border-radius: 5px;">
+      <img src="https://github.com/user-attachments/assets/bbfa2c55-02e0-4795-b003-fde06f2d64d9" alt="ESP32-DIV v1" style="width: 600px; border: 1px solid #ccc; border-radius: 5px;">
       <p style="font-style: italic; font-size: 14px; margin-top: 5px;">ESP32-DIV v2 Shield</p>
     </td>
   </tr>
