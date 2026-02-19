@@ -1,12 +1,7 @@
-<div align="center">
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/a30bde48-e39d-4b11-8749-3401bcb82a68" width="150">
-  <h1><span>ESP32-DIV</span></h1>
-</div>
 
   <p>
-    ESP32DIV - Advanced Wireless Toolkit
+    ESP32 Destroyer - electronic warfare suite
   </p>
    
 <!-- Badges -->
@@ -37,7 +32,7 @@ Complete project story, in-depth tutorials, and all the features in [Wiki](https
 
 <!-- About the Project -->
 ## :star2: About the Project
-Welcome to **ESP32DIV**, a powerful open-source multi-band wireless toolkit built on the ESP32!  
+Welcome to **ESP32 Destroyert, a powerful open-source multi-band electronic warefare suite/toolkit built on the ESP32!  
 This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency bands and is designed for **wireless testing**, **signal analysis**, **jammer development**, and **protocol spoofing**.
 
 > ⚠️ This project is intended for **educational and research purposes only**. Do not use it for malicious activities or unauthorized access.
@@ -82,7 +77,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 
 <div>&nbsp;</div>
 
-<!-- ESP32-DIV --> 
+<!-- ESP32-Destroyer --> 
 <table>
   <tr>
     <td style="text-align: center;">
