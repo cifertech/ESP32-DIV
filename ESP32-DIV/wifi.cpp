@@ -1099,10 +1099,10 @@ void runUI() {
         if (millis() - lastSpamTime >= 50) {
           spammer();
 
-          if (activeIcon = 3) {
+          if (activeIcon == 3) {
             output();
           }
-          if (activeIcon = 3) {
+          if (activeIcon == 3) {
             animationState = 5;
           }
           lastSpamTime = millis();
