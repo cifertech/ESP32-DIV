@@ -77,7 +77,7 @@ const char *nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
 const int subghz_NUM_SUBMENU_ITEMS = 5;
 const char *subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
     "Replay Attack",
-    "Bruteforce [Coming soon]",
+    "Bruteforce",
     "SubGHz Jammer",
     "Saved Profile",
     "Back to Main Menu"};
@@ -139,7 +139,7 @@ const unsigned char *nrf_submenu_icons[nrf_NUM_SUBMENU_ITEMS] = {
 
 const unsigned char *subghz_submenu_icons[subghz_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_antenna,
-    bitmap_icon_question,
+    bitmap_icon_key,
     bitmap_icon_no_signal,
     bitmap_icon_list,
     bitmap_icon_go_back
@@ -1582,6 +1582,41 @@ void handleSubGHzSubmenuButtons() {
             }
         }
 
+        if (current_submenu_index == 1) {
+
+            current_submenu_index = 1;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            subghzbrute::bruteSetup();
+            while (current_submenu_index == 1 && !feature_exit_requested) {
+                current_submenu_index = 1;
+                in_sub_menu = true;
+                subghzbrute::bruteLoop();
+                if (isButtonPressed(BTN_SELECT)) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                    while (isButtonPressed(BTN_SELECT)) {
+                    }
+                    break;
+                }
+            }
+            if (feature_exit_requested) {
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
+
         if (current_submenu_index == 2) {
 
             current_submenu_index = 2;
@@ -1692,6 +1727,39 @@ void handleSubGHzSubmenuButtons() {
                         current_submenu_index = 0;
                         in_sub_menu = true;
                         replayat::ReplayAttackLoop();
+                        if (isButtonPressed(BTN_SELECT)) {
+                            in_sub_menu = true;
+                            is_main_menu = false;
+                            submenu_initialized = false;
+                            feature_active = false;
+                            feature_exit_requested = false;
+                            displaySubmenu();
+                            delay(200);
+                            while (isButtonPressed(BTN_SELECT)) {
+                            }
+                            break;
+                        }
+                    }
+                    if (feature_exit_requested) {
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
+                } else if (current_submenu_index == 1) {
+
+                    current_submenu_index = 1;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    subghzbrute::bruteSetup();
+                    while (current_submenu_index == 1 && !feature_exit_requested) {
+                        current_submenu_index = 1;
+                        in_sub_menu = true;
+                        subghzbrute::bruteLoop();
                         if (isButtonPressed(BTN_SELECT)) {
                             in_sub_menu = true;
                             is_main_menu = false;

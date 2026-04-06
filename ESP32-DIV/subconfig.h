@@ -33,4 +33,9 @@ namespace subjammer {
   void subjammerLoop();
 }
 
+namespace subghzbrute {
+  void bruteSetup();
+  void bruteLoop();
+}
+
 #endif

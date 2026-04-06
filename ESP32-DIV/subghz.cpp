@@ -2150,3 +2150,319 @@ void subjammerLoop() {
       }
   }
 }
+
+namespace subghzbrute {
+
+static bool uiDrawn = false;
+static unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 200;
+
+static const uint32_t brute_frequency_list[] = {
+    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,
+    390000000, 418000000, 433075000, 433420000, 433920000, 434420000,
+    434775000, 438900000, 868350000, 915000000, 925000000
+};
+const int brute_numFrequencies = sizeof(brute_frequency_list) / sizeof(brute_frequency_list[0]);
+static int brute_freqIndex = 10;  // default 433.920 MHz
+
+static const uint8_t brute_bitLengths[] = {12, 24, 32};
+const int brute_numBitLengths = sizeof(brute_bitLengths) / sizeof(brute_bitLengths[0]);
+static int brute_bitLenIndex = 0;  // default 12 bits
+
+static int brute_protocol = 1;
+static const int brute_maxProtocol = 12;
+
+static bool bruteRunning = false;
+static uint32_t brute_currentValue = 0;
+static uint32_t brute_maxValue = 0;
+static const unsigned long brute_delayMs = 20;
+static unsigned long brute_lastSendTime = 0;
+
+static RCSwitch brute_switch = RCSwitch();
+
+void updateDisplay() {
+    float freq = brute_frequency_list[brute_freqIndex] / 1000000.0f;
+    uint8_t bits = brute_bitLengths[brute_bitLenIndex];
+
+    tft.fillRect(0, 40, 240, 100, TFT_BLACK);
+
+    tft.setTextSize(1);
+
+    // Row 1: Frequency
+    tft.setCursor(5, 45);
+    tft.setTextColor(TFT_CYAN);
+    tft.print("Freq: ");
+    tft.setTextColor(TFT_WHITE);
+    tft.print(freq, 3);
+    tft.print(" MHz");
+
+    // Row 2: Protocol + Bits
+    tft.setCursor(5, 60);
+    tft.setTextColor(TFT_CYAN);
+    tft.print("Proto: ");
+    tft.setTextColor(TFT_YELLOW);
+    tft.print(brute_protocol);
+
+    tft.setCursor(100, 60);
+    tft.setTextColor(TFT_CYAN);
+    tft.print("Bits: ");
+    tft.setTextColor(TFT_WHITE);
+    tft.print(bits);
+
+    // Row 3: Progress value
+    tft.setCursor(5, 75);
+    tft.setTextColor(TFT_CYAN);
+    tft.print("Val: ");
+    tft.setTextColor(TFT_WHITE);
+    char valBuf[24];
+    snprintf(valBuf, sizeof(valBuf), "%lu / %lu", (unsigned long)brute_currentValue, (unsigned long)brute_maxValue);
+    tft.print(valBuf);
+
+    // Row 4: Status
+    tft.setCursor(5, 90);
+    tft.setTextColor(TFT_CYAN);
+    tft.print("Status: ");
+    if (bruteRunning) {
+        tft.setTextColor(UI_WARN);
+        tft.print("Running ");
+    } else if (brute_maxValue > 0 && brute_currentValue >= brute_maxValue) {
+        tft.setTextColor(TFT_GREEN);
+        tft.print("Done    ");
+    } else {
+        tft.setTextColor(TFT_GREEN);
+        tft.print("Idle    ");
+    }
+
+    // Progress bar
+    tft.fillRect(0, 105, 240, 5, DARK_GRAY);
+    if (brute_maxValue > 0) {
+        int progress = (int)((float)brute_currentValue / (float)brute_maxValue * 240.0f);
+        if (progress > 240) progress = 240;
+        tft.fillRect(0, 105, progress, 5, ORANGE);
+    }
+
+    // Hint row
+    tft.setCursor(5, 115);
+    tft.setTextColor(DARK_GRAY + 0x2104);
+    tft.print("L/R: proto  U/D: freq  ^: bits");
+}
+
+void runUI() {
+    static const int ICON_NUM = 6;
+    static int iconX[ICON_NUM] = {50, 90, 130, 170, 210, 10};
+    static const int iconY = 20;
+    static const int ICON_SIZE = 16;
+
+    static const unsigned char* icons[ICON_NUM] = {
+        bitmap_icon_power,
+        bitmap_icon_sort_down_minus,
+        bitmap_icon_sort_up_plus,
+        bitmap_icon_DOWN,
+        bitmap_icon_UP,
+        bitmap_icon_go_back
+    };
+
+    if (!uiDrawn) {
+        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+        tft.fillRect(0, iconY, 240, ICON_SIZE, DARK_GRAY);
+        for (int i = 0; i < ICON_NUM; i++) {
+            tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        }
+        tft.drawLine(0, iconY + ICON_SIZE, 240, iconY + ICON_SIZE, ORANGE);
+        uiDrawn = true;
+    }
+
+    static unsigned long lastAnimationTime = 0;
+    static int animationState = 0;
+    static int activeIcon = -1;
+
+    if (animationState > 0 && millis() - lastAnimationTime >= 150) {
+        if (animationState == 1) {
+            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            animationState = 2;
+
+            switch (activeIcon) {
+                case 0:  // Start / Stop
+                    bruteRunning = !bruteRunning;
+                    if (bruteRunning) {
+                        brute_currentValue = 0;
+                        uint8_t bits = brute_bitLengths[brute_bitLenIndex];
+                        brute_maxValue = (bits >= 32) ? 0xFFFFFFFFUL : ((1UL << bits) - 1UL);
+                        float freq = brute_frequency_list[brute_freqIndex] / 1000000.0f;
+                        ELECHOUSE_cc1101.setMHZ(freq);
+                        brute_switch.disableReceive();
+                        brute_switch.enableTransmit(SUBGHZ_TX_PIN);
+                        brute_switch.setProtocol(brute_protocol);
+                        brute_switch.setRepeatTransmit(1);
+                        ELECHOUSE_cc1101.SetTx();
+                    } else {
+                        ELECHOUSE_cc1101.setSidle();
+                        brute_switch.disableTransmit();
+                    }
+                    updateDisplay();
+                    lastDebounceTime = millis();
+                    break;
+                case 1:  // Freq down
+                    bruteRunning = false;
+                    ELECHOUSE_cc1101.setSidle();
+                    brute_switch.disableTransmit();
+                    brute_freqIndex = (brute_freqIndex - 1 + brute_numFrequencies) % brute_numFrequencies;
+                    updateDisplay();
+                    lastDebounceTime = millis();
+                    break;
+                case 2:  // Freq up
+                    bruteRunning = false;
+                    ELECHOUSE_cc1101.setSidle();
+                    brute_switch.disableTransmit();
+                    brute_freqIndex = (brute_freqIndex + 1) % brute_numFrequencies;
+                    updateDisplay();
+                    lastDebounceTime = millis();
+                    break;
+                case 3:  // Protocol down
+                    bruteRunning = false;
+                    ELECHOUSE_cc1101.setSidle();
+                    brute_switch.disableTransmit();
+                    brute_protocol--;
+                    if (brute_protocol < 1) brute_protocol = brute_maxProtocol;
+                    updateDisplay();
+                    lastDebounceTime = millis();
+                    break;
+                case 4:  // Protocol up / bit length cycle
+                    bruteRunning = false;
+                    ELECHOUSE_cc1101.setSidle();
+                    brute_switch.disableTransmit();
+                    brute_bitLenIndex = (brute_bitLenIndex + 1) % brute_numBitLengths;
+                    updateDisplay();
+                    lastDebounceTime = millis();
+                    break;
+                case 5:  // Back
+                    bruteRunning = false;
+                    ELECHOUSE_cc1101.setSidle();
+                    brute_switch.disableTransmit();
+                    feature_exit_requested = true;
+                    break;
+            }
+            animationState = 0;
+            activeIcon = -1;
+        }
+        lastAnimationTime = millis();
+    }
+
+    // Touch handling
+    if (animationState == 0 && ts.touched()) {
+        int x, y;
+        if (!readTouchXY(x, y)) return;
+
+        for (int i = 0; i < ICON_NUM; i++) {
+            if (x >= iconX[i] - 2 && x <= iconX[i] + ICON_SIZE + 2 &&
+                y >= iconY - 2 && y <= iconY + ICON_SIZE + 2) {
+                tft.fillRect(iconX[i], iconY, ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                activeIcon = i;
+                animationState = 1;
+                lastAnimationTime = millis();
+                break;
+            }
+        }
+    }
+}
+
+void handlePhysicalButtons() {
+    if (millis() - lastDebounceTime < debounceDelay) return;
+
+    if (isButtonPressed(BTN_LEFT)) {
+        bruteRunning = false;
+        ELECHOUSE_cc1101.setSidle();
+        brute_switch.disableTransmit();
+        brute_protocol--;
+        if (brute_protocol < 1) brute_protocol = brute_maxProtocol;
+        updateDisplay();
+        lastDebounceTime = millis();
+    }
+
+    if (isButtonPressed(BTN_RIGHT)) {
+        bruteRunning = false;
+        ELECHOUSE_cc1101.setSidle();
+        brute_switch.disableTransmit();
+        brute_protocol++;
+        if (brute_protocol > brute_maxProtocol) brute_protocol = 1;
+        updateDisplay();
+        lastDebounceTime = millis();
+    }
+
+    if (isButtonPressed(BTN_DOWN)) {
+        bruteRunning = false;
+        ELECHOUSE_cc1101.setSidle();
+        brute_switch.disableTransmit();
+        brute_freqIndex = (brute_freqIndex - 1 + brute_numFrequencies) % brute_numFrequencies;
+        updateDisplay();
+        lastDebounceTime = millis();
+    }
+
+    if (isButtonPressed(BTN_UP)) {
+        // UP cycles through bit lengths when not running
+        if (!bruteRunning) {
+            brute_bitLenIndex = (brute_bitLenIndex + 1) % brute_numBitLengths;
+            updateDisplay();
+            lastDebounceTime = millis();
+        }
+    }
+}
+
+void bruteSetup() {
+    uiDrawn = false;
+    bruteRunning = false;
+    brute_currentValue = 0;
+    brute_maxValue = 0;
+    brute_freqIndex = 10;
+    brute_bitLenIndex = 0;
+    brute_protocol = 1;
+    brute_lastSendTime = 0;
+
+    ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+    ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setModulation(0);
+    ELECHOUSE_cc1101.setPA(12);
+    ELECHOUSE_cc1101.setMHZ(brute_frequency_list[brute_freqIndex] / 1000000.0f);
+    ELECHOUSE_cc1101.SetRx();
+
+    pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
+    pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
+    pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
+    pcf.pinMode(BTN_UP, INPUT_PULLUP);
+    delay(100);
+
+    tft.fillScreen(TFT_BLACK);
+    setupTouchscreen();
+
+    float v = readBatteryVoltage();
+    drawStatusBar(v, true);
+    updateDisplay();
+}
+
+void bruteLoop() {
+    runUI();
+    handlePhysicalButtons();
+
+    if (bruteRunning) {
+        if (brute_currentValue >= brute_maxValue) {
+            bruteRunning = false;
+            ELECHOUSE_cc1101.setSidle();
+            brute_switch.disableTransmit();
+            updateDisplay();
+            return;
+        }
+
+        if (millis() - brute_lastSendTime >= brute_delayMs) {
+            brute_switch.send(brute_currentValue, brute_bitLengths[brute_bitLenIndex]);
+            brute_currentValue++;
+            brute_lastSendTime = millis();
+
+            // Refresh display every 64 values to show progress without stalling TX
+            if ((brute_currentValue & 0x3F) == 0) {
+                updateDisplay();
+            }
+        }
+    }
+}
+
+}  // namespace subghzbrute
