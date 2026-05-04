@@ -1,5 +1,7 @@
 #include <SD.h>
 #include <SPI.h>
+#include <algorithm>
+#include <vector>
 #include "Touchscreen.h"
 #include "config.h"
 #include "freertos/FreeRTOS.h"
@@ -237,14 +239,14 @@ static inline uint16_t btnBorder(ButtonStyle style, bool disabled) {
 }
 
 static inline uint16_t btnText(ButtonStyle style, bool disabled) {
-  if (disabled) return UI_LABLE;
+  if (disabled) return UI_TEXT;
 
   switch (style) {
-    case ButtonStyle::Secondary: return WHITE;
+    case ButtonStyle::Secondary: return UI_ICON;
     case ButtonStyle::Primary:
     case ButtonStyle::Danger:    return FEATURE_BG;
   }
-  return WHITE;
+  return UI_ICON;
 }
 
 void drawFooterBg() {
@@ -351,8 +353,6 @@ float lastBatteryVoltage = 0.0;
 bool sdCardPresent = false;
 bool lastSdCardState = false;
 
-#define BATTERY_PIN  2
-
 const float R1 = 100000.0;
 const float R2 = 100000.0;
 
@@ -361,7 +361,7 @@ float readBatteryVoltage() {
   long sum = 0;
 
   for (int i = 0; i < sampleCount; i++) {
-    sum += analogRead(2);
+    sum += analogRead(BATTERY_ADC_PIN);
     delay(5);
   }
 
@@ -1425,6 +1425,671 @@ void loop(){
 }
 
 }
+
+namespace SdFileManager {
+
+using FeatureUI::Button;
+using FeatureUI::ButtonStyle;
+
+static constexpr uint16_t COL_BG   = FEATURE_BG;
+static constexpr int STATUS_BAR_H = 20;
+static constexpr int HEADER_H = 54;
+
+static String ellipsize(const String& s, int maxW, uint8_t font) {
+  if (tft.textWidth(s, font) <= maxW) return s;
+  String out = s;
+  while (out.length() > 0 && tft.textWidth(out + "...", font) > maxW) {
+    out.remove(out.length() - 1);
+  }
+  return out + "...";
+}
+
+struct Entry {
+  String name;
+  String path;
+  bool isDir = false;
+  uint32_t size = 0;
+  bool isUp = false; // synthetic ".."
+};
+
+enum class Page : uint8_t { Browser, Info, ConfirmDelete };
+
+static Page page = Page::Browser;
+static std::vector<Entry> entries;
+static String cwd = "/";
+static int sel = 0;
+static int listStart = 0;
+static bool uiDirty = true;
+static bool touchActive = false;
+static bool touchDragging = false;
+static int touchStartX = 0;
+static int touchStartY = 0;
+static int touchLastY = 0;
+static int scrollAccumY = 0;
+
+static Button browserBtns[4];
+static Button infoBtns[2];
+static Button confirmBtns[2];
+
+static String lastErr;
+
+static File sdOpenCompat(const String& path) {
+  File f = SD.open(path.c_str());
+  if (f) return f;
+  if (path.length() > 1 && path[0] == '/') {
+    f = SD.open(path.substring(1).c_str());
+  }
+  return f;
+}
+
+static bool sdRemoveCompat(const String& path) {
+  if (SD.remove(path.c_str())) return true;
+  if (path.length() > 1 && path[0] == '/') return SD.remove(path.substring(1).c_str());
+  return false;
+}
+
+static bool sdRmdirCompat(const String& path) {
+  if (SD.rmdir(path.c_str())) return true;
+  if (path.length() > 1 && path[0] == '/') return SD.rmdir(path.substring(1).c_str());
+  return false;
+}
+
+static String normalizePath(const String& path) {
+  if (path.length() == 0) return "/";
+  String p = path;
+  if (p[0] != '/') p = "/" + p;
+
+  String out;
+  out.reserve(p.length());
+  bool lastSlash = false;
+  for (size_t i = 0; i < p.length(); ++i) {
+    char c = p[i];
+    if (c == '/') {
+      if (!lastSlash) out += c;
+      lastSlash = true;
+    } else {
+      out += c;
+      lastSlash = false;
+    }
+  }
+
+  while (out.length() > 1 && out.endsWith("/")) {
+    out.remove(out.length() - 1);
+  }
+  return out;
+}
+
+static void clampSel() {
+  if (entries.empty()) { sel = 0; return; }
+  if (sel < 0) sel = 0;
+  if (sel >= (int)entries.size()) sel = (int)entries.size() - 1;
+}
+
+static void listLayout(int& top, int& bottom, int& rowH, int& maxVisible) {
+  top = STATUS_BAR_H + HEADER_H + 6;
+  bottom = tft.height() - FeatureUI::FOOTER_H - 2;
+  rowH = 22;
+  maxVisible = max(1, (bottom - top) / rowH);
+}
+
+static void clampListStart(int maxVisible) {
+  int maxStart = max(0, (int)entries.size() - maxVisible);
+  if (listStart < 0) listStart = 0;
+  if (listStart > maxStart) listStart = maxStart;
+}
+
+static void ensureSelectionVisible(int maxVisible) {
+  if (entries.empty()) { listStart = 0; return; }
+  if (sel < listStart) listStart = sel;
+  if (sel >= listStart + maxVisible) listStart = sel - maxVisible + 1;
+  clampListStart(maxVisible);
+}
+
+static String parentPath(const String& p) {
+  String np = normalizePath(p);
+  if (np == "/") return "/";
+  int slash = np.lastIndexOf('/');
+  if (slash <= 0) return "/";
+  return np.substring(0, slash);
+}
+
+static bool reloadDir(const String& path, String* errOut = nullptr) {
+  entries.clear();
+  lastErr = "";
+
+  if (!isSDCardAvailable()) {
+    if (errOut) *errOut = "SD not mounted";
+    lastErr = "SD not mounted";
+    return false;
+  }
+
+  String openPath = normalizePath(path);
+
+  File dir = sdOpenCompat(openPath);
+  if (!dir) {
+    if (errOut) *errOut = "Open dir failed";
+    lastErr = "Open dir failed";
+    return false;
+  }
+  if (!dir.isDirectory()) {
+    dir.close();
+    if (errOut) *errOut = "Not a directory";
+    lastErr = "Not a directory";
+    return false;
+  }
+
+  cwd = openPath;
+
+  if (cwd != "/") {
+    Entry up;
+    up.name = "..";
+    up.path = parentPath(cwd);
+    up.isDir = true;
+    up.isUp = true;
+    entries.push_back(up);
+  }
+
+  for (;;) {
+    File f = dir.openNextFile();
+    if (!f) break;
+
+    Entry e;
+    {
+      String raw = String(f.name());
+      while (raw.endsWith("/")) raw.remove(raw.length() - 1);
+      int slash = raw.lastIndexOf('/');
+      String base = (slash >= 0) ? raw.substring(slash + 1) : raw;
+      while (base.startsWith("/")) base.remove(0, 1);
+      while (base.endsWith("/")) base.remove(base.length() - 1);
+      e.name = base.length() ? base : raw;
+      while (e.name.startsWith("/")) e.name.remove(0, 1);
+      while (e.name.endsWith("/")) e.name.remove(e.name.length() - 1);
+      if (e.name.length() == 0) { f.close(); continue; }
+    }
+    e.isDir = f.isDirectory();
+    e.size = e.isDir ? 0 : (uint32_t)f.size();
+    if (cwd == "/") e.path = "/" + e.name;
+    else e.path = cwd + "/" + e.name;
+    e.path = normalizePath(e.path);
+
+    entries.push_back(e);
+    f.close();
+    yield();
+  }
+  dir.close();
+
+  // Sort, keeping ".." first when present.
+  int start = (entries.size() && entries[0].isUp) ? 1 : 0;
+  std::sort(entries.begin() + start, entries.end(), [](const Entry& a, const Entry& b) {
+    if (a.isDir != b.isDir) return a.isDir > b.isDir;
+    return a.name < b.name;
+  });
+
+  sel = 0;
+  listStart = 0;
+  uiDirty = true;
+  return true;
+}
+
+static void drawHeader(const char* title) {
+  const int w = tft.width();
+  const int y0 = STATUS_BAR_H;
+  tft.fillRect(0, y0, w, HEADER_H, FEATURE_BG);
+
+  tft.setTextFont(2);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_ICON, FEATURE_BG);
+  tft.setCursor(8, y0 + 4);
+  tft.print(title);
+
+  tft.setTextFont(1);
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  String pathLine = ellipsize(cwd, w - 16, 1);
+  tft.setCursor(8, y0 + 24);
+  tft.print(pathLine);
+
+  String right = entries.empty()
+    ? String("0/0")
+    : String(sel + 1) + "/" + String((int)entries.size());
+  String left = String("Items: ") + String((int)entries.size());
+  int rightW = tft.textWidth(right, 1);
+  tft.setCursor(8, y0 + 40);
+  tft.print(left);
+  tft.setCursor(w - 8 - rightW, y0 + 40);
+  tft.print(right);
+
+  tft.drawLine(0, y0 + HEADER_H, w, y0 + HEADER_H, UI_LINE);
+}
+
+static void drawList() {
+  int top, bottom, rowH, maxVisible;
+  listLayout(top, bottom, rowH, maxVisible);
+
+  tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
+
+  if (!isSDCardAvailable()) {
+    tft.setTextFont(2);
+    tft.setTextColor(UI_WARN, COL_BG);
+    tft.drawCentreString("SD not mounted", tft.width() / 2, top + 30, 2);
+    return;
+  }
+
+  if (entries.empty()) {
+    tft.setTextFont(2);
+    tft.setTextColor(UI_TEXT, COL_BG);
+    tft.drawCentreString("Empty folder", tft.width() / 2, top + 30, 2);
+    return;
+  }
+
+  clampSel();
+  ensureSelectionVisible(maxVisible);
+
+  int start = listStart;
+  int end = min((int)entries.size(), start + maxVisible);
+
+  const int x = 8;
+  const int w = tft.width() - 16;
+
+  for (int i = start; i < end; ++i) {
+    int y = top + (i - start) * rowH;
+    bool selected = (i == sel);
+    uint16_t bg = selected ? UI_FG : FEATURE_BG;
+    uint16_t fg = selected ? UI_ICON : UI_TEXT;
+
+    tft.fillRect(x, y, w, rowH - 1, bg);
+    tft.drawLine(x, y + rowH - 1, x + w, y + rowH - 1, UI_LINE);
+
+    tft.setTextFont(1);
+    tft.setTextColor(fg, bg);
+    String label = entries[i].name;
+    if (entries[i].isDir && !entries[i].isUp) label = label + "/";
+    label = ellipsize(label, w - 80, 1);
+    tft.setCursor(x + 4, y + 6);
+    tft.print(label);
+
+    String right = entries[i].isDir ? "DIR" : "";
+    if (!entries[i].isDir && !entries[i].isUp) {
+      char sbuf[16];
+      uint32_t kb = (entries[i].size + 1023) / 1024;
+      snprintf(sbuf, sizeof(sbuf), "%lukB", (unsigned long)kb);
+      right = sbuf;
+    }
+    if (right.length()) {
+      int tw = tft.textWidth(right, 1);
+      tft.setCursor(x + w - tw - 6, y + 6);
+      tft.print(right);
+    }
+  }
+
+  if ((int)entries.size() > maxVisible) {
+    int scrollBarX = tft.width() - 6;
+    int scrollBarHeight = bottom - top - 6;
+    int scrollBarY = top + 3;
+    int indicatorHeight = (maxVisible * scrollBarHeight) / (int)entries.size();
+    if (indicatorHeight < 6) indicatorHeight = 6;
+    int indicatorY = scrollBarY;
+    indicatorY = scrollBarY + (start * (scrollBarHeight - indicatorHeight)) / max(1, (int)entries.size() - maxVisible);
+    tft.fillRect(scrollBarX, scrollBarY, 3, scrollBarHeight, UI_LINE);
+    tft.fillRect(scrollBarX, indicatorY, 3, indicatorHeight, UI_ACCENT);
+  }
+}
+
+static void drawBrowserFooter() {
+  bool sdOk = isSDCardAvailable();
+  bool hasSel = !entries.empty();
+  bool selIsUp = false;
+  if (hasSel) {
+    clampSel();
+    selIsUp = entries[sel].isUp;
+  }
+
+  FeatureUI::drawFooterBg();
+  FeatureUI::layoutFooter4(
+    browserBtns,
+    "Exit",    ButtonStyle::Secondary,
+    "Open",    ButtonStyle::Primary,
+    "Delete",  ButtonStyle::Danger,
+    "Refresh", ButtonStyle::Secondary,
+    false,
+    (!sdOk || !hasSel),
+    (!sdOk || !hasSel || selIsUp),
+    false
+  );
+  for (auto& b : browserBtns) FeatureUI::drawButton(b);
+}
+
+static void drawBrowserPage(bool full = true) {
+  page = Page::Browser;
+  if (full) {
+    tft.fillScreen(COL_BG);
+    currentBatteryVoltage = readBatteryVoltage();
+    drawStatusBar(currentBatteryVoltage, true);
+  }
+
+  drawHeader("SD File Manager");
+  drawBrowserFooter();
+
+  drawList();
+  uiDirty = false;
+}
+
+static void drawInfoPage() {
+  page = Page::Info;
+  tft.fillScreen(COL_BG);
+  currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  drawHeader("File info");
+
+  FeatureUI::drawFooterBg();
+  FeatureUI::layoutFooter2(
+    infoBtns,
+    "Back",   ButtonStyle::Secondary,
+    "Delete", ButtonStyle::Danger,
+    false, (entries.empty() || !isSDCardAvailable())
+  );
+  for (auto& b : infoBtns) FeatureUI::drawButton(b);
+
+  const int top = STATUS_BAR_H + HEADER_H + 6;
+  const int bottom = tft.height() - FeatureUI::FOOTER_H - 2;
+  tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
+
+  if (entries.empty()) {
+    tft.setTextFont(2);
+    tft.setTextColor(UI_TEXT, COL_BG);
+    tft.drawCentreString("No selection", tft.width()/2, top + 24, 2);
+    uiDirty = false;
+    return;
+  }
+
+  clampSel();
+  const Entry& e = entries[sel];
+
+  tft.setTextFont(2);
+  tft.setTextColor(UI_TEXT, COL_BG);
+  tft.setCursor(8, top + 10);
+  tft.print("Name:");
+  tft.setCursor(70, top + 10);
+  tft.print(e.name);
+
+  tft.setCursor(8, top + 34);
+  tft.print("Type:");
+  tft.setCursor(70, top + 34);
+  tft.print(e.isDir ? "Folder" : "File");
+
+  if (!e.isDir) {
+    tft.setCursor(8, top + 58);
+    tft.print("Size:");
+    tft.setCursor(70, top + 58);
+    tft.print(String(e.size) + " B");
+  }
+
+  tft.setTextFont(1);
+  tft.setCursor(8, top + 88);
+  tft.print("Path:");
+  tft.setCursor(8, top + 102);
+  tft.print(e.path);
+
+  uiDirty = false;
+}
+
+static void drawConfirmDeletePage() {
+  page = Page::ConfirmDelete;
+  tft.fillScreen(COL_BG);
+  currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  drawHeader("Confirm delete");
+
+  FeatureUI::drawFooterBg();
+  FeatureUI::layoutFooter2(
+    confirmBtns,
+    "Cancel", ButtonStyle::Secondary,
+    "Delete", ButtonStyle::Danger,
+    false, false
+  );
+  for (auto& b : confirmBtns) FeatureUI::drawButton(b);
+
+  const int top = STATUS_BAR_H + HEADER_H + 6;
+  const int bottom = tft.height() - FeatureUI::FOOTER_H - 2;
+  tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
+
+  tft.setTextFont(2);
+  tft.setTextColor(UI_WARN, COL_BG);
+  tft.drawCentreString("Delete selected item?", tft.width()/2, top + 18, 2);
+
+  if (!entries.empty()) {
+    const Entry& e = entries[sel];
+    tft.setTextFont(1);
+    tft.setTextColor(UI_TEXT, COL_BG);
+    tft.drawCentreString(e.name.c_str(), tft.width()/2, top + 48, 1);
+  }
+
+  uiDirty = false;
+}
+
+static bool deleteSelected(String* errOut = nullptr) {
+  if (entries.empty()) { if (errOut) *errOut = "Nothing selected"; return false; }
+  clampSel();
+  const Entry e = entries[sel];
+  if (e.isUp) { if (errOut) *errOut = "Cannot delete .."; return false; }
+
+  if (!isSDCardAvailable()) { if (errOut) *errOut = "SD not mounted"; return false; }
+
+  bool ok = false;
+  if (e.isDir) {
+    // ESP32 FS supports rmdir. If directory is not empty it will fail.
+    ok = sdRmdirCompat(e.path);
+  } else {
+    ok = sdRemoveCompat(e.path);
+  }
+  if (!ok) {
+    if (errOut) *errOut = "Delete failed";
+    return false;
+  }
+  return true;
+}
+
+static void openSelected() {
+  if (entries.empty()) return;
+  clampSel();
+  const Entry& e = entries[sel];
+
+  if (e.isDir) {
+    String err;
+    if (!reloadDir(normalizePath(e.path), &err)) {
+      drawBrowserPage();
+      String msg = err.length() ? err : "Failed";
+      msg += "\n";
+      msg += e.path;
+      showNotification("Open", msg.c_str());
+      delay(600);
+      return;
+    }
+    drawBrowserPage();
+    return;
+  }
+  drawInfoPage();
+}
+
+static bool hitListRow(int x, int y, int& outIdx) {
+  int top, bottom, rowH, maxVisible;
+  listLayout(top, bottom, rowH, maxVisible);
+  if (y < top || y >= bottom) return false;
+
+  ensureSelectionVisible(maxVisible);
+  int start = listStart;
+  int end = min((int)entries.size(), start + maxVisible);
+
+  int row = (y - top) / rowH;
+  int idx = start + row;
+  if (idx < start || idx >= end) return false;
+  outIdx = idx;
+  return true;
+}
+
+static void handleTap(int x, int y) {
+  if (page == Page::Browser) {
+    int idx = -1;
+    if (hitListRow(x, y, idx)) {
+      if (idx != sel) {
+        sel = idx;
+        clampSel();
+        drawBrowserPage(false);
+      } else {
+        openSelected();
+      }
+      delay(140);
+      return;
+    }
+
+    int f = FeatureUI::hit(browserBtns, 4, x, y);
+    if (f >= 0) {
+      FeatureUI::drawButton(browserBtns[f], true);
+      delay(90);
+      FeatureUI::drawButton(browserBtns[f], false);
+      delay(90);
+
+      if (f == 0) { feature_exit_requested = true; return; }          // Exit
+      if (f == 1) { openSelected(); delay(120); return; }             // Open
+      if (f == 2) {                                                   // Delete
+        if (!entries.empty() && isSDCardAvailable() && !entries[sel].isUp) {
+          drawConfirmDeletePage();
+        }
+        delay(120);
+        return;
+      }
+      if (f == 3) { reloadDir(cwd, nullptr); drawBrowserPage(false); delay(120); return; } // Refresh
+    }
+  }
+  else if (page == Page::Info) {
+    int f = FeatureUI::hit(infoBtns, 2, x, y);
+    if (f >= 0) {
+      FeatureUI::drawButton(infoBtns[f], true);
+      delay(90);
+      FeatureUI::drawButton(infoBtns[f], false);
+      delay(90);
+
+      if (f == 0) { drawBrowserPage(); delay(120); return; }         // Back
+      if (f == 1) { drawConfirmDeletePage(); delay(120); return; }   // Delete
+    }
+  }
+  else if (page == Page::ConfirmDelete) {
+    int f = FeatureUI::hit(confirmBtns, 2, x, y);
+    if (f >= 0) {
+      FeatureUI::drawButton(confirmBtns[f], true);
+      delay(90);
+      FeatureUI::drawButton(confirmBtns[f], false);
+      delay(90);
+
+      if (f == 0) {                                                  // Cancel
+        drawBrowserPage();
+        delay(120);
+        return;
+      }
+      if (f == 1) {                                                  // Delete
+        String err;
+        bool ok = deleteSelected(&err);
+        if (!ok) {
+          showNotification("Delete", err.c_str());
+          delay(500);
+        }
+        reloadDir(cwd, nullptr);
+        drawBrowserPage();
+        delay(120);
+        return;
+      }
+    }
+  }
+}
+
+void setup() {
+  page = Page::Browser;
+  cwd = "/";
+  sel = 0;
+  uiDirty = true;
+  reloadDir("/", nullptr);
+  currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  drawBrowserPage();
+}
+
+void loop() {
+  updateStatusBar();
+  if (uiDirty) {
+    switch (page) {
+      case Page::Browser:        drawBrowserPage(true); break;
+      case Page::Info:           drawInfoPage(); break;
+      case Page::ConfirmDelete:  drawConfirmDeletePage(); break;
+    }
+  }
+
+  // Physical navigation (kept lightweight; SELECT is handled by the caller as "exit").
+  if (isButtonPressed(BTN_UP)) {
+    if (page == Page::Browser && !entries.empty()) { sel--; clampSel(); drawBrowserPage(false); }
+    delay(160);
+    return;
+  }
+  if (isButtonPressed(BTN_DOWN)) {
+    if (page == Page::Browser && !entries.empty()) { sel++; clampSel(); drawBrowserPage(false); }
+    delay(160);
+    return;
+  }
+
+  int x, y;
+  bool touched = readTouchXY(x, y);
+  if (!touched) {
+    if (touchActive && !touchDragging) {
+      handleTap(touchStartX, touchStartY);
+    }
+    touchActive = false;
+    touchDragging = false;
+    scrollAccumY = 0;
+    return;
+  }
+
+  if (!touchActive) {
+    touchActive = true;
+    touchDragging = false;
+    touchStartX = x;
+    touchStartY = y;
+    touchLastY = y;
+    scrollAccumY = 0;
+    return;
+  }
+
+  if (page == Page::Browser) {
+    int top, bottom, rowH, maxVisible;
+    listLayout(top, bottom, rowH, maxVisible);
+    bool canScroll = (touchStartY >= top && touchStartY < bottom);
+
+    int dy = y - touchLastY;
+    touchLastY = y;
+
+    if (!touchDragging && canScroll) {
+      if (abs(y - touchStartY) > 8) {
+        touchDragging = true;
+      }
+    }
+
+    if (touchDragging && canScroll) {
+      scrollAccumY += dy;
+      int steps = scrollAccumY / rowH;
+      if (steps != 0) {
+        listStart -= steps;
+        clampListStart(maxVisible);
+        if (!entries.empty()) {
+          if (sel < listStart) sel = listStart;
+          if (sel >= listStart + maxVisible) sel = min((int)entries.size() - 1, listStart + maxVisible - 1);
+        }
+        drawBrowserPage(false);
+        scrollAccumY -= steps * rowH;
+      }
+    }
+  }
+
+  return;
+}
+
+} // namespace SdFileManager
 
 namespace TouchCalib {
 static int stepIdx = 0;

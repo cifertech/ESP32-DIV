@@ -3,6 +3,7 @@
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
 #include <IRutils.h>
+#include <ArduinoJson.h>
 #include <SD.h>
 #include <algorithm>
 #include <vector>
@@ -23,7 +24,10 @@ static constexpr int16_t kToolbarY = 20;
 static constexpr int16_t kToolbarH = 16;
 static constexpr int16_t kIconSize = 16;
 
-static constexpr int16_t kGraphYOffset = 170;
+static constexpr int16_t kGraphYOffset = 168;
+static constexpr int16_t kCardRadius = 6;
+static constexpr int16_t kCardPad = 8;
+static constexpr uint16_t kCardBg = 0x2104;   /* card background on black */
 
 static constexpr uint16_t kMaxRawLen = 512;
 
@@ -95,7 +99,7 @@ static void redrawGraphTitleOnly(bool captured) {
     tft.print("IR waveform (");
     tft.print(zoomLabel());
     tft.print(")");
-    tft.setTextColor(UI_LABLE, FEATURE_BG);
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
     tft.setCursor(gx + 140, gy - 10);
     tft.print("tap to zoom");
   } else {
@@ -164,7 +168,7 @@ static void redrawWaveformPlotOnly() {
   const uint16_t colGridMinor = UI_LABLE;
   const uint16_t colMark      = UI_OK;
   const uint16_t colSpace     = UI_WARN;
-  const uint16_t colText      = UI_LABLE;
+  const uint16_t colText      = UI_DIM_TEXT;
 
   tft.fillRect(px0, py0, pw, ph, FEATURE_BG);
 
@@ -265,35 +269,44 @@ static void redrawWaveformPlotOnly() {
 }
 
 static void redrawCapturedDetailsOnly() {
-
   const int y0 = kToolbarY + kToolbarH + 4;
+  const int cardY = y0 + 52;
+  const int cardW = 224;
+  const int cardH = 90;
 
   tft.startWrite();
-  tft.fillRect(0, y0 + 56, 240, 86, FEATURE_BG);
-
-  tft.setTextFont(2);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_ICON, FEATURE_BG);
-  tft.setCursor(10, y0 + 60);
-  tft.println("Captured");
+  tft.fillRect(kCardPad, cardY, cardW, cardH, kCardBg);
+  tft.drawRoundRect(kCardPad, cardY, cardW, cardH, kCardRadius, UI_LINE);
 
   tft.setTextFont(1);
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(10, y0 + 78);
-  tft.print("Type: "); tft.println(typeToString(s_decodeType));
-  tft.setCursor(10, y0 + 92);
-  tft.printf("Bits: %u", (unsigned)s_bits);
-  tft.setCursor(10, y0 + 106);
-
-  tft.print("Key: ");
-  if (s_keyText.length() > 28) tft.println(s_keyText.substring(0, 28));
+  tft.setTextColor(UI_ICON, kCardBg);
+  tft.setCursor(kCardPad + 12, cardY + 8);
+  tft.print("Type:");
+  tft.setTextColor(UI_TEXT, kCardBg);
+  tft.setCursor(kCardPad + 48, cardY + 8);
+  tft.println(typeToString(s_decodeType));
+  tft.setTextColor(UI_ICON, kCardBg);
+  tft.setCursor(kCardPad + 12, cardY + 22);
+  tft.print("Bits:");
+  tft.setTextColor(UI_TEXT, kCardBg);
+  tft.setCursor(kCardPad + 48, cardY + 22);
+  tft.printf("%u", (unsigned)s_bits);
+  tft.setTextColor(UI_ICON, kCardBg);
+  tft.setCursor(kCardPad + 12, cardY + 36);
+  tft.print("Key:");
+  tft.setTextColor(UI_TEXT, kCardBg);
+  tft.setCursor(kCardPad + 48, cardY + 36);
+  if (s_keyText.length() > 26) tft.println(s_keyText.substring(0, 26));
   else tft.println(s_keyText);
-  tft.setCursor(10, y0 + 120);
-  tft.printf("Raw len: %u", (unsigned)s_rawLen);
-
-  tft.setCursor(10, y0 + 140);
-  tft.setTextColor(UI_LABLE, FEATURE_BG);
-  tft.println("UP:TX  DOWN:AUTO  LEFT/RIGHT:Repeat");
+  tft.setTextColor(UI_ICON, kCardBg);
+  tft.setCursor(kCardPad + 12, cardY + 50);
+  tft.print("Raw:");
+  tft.setTextColor(UI_TEXT, kCardBg);
+  tft.setCursor(kCardPad + 48, cardY + 50);
+  tft.printf("%u", (unsigned)s_rawLen);
+  tft.setTextColor(UI_DIM_TEXT, kCardBg);
+  tft.setCursor(kCardPad + 12, cardY + 66);
+  tft.print("Up:Send  Dn:Auto  L/R:Repeat");
 
   redrawGraphTitleOnly(true);
   redrawWaveformPlotOnly();
@@ -390,75 +403,101 @@ static void updateDisplay() {
   const int y0 = kToolbarY + kToolbarH + 4;
   tft.fillRect(0, y0, 240, 320 - y0, FEATURE_BG);
 
-  tft.setTextFont(2);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-
-  tft.drawBitmap(10, y0 + 4, bitmap_icon_signals, 16, 16, UI_ICON);
-  tft.setCursor(30, y0 + 4);
-  tft.print("IR Replay");
-  if (s_autoTx) {
-    tft.setTextColor(UI_WARN, FEATURE_BG);
-    tft.setCursor(190, y0 + 4);
-    tft.print("AUTO");
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-  }
-
+  /* Top row: Repeat, Auto, and AUTO badge when on */
   tft.setTextFont(1);
-  tft.setCursor(10, y0 + 24);
-  tft.setTextColor(UI_LABLE, FEATURE_BG);
-  tft.print("RX ");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.printf("GPIO%u  ", (unsigned)kRecvPin);
-  tft.setTextColor(UI_LABLE, FEATURE_BG);
-  tft.print("TX ");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.printf("GPIO%u  %ukHz", (unsigned)kSendPin, (unsigned)kKhz);
-
-  tft.setCursor(10, y0 + 38);
-  tft.setTextColor(UI_LABLE, FEATURE_BG);
+  tft.setCursor(10, y0 + 8);
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
   tft.print("Repeat ");
   tft.setTextColor(UI_TEXT, FEATURE_BG);
   tft.printf("%u", (unsigned)s_repeat);
-  tft.setTextColor(UI_LABLE, FEATURE_BG);
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
   tft.print("   Auto ");
-  tft.setTextColor(s_autoTx ? UI_WARN : UI_LABLE, FEATURE_BG);
+  tft.setTextColor(s_autoTx ? UI_WARN : UI_TEXT, FEATURE_BG);
   tft.print(s_autoTx ? "ON" : "OFF");
+  if (s_autoTx) {
+    tft.setTextColor(UI_WARN, FEATURE_BG);
+    tft.setCursor(190, y0 + 8);
+    tft.print("AUTO");
+  }
+
+  /* Status pill: REC Listening (orange) or Captured (green) */
+  const int pillY = y0 + 28;
+  const int pillH = 16;
+  if (!s_hasCapture) {
+    tft.fillRoundRect(8, pillY, 72, pillH, pillH / 2, UI_WARN);
+    tft.drawRoundRect(8, pillY, 72, pillH, pillH / 2, UI_ICON);
+    tft.setTextColor(FEATURE_BG, UI_WARN);
+    tft.setTextFont(1);
+    tft.setCursor(16, pillY + 4);
+    tft.print("REC");
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.setCursor(86, pillY + 4);
+    tft.print("Listening...");
+  } else {
+    tft.fillRoundRect(8, pillY, 70, pillH, pillH / 2, UI_OK);
+    tft.drawRoundRect(8, pillY, 70, pillH, pillH / 2, UI_LINE);
+    tft.setTextColor(FEATURE_BG, UI_OK);
+    tft.setTextFont(1);
+    tft.setCursor(18, pillY + 4);
+    tft.print("OK");
+    tft.setTextColor(UI_OK, FEATURE_BG);
+    tft.setCursor(84, pillY + 4);
+    tft.print("Captured");
+  }
+
+  /* Content card */
+  const int cardY = y0 + 52;
+  const int cardW = 224;
+  const int cardH = 90;
+  tft.fillRoundRect(kCardPad, cardY, cardW, cardH, kCardRadius, kCardBg);
+  tft.drawRoundRect(kCardPad, cardY, cardW, cardH, kCardRadius, UI_LINE);
 
   if (!s_hasCapture) {
+    /* Waiting: instruction in card */
     tft.setTextFont(2);
-    tft.setCursor(10, y0 + 60);
-    tft.setTextColor(UI_ICON, FEATURE_BG);
-    tft.println("Waiting for IR");
+    tft.setTextColor(UI_ICON, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 12);
+    tft.print("Point remote at device");
     tft.setTextFont(1);
-    tft.setCursor(10, y0 + 80);
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.println("Press a remote button to capture.");
-    tft.setCursor(10, y0 + 94);
-    tft.setTextColor(UI_LABLE, FEATURE_BG);
-    tft.println("Back: SELECT or toolbar icon");
+    tft.setTextColor(UI_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 34);
+    tft.print("Press any button to capture IR");
+    tft.setTextColor(UI_DIM_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 50);
+    tft.print("Live scope below shows activity");
+    tft.setCursor(kCardPad + 12, cardY + 64);
+    tft.print("Back: SELECT or toolbar");
   } else {
-    tft.setTextFont(2);
-    tft.setCursor(10, y0 + 60);
-    tft.setTextColor(UI_ICON, FEATURE_BG);
-    tft.println("Captured");
-
+    /* Captured: signal details in card */
     tft.setTextFont(1);
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.setCursor(10, y0 + 78);
-    tft.print("Type: "); tft.println(typeToString(s_decodeType));
-    tft.setCursor(10, y0 + 92);
-    tft.printf("Bits: %u", (unsigned)s_bits);
-    tft.setCursor(10, y0 + 106);
-    tft.print("Key: ");
-    if (s_keyText.length() > 28) tft.println(s_keyText.substring(0, 28));
+    tft.setTextColor(UI_ICON, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 8);
+    tft.print("Type:");
+    tft.setTextColor(UI_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 48, cardY + 8);
+    tft.println(typeToString(s_decodeType));
+    tft.setTextColor(UI_ICON, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 22);
+    tft.print("Bits:");
+    tft.setTextColor(UI_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 48, cardY + 22);
+    tft.printf("%u", (unsigned)s_bits);
+    tft.setTextColor(UI_ICON, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 36);
+    tft.print("Key:");
+    tft.setTextColor(UI_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 48, cardY + 36);
+    if (s_keyText.length() > 26) tft.println(s_keyText.substring(0, 26));
     else tft.println(s_keyText);
-    tft.setCursor(10, y0 + 120);
-    tft.printf("Raw len: %u", (unsigned)s_rawLen);
-
-    tft.setCursor(10, y0 + 140);
-    tft.setTextColor(UI_LABLE, FEATURE_BG);
-    tft.println("UP:TX  DOWN:AUTO  LEFT/RIGHT:Repeat");
+    tft.setTextColor(UI_ICON, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 50);
+    tft.print("Raw:");
+    tft.setTextColor(UI_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 48, cardY + 50);
+    tft.printf("%u", (unsigned)s_rawLen);
+    tft.setTextColor(UI_DIM_TEXT, kCardBg);
+    tft.setCursor(kCardPad + 12, cardY + 66);
+    tft.print("Up:Send  Dn:Auto  L/R:Repeat");
   }
 
   const int gx = 6;
@@ -484,7 +523,7 @@ static void updateDisplay() {
     tft.print("IR waveform (");
     tft.print(zoomLabel());
     tft.print(")");
-    tft.setTextColor(UI_LABLE, FEATURE_BG);
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
     tft.setCursor(gx + 140, gy - 10);
     tft.print("tap to zoom");
   } else {
@@ -521,7 +560,7 @@ static void updateDisplay() {
       }
     }
 
-    tft.setTextColor(UI_LABLE, FEATURE_BG);
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
     tft.setCursor(gx + 118, gy - 10);
     tft.print("press remote to see bursts");
     return;
@@ -1269,7 +1308,7 @@ static void drawDetails() {
   tft.print(uint64ToString(selectedHeader.value, 16));
 
   tft.setCursor(10, DETAILS_Y + 56);
-  tft.setTextColor(UI_LABLE, FEATURE_BG);
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
   tft.print("SRC: ");
   tft.print(baseName(selectedPath));
 
@@ -1595,4 +1634,1128 @@ void loop() {
   }
 }
 
+}
+
+namespace IRUniversalController {
+
+static constexpr const char* PROFILES_PATH = "/ir_profiles.json";
+static constexpr const char* PROFILES_DIR  = "/ir_profiles";
+static constexpr const char* FAV_PATH      = "/ir_favorites.json";
+
+static IRsend s_send(IR_TX_PIN);
+
+static constexpr uint16_t kMaxProfiles = 500;
+
+static constexpr int16_t kHeaderY = 20;
+static constexpr int16_t kHeaderH = 58;
+
+enum KeyId : uint8_t {
+  Power = 0,
+  Mute,
+  VolUp,
+  VolDn,
+  ChUp,
+  ChDn,
+  Up,
+  Down,
+  Left,
+  Right,
+  Ok,
+  Back,
+  KeyCount
+};
+
+static const char* keyLabel(KeyId k) {
+  switch (k) {
+    case Power: return "PWR";
+    case Mute:  return "MUTE";
+    case VolUp: return "VOL+";
+    case VolDn: return "VOL-";
+    case ChUp:  return "CH+";
+    case ChDn:  return "CH-";
+    case Up:    return "UP";
+    case Down:  return "DOWN";
+    case Left:  return "LEFT";
+    case Right: return "RIGHT";
+    case Ok:    return "OK";
+    case Back:  return "BACK";
+    default:    return "?";
+  }
+}
+
+struct Profile {
+  String name;
+  String category;
+  String brand;
+  decode_type_t proto = decode_type_t::UNKNOWN;
+  uint16_t bits = 0;
+  // Keep as 64-bit so we can support protocols like RC6 (36-bit), Panasonic (48-bit),
+  // Pioneer (64-bit), etc. Avoid ArduinoJson's 64-bit requirement by only parsing
+  // 64-bit values from strings (not Variant::as<uint64_t>).
+  uint64_t code[KeyCount]{};
+  bool has[KeyCount]{};
+};
+
+static std::vector<Profile> s_profiles;
+static int s_profileIdx = 0;
+static bool s_uiDrawn = false;
+static String s_lastErr = "";
+static bool s_loadedFromSd = false;
+
+static FeatureUI::Button s_footerBtns[4];
+static FeatureUI::Button s_keyBtns[KeyCount];
+
+// Browser state.
+enum class Screen : uint8_t { Remote, Category, Brand, Profile };
+static Screen s_screen = Screen::Remote;
+static std::vector<String> s_categories;
+static std::vector<String> s_brands;
+static std::vector<int> s_filteredProfileIdx;   
+static String s_selectedCategory = "";
+static String s_selectedBrand = "";
+static int s_listSel = 0;
+static bool s_browseFavoritesOnly = false;
+static uint32_t s_browseVersion = 0;
+
+static std::vector<String> s_favIds;
+
+static const unsigned char* keyIcon(KeyId k) {
+  switch (k) {
+    case Power: return bitmap_icon_power;
+    case Mute:  return bitmap_icon_dialog;
+    case VolUp: return bitmap_icon_sort_up_plus;
+    case VolDn: return bitmap_icon_sort_down_minus;
+    case ChUp:  return bitmap_icon_UP;
+    case ChDn:  return bitmap_icon_DOWN;
+    case Up:    return bitmap_icon_UP;
+    case Down:  return bitmap_icon_DOWN;
+    case Left:  return bitmap_icon_LEFT;
+    case Right: return bitmap_icon_RIGHT;
+    case Ok:    return bitmap_icon_start;
+    case Back:  return bitmap_icon_go_back;
+    default:    return nullptr;
+  }
+}
+
+static void drawKeyButton(KeyId k, bool pressed = false) {
+  const FeatureUI::Button& b = s_keyBtns[(int)k];
+  if (b.w <= 0 || b.h <= 0) return;
+
+  const bool disabled = b.disabled;
+  const uint16_t fill = disabled ? UI_BG : (pressed ? UI_FG : UI_BG);
+  const uint16_t edge = disabled ? UI_LINE : (pressed ? UI_ICON : UI_LINE);
+
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, 6, fill);
+  tft.drawRoundRect(b.x, b.y, b.w, b.h, 6, edge);
+
+  const unsigned char* ico = keyIcon(k);
+  if (ico) {
+    const int iconSize = 16;
+    const int ix = b.x + (b.w - iconSize) / 2;
+    const int iy = b.y + (b.h - iconSize) / 2;
+    tft.drawBitmap(ix, iy, ico, iconSize, iconSize, disabled ? UI_DIM_TEXT : UI_ICON);
+  }
+}
+
+static String profileIdForIndex(int idx) {
+  if (idx < 0 || idx >= (int)s_profiles.size()) return "";
+  const Profile& p = s_profiles[idx];
+
+  String id = p.name;
+  id += "|";
+  id += String((int)p.proto);
+  id += "|";
+  id += String((int)p.bits);
+  return id;
+}
+
+static bool isFavoriteId(const String& id) {
+  for (auto& s : s_favIds) if (s == id) return true;
+  return false;
+}
+
+static bool isCurrentFavorite() {
+  return isFavoriteId(profileIdForIndex(s_profileIdx));
+}
+
+static bool loadFavorites() {
+  s_favIds.clear();
+  if (!isSDCardAvailable()) return false;
+  if (!SD.exists(FAV_PATH)) return true;
+  File f = SD.open(FAV_PATH, FILE_READ);
+  if (!f) return false;
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) return false;
+  JsonArray arr = doc["favorites"].as<JsonArray>();
+  if (arr.isNull()) return true;
+  for (JsonVariant v : arr) {
+    const char* s = v.as<const char*>();
+    if (s && *s) s_favIds.push_back(String(s));
+    if ((int)s_favIds.size() >= 300) break;
+  }
+  return true;
+}
+
+static bool saveFavorites() {
+  if (!isSDCardAvailable()) return false;
+  if (SD.exists(FAV_PATH)) SD.remove(FAV_PATH);
+  DynamicJsonDocument doc(2048);
+  JsonArray arr = doc.createNestedArray("favorites");
+  for (auto& s : s_favIds) arr.add(s);
+  File f = SD.open(FAV_PATH, FILE_WRITE);
+  if (!f) return false;
+  bool ok = serializeJson(doc, f) > 0;
+  f.close();
+  return ok;
+}
+
+static void toggleFavoriteCurrent() {
+  String id = profileIdForIndex(s_profileIdx);
+  if (!id.length()) return;
+  for (int i = 0; i < (int)s_favIds.size(); i++) {
+    if (s_favIds[i] == id) {
+      s_favIds.erase(s_favIds.begin() + i);
+      saveFavorites();
+      return;
+    }
+  }
+  s_favIds.push_back(id);
+  saveFavorites();
+}
+
+static String shortStatusLine(const String& s, int maxLen = 32) {
+  if ((int)s.length() <= maxLen) return s;
+  return s.substring(0, maxLen);
+}
+
+static String normalizeToken(const String& in) {
+  String s;
+  s.reserve(in.length());
+  for (int i = 0; i < (int)in.length(); i++) {
+    char c = in[i];
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) s += c;
+  }
+  return s;
+}
+
+static bool keyFromToken(const String& tok, KeyId& out) {
+  String k = normalizeToken(tok);
+  if (k == "POWER" || k == "PWR") { out = Power; return true; }
+  if (k == "MUTE") { out = Mute; return true; }
+  if (k == "VOLUP" || k == "VOLUMEUP" || k == "VOLPLUS" || k == "VUP" || k == "VOLP") { out = VolUp; return true; }
+  if (k == "VOLDN" || k == "VOLDOWN" || k == "VOLUMEDOWN" || k == "VOLMINUS" || k == "VDN" || k == "VOLM") { out = VolDn; return true; }
+  if (k == "CHUP" || k == "CHANUP" || k == "CHANNELUP" || k == "CHPLUS") { out = ChUp; return true; }
+  if (k == "CHDN" || k == "CHDOWN" || k == "CHANDOWN" || k == "CHANNELDOWN" || k == "CHMINUS") { out = ChDn; return true; }
+  if (k == "UP") { out = Up; return true; }
+  if (k == "DOWN" || k == "DN") { out = Down; return true; }
+  if (k == "LEFT") { out = Left; return true; }
+  if (k == "RIGHT") { out = Right; return true; }
+  if (k == "OK" || k == "ENTER" || k == "SELECT") { out = Ok; return true; }
+  if (k == "BACK" || k == "RETURN" || k == "EXIT") { out = Back; return true; }
+  return false;
+}
+
+static bool protoFromToken(const String& tok, decode_type_t& out) {
+  String p = normalizeToken(tok);
+  if (p == "NEC") { out = decode_type_t::NEC; return true; }
+  if (p == "NECLIKE") { out = decode_type_t::NEC_LIKE; return true; }
+  if (p == "SONY" || p == "SIRC") { out = decode_type_t::SONY; return true; }
+  if (p == "SAMSUNG" || p == "SAMSUNG32" || p == "SAMSUNG36") { out = decode_type_t::SAMSUNG36; return true; }
+  if (p == "LG") { out = decode_type_t::LG; return true; }
+  if (p == "LG2") { out = decode_type_t::LG2; return true; }
+  if (p == "JVC") { out = decode_type_t::JVC; return true; }
+  if (p == "DENON") { out = decode_type_t::DENON; return true; }
+  if (p == "PANASONIC" || p == "KASEIKYO") { out = decode_type_t::PANASONIC; return true; }
+  if (p == "RC5" || p == "RC5X") { out = decode_type_t::RC5; return true; }
+  if (p == "RC6") { out = decode_type_t::RC6; return true; }
+  if (p == "PIONEER") { out = decode_type_t::PIONEER; return true; }
+  if (p == "DISH") { out = decode_type_t::DISH; return true; }
+  if (p == "GICABLE") { out = decode_type_t::GICABLE; return true; }
+  if (p == "EPSON") { out = decode_type_t::EPSON; return true; }
+
+  return false;
+}
+
+static String inferCategoryFromName(const String& name) {
+  String n = name;
+  n.toUpperCase();
+  if (n.indexOf("TV") >= 0) return "TV";
+  if (n.indexOf("AVR") >= 0 || n.indexOf("RECEIVER") >= 0 || n.indexOf("SOUNDBAR") >= 0) return "AVR";
+  if (n.indexOf("PROJECTOR") >= 0) return "PROJECTOR";
+  if (n.indexOf("XBOX") >= 0 || n.indexOf("PLAYSTATION") >= 0) return "GAME";
+  if (n.indexOf("AC") >= 0 || n.indexOf("AIR") >= 0) return "AC";
+  if (n.indexOf("CABLE") >= 0 || n.indexOf("DISH") >= 0 || n.indexOf("STB") >= 0) return "STB";
+  return "OTHER";
+}
+
+static String inferBrandFromName(const String& name) {
+  int par = name.indexOf('(');
+  String s = (par > 0) ? name.substring(0, par) : name;
+  s.trim();
+  int sp = s.indexOf(' ');
+  if (sp > 0) s = s.substring(0, sp);
+  s.trim();
+  if (!s.length()) return "UNKNOWN";
+  s.toUpperCase();
+  return s;
+}
+
+static void loadBuiltinProfiles() {
+  s_profiles.clear();
+
+  {
+    Profile p{};
+    p.name = "Samsung TV (common)";
+    p.proto = decode_type_t::SAMSUNG36;
+    p.bits = 32;
+    p.code[Power] = 0xE0E040BFu; p.has[Power] = true;
+    p.code[Mute]  = 0xE0E0F00Fu; p.has[Mute]  = true;
+    p.code[VolUp] = 0xE0E0E01Fu; p.has[VolUp] = true;
+    p.code[VolDn] = 0xE0E0D02Fu; p.has[VolDn] = true;
+    p.code[ChUp]  = 0xE0E048B7u; p.has[ChUp]  = true;
+    p.code[ChDn]  = 0xE0E008F7u; p.has[ChDn]  = true;
+    p.code[Up]    = 0xE0E006F9u; p.has[Up]    = true;
+    p.code[Down]  = 0xE0E08679u; p.has[Down]  = true;
+    p.code[Left]  = 0xE0E0A659u; p.has[Left]  = true;
+    p.code[Right] = 0xE0E046B9u; p.has[Right] = true;
+    p.code[Ok]    = 0xE0E016E9u; p.has[Ok]    = true;
+    p.code[Back]  = 0xE0E01AE5u; p.has[Back]  = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "LG TV (common)";
+    p.proto = decode_type_t::NEC;
+    p.bits = 32;
+    p.code[Power] = 0x20DF10EFu; p.has[Power] = true;
+    p.code[Mute]  = 0x20DF906Fu; p.has[Mute]  = true;
+    p.code[VolUp] = 0x20DF40BFu; p.has[VolUp] = true;
+    p.code[VolDn] = 0x20DFC03Fu; p.has[VolDn] = true;
+    p.code[ChUp]  = 0x20DF00FFu; p.has[ChUp]  = true;
+    p.code[ChDn]  = 0x20DF807Fu; p.has[ChDn]  = true;
+    p.code[Up]    = 0x20DF02FDu; p.has[Up]    = true;
+    p.code[Down]  = 0x20DF827Du; p.has[Down]  = true;
+    p.code[Left]  = 0x20DFE01Fu; p.has[Left]  = true;
+    p.code[Right] = 0x20DF609Fu; p.has[Right] = true;
+    p.code[Ok]    = 0x20DF22DDu; p.has[Ok]    = true;
+    p.code[Back]  = 0x20DF14EBu; p.has[Back]  = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Sony TV (common)";
+    p.proto = decode_type_t::SONY;
+    p.bits = 12;
+    p.code[Power] = 0x0A90u; p.has[Power] = true;
+    p.code[Mute]  = 0x0290u; p.has[Mute]  = true;
+    p.code[VolUp] = 0x0490u; p.has[VolUp] = true;
+    p.code[VolDn] = 0x0C90u; p.has[VolDn] = true;
+    p.code[ChUp]  = 0x0090u; p.has[ChUp]  = true;
+    p.code[ChDn]  = 0x0890u; p.has[ChDn]  = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Xbox 360";
+    p.proto = decode_type_t::RC6;
+    p.bits = 36;
+    p.code[Power] = 0x0C800F740Cu; p.has[Power] = true;  
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Epson Projector";
+    p.proto = decode_type_t::EPSON;
+    p.bits = 32;
+    p.code[Power] = 0xC1AA09F6u; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "JVC VCR";
+    p.proto = decode_type_t::JVC;
+    p.bits = 16;
+    p.code[Power] = 0xC2B8u; p.has[Power] = true; 
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Denon AVR";
+    p.proto = decode_type_t::DENON;
+    p.bits = 15;
+    p.code[Power] = 0x2278u; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Denon AVR";
+    p.proto = decode_type_t::DENON;
+    p.bits = 48;
+    p.code[Power] = 0x2A4C028D6CE3ULL; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Panasonic";
+    p.proto = decode_type_t::PANASONIC;
+    p.bits = 48;
+    p.code[Power] = 0x40040190ED7CULL; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "Pioneer";
+    p.proto = decode_type_t::PIONEER;
+    p.bits = 64;
+    p.code[Power] = 0x55FF00AAAA00FF55ULL; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "DISH";
+    p.proto = decode_type_t::DISH;
+    p.bits = 16;
+    p.code[Power] = 0x9C00u; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  {
+    Profile p{};
+    p.name = "GI Cable";
+    p.proto = decode_type_t::GICABLE;
+    p.bits = 16;
+    p.code[Power] = 0x8807u; p.has[Power] = true;
+    s_profiles.push_back(p);
+  }
+
+  s_lastErr = "Built-in profiles";
+}
+
+static bool endsWith(const String& s, const char* suf) {
+  int sl = s.length();
+  int tl = (int)strlen(suf);
+  if (tl > sl) return false;
+  return s.substring(sl - tl) == suf;
+}
+
+static bool parseProfilesJson(File& f, size_t docCapacity, String* errOut = nullptr) {
+
+  if (docCapacity < 512) docCapacity = 512;
+  DynamicJsonDocument doc(docCapacity);
+  DeserializationError err = deserializeJson(doc, f);
+  if (err) { if (errOut) *errOut = "JSON parse failed"; return false; }
+
+  JsonArray arr = doc["profiles"].as<JsonArray>();
+  if (!arr.isNull()) {
+    for (JsonVariant v : arr) {
+      JsonObject o = v.as<JsonObject>();
+      if (o.isNull()) continue;
+
+      const char* nm = o["name"] | "";
+      const char* pr = o["protocol"] | "";
+      const char* cat = o["category"] | "";
+      const char* br  = o["brand"] | "";
+      decode_type_t proto = decode_type_t::UNKNOWN;
+      if (!protoFromToken(String(pr), proto)) continue;
+
+      Profile p{};
+      p.name = String(nm);
+      if (!p.name.length()) p.name = String(pr);
+      p.category = String(cat);
+      p.brand = String(br);
+      if (!p.category.length()) p.category = inferCategoryFromName(p.name);
+      if (!p.brand.length()) p.brand = inferBrandFromName(p.name);
+      p.proto = proto;
+      p.bits = (uint16_t)(o["bits"] | ((proto == decode_type_t::SONY) ? 12 : 32));
+
+      JsonObject codes = o["codes"].as<JsonObject>();
+      if (!codes.isNull()) {
+        for (JsonPair kv : codes) {
+          String keyName = String(kv.key().c_str());
+          KeyId kid;
+          if (!keyFromToken(keyName, kid)) continue;
+
+          const char* valStr = kv.value().as<const char*>();
+          uint64_t code = 0;
+          bool ok = false;
+          if (valStr && strlen(valStr)) {
+            String s(valStr);
+            s.trim();
+            if (s.startsWith("0x") || s.startsWith("0X")) {
+              code = strtoull(s.c_str() + 2, nullptr, 16);
+              ok = true;
+            } else {
+              code = strtoull(s.c_str(), nullptr, 10);
+              ok = true;
+            }
+          } else if (kv.value().is<uint32_t>()) {
+            code = (uint64_t)kv.value().as<uint32_t>();
+            ok = true;
+          } else if (kv.value().is<uint16_t>()) {
+            code = (uint64_t)kv.value().as<uint16_t>();
+            ok = true;
+          } else if (kv.value().is<uint8_t>()) {
+            code = (uint64_t)kv.value().as<uint8_t>();
+            ok = true;
+          }
+          if (!ok) continue;
+
+          p.code[kid] = code;
+          p.has[kid] = true;
+        }
+      }
+
+      s_profiles.push_back(p);
+      if ((int)s_profiles.size() >= (int)kMaxProfiles) break;
+    }
+    return !s_profiles.empty();
+  }
+
+  JsonObject o = doc.as<JsonObject>();
+  if (!o.isNull() && (o.containsKey("name") || o.containsKey("protocol"))) {
+    const char* nm = o["name"] | "";
+    const char* pr = o["protocol"] | "";
+    const char* cat = o["category"] | "";
+    const char* br  = o["brand"] | "";
+    decode_type_t proto = decode_type_t::UNKNOWN;
+    if (!protoFromToken(String(pr), proto)) { if (errOut) *errOut = "Bad protocol"; return false; }
+
+    Profile p{};
+    p.name = String(nm);
+    if (!p.name.length()) p.name = String(pr);
+    p.category = String(cat);
+    p.brand = String(br);
+    if (!p.category.length()) p.category = inferCategoryFromName(p.name);
+    if (!p.brand.length()) p.brand = inferBrandFromName(p.name);
+    p.proto = proto;
+    p.bits = (uint16_t)(o["bits"] | ((proto == decode_type_t::SONY) ? 12 : 32));
+
+    JsonObject codes = o["codes"].as<JsonObject>();
+    if (!codes.isNull()) {
+      for (JsonPair kv : codes) {
+        String keyName = String(kv.key().c_str());
+        KeyId kid;
+        if (!keyFromToken(keyName, kid)) continue;
+        const char* valStr = kv.value().as<const char*>();
+        if (!valStr || !strlen(valStr)) continue;
+        String s(valStr);
+        s.trim();
+        uint64_t code = 0;
+        if (s.startsWith("0x") || s.startsWith("0X")) code = strtoull(s.c_str() + 2, nullptr, 16);
+        else code = strtoull(s.c_str(), nullptr, 10);
+        p.code[kid] = code;
+        p.has[kid] = true;
+      }
+    }
+    s_profiles.push_back(p);
+    return true;
+  }
+
+  if (errOut) *errOut = "No profiles";
+  return false;
+}
+
+static bool loadProfilesFromSd(String* errOut = nullptr) {
+  if (!isSDCardAvailable()) { if (errOut) *errOut = "SD not available"; return false; }
+  s_profiles.clear();
+
+  if (SD.exists(PROFILES_PATH)) {
+    File f = SD.open(PROFILES_PATH, FILE_READ);
+    if (!f) { if (errOut) *errOut = "Open /ir_profiles.json failed"; return false; }
+    String perr;
+
+    bool ok = parseProfilesJson(f, 8192, &perr);
+    f.close();
+    if (!ok) { if (errOut) *errOut = perr; return false; }
+    if (errOut) *errOut = String("Loaded ") + String((int)s_profiles.size()) + " profiles";
+    return true;
+  }
+
+  if (!SD.exists(PROFILES_DIR)) { if (errOut) *errOut = "No /ir_profiles.json or /ir_profiles/"; return false; }
+  File d = SD.open(PROFILES_DIR);
+  if (!d) { if (errOut) *errOut = "Open /ir_profiles failed"; return false; }
+
+  uint16_t loaded = 0;
+  for (;;) {
+    File f = d.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      String name = String(f.name());
+      if (endsWith(name, ".json")) {
+        String perr;
+        if (parseProfilesJson(f, 2048, &perr)) {
+          loaded++;
+          if ((int)s_profiles.size() >= (int)kMaxProfiles) { f.close(); break; }
+        }
+      }
+    }
+    f.close();
+  }
+  d.close();
+
+  if (s_profiles.empty()) { if (errOut) *errOut = "No profiles in /ir_profiles/"; return false; }
+  if (errOut) *errOut = String("Loaded ") + String((int)s_profiles.size()) + " profiles";
+  return true;
+}
+
+static void refreshProfiles() {
+  s_lastErr = "";
+  s_loadedFromSd = false;
+
+  String err;
+  if (loadProfilesFromSd(&err)) {
+    s_loadedFromSd = true;
+    s_lastErr = String("SD: ") + (err.length() ? err : String((int)s_profiles.size()));
+  } else {
+    loadBuiltinProfiles();
+    s_loadedFromSd = false;
+    if (err.length()) s_lastErr = "Built-in (SD: " + err + ")";
+    else s_lastErr = "Built-in";
+  }
+
+  if (s_profileIdx < 0) s_profileIdx = 0;
+  if (s_profileIdx >= (int)s_profiles.size()) s_profileIdx = 0;
+}
+
+static void drawHeader() {
+  const int y0 = kHeaderY;
+  tft.fillRect(0, y0, 240, kHeaderH, FEATURE_BG);
+  tft.setTextFont(2);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_ICON, FEATURE_BG);
+  tft.setCursor(10, y0 + 4);
+  tft.print("Universal IR");
+
+  tft.setTextFont(1);
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(10, y0 + 22);
+  if (!s_profiles.empty()) {
+    const Profile& p = s_profiles[s_profileIdx];
+    tft.print("Profile: ");
+    tft.setTextColor(UI_TEXT, FEATURE_BG);
+    tft.print(p.name);
+    tft.setTextColor(isCurrentFavorite() ? UI_WARN : UI_DIM_TEXT, FEATURE_BG);
+    tft.print(isCurrentFavorite() ? "  [FAV]" : "  [fav]");
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.setCursor(10, y0 + 34);
+    tft.print("Proto: ");
+    tft.setTextColor(UI_TEXT, FEATURE_BG);
+    tft.print(typeToString(p.proto));
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.print("  ");
+    tft.setTextColor(UI_TEXT, FEATURE_BG);
+    tft.printf("%d/%d", s_profileIdx + 1, (int)s_profiles.size());
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.print("  ");
+    tft.setTextColor(UI_TEXT, FEATURE_BG);
+    tft.print(s_loadedFromSd ? "SD" : "BUILTIN");
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.setCursor(10, y0 + 46);
+    tft.print(shortStatusLine(s_lastErr, 36));
+  } else {
+    tft.print(shortStatusLine(s_lastErr.length() ? s_lastErr : "No profiles", 36));
+  }
+}
+
+static void rebuildCategoriesAndBrands() {
+  s_categories.clear();
+  s_brands.clear();
+  if (s_profiles.empty()) return;
+
+  auto addUnique = [](std::vector<String>& v, const String& s) {
+    for (auto& x : v) if (x == s) return;
+    v.push_back(s);
+  };
+
+  addUnique(s_categories, "FAVORITES");
+  for (auto& p : s_profiles) {
+    addUnique(s_categories, p.category.length() ? p.category : String("OTHER"));
+  }
+  std::sort(s_categories.begin() + 1, s_categories.end());
+  s_browseVersion++;
+}
+
+static void rebuildBrandsForCategory(const String& cat) {
+  s_brands.clear();
+  if (s_profiles.empty()) return;
+  auto addUnique = [](std::vector<String>& v, const String& s) {
+    for (auto& x : v) if (x == s) return;
+    v.push_back(s);
+  };
+  addUnique(s_brands, "ALL");
+  for (auto& p : s_profiles) {
+    if (p.category == cat) addUnique(s_brands, p.brand.length() ? p.brand : String("UNKNOWN"));
+  }
+  std::sort(s_brands.begin() + 1, s_brands.end());
+  s_browseVersion++;
+}
+
+static void rebuildFilteredProfiles() {
+  s_filteredProfileIdx.clear();
+  if (s_profiles.empty()) return;
+  if (s_browseFavoritesOnly) {
+    for (int i = 0; i < (int)s_profiles.size(); i++) {
+      if (isFavoriteId(profileIdForIndex(i))) s_filteredProfileIdx.push_back(i);
+    }
+    return;
+  }
+
+  for (int i = 0; i < (int)s_profiles.size(); i++) {
+    const Profile& p = s_profiles[i];
+    if (s_selectedCategory.length() && p.category != s_selectedCategory) continue;
+    if (s_selectedBrand.length() && s_selectedBrand != "ALL" && p.brand != s_selectedBrand) continue;
+    s_filteredProfileIdx.push_back(i);
+  }
+  s_browseVersion++;
+}
+
+static constexpr int LIST_ROW_H = 18;
+static constexpr int LIST_X = 8;
+static constexpr int LIST_W = 224;
+
+static int listTopY() { return kHeaderY + kHeaderH + 6; }
+static int footerY() { return tft.height() - FeatureUI::FOOTER_H; }
+static int listRowsVisible() {
+  int h = footerY() - listTopY() - 6;
+  int rows = h / LIST_ROW_H;
+  if (rows < 4) rows = 4;
+  if (rows > 10) rows = 10;
+  return rows;
+}
+
+static void drawListRow(int y, const String& left, const String& right, bool selected) {
+  uint16_t bg = selected ? UI_FG : FEATURE_BG;
+  uint16_t fg = selected ? UI_ICON : UI_TEXT;
+  tft.fillRect(LIST_X, y, LIST_W, LIST_ROW_H - 1, bg);
+  tft.setTextFont(1);
+  tft.setTextColor(fg, bg);
+  tft.setCursor(LIST_X + 4, y + 4);
+  tft.print(left);
+  if (right.length()) {
+    int tw = tft.textWidth(right, 1);
+    tft.setCursor(LIST_X + LIST_W - 4 - tw, y + 4);
+    tft.print(right);
+  }
+}
+
+static void drawListScreen(const char* title, const std::vector<String>& items) {
+  static Screen s_lastListScreen = Screen::Remote;
+  static int s_lastSel = -1;
+  static int s_lastPageStart = -1;
+  static uint32_t s_lastBrowseVersion = 0;
+
+  drawHeader();
+
+  const int top = listTopY();
+  const int rows = listRowsVisible();
+  const int total = (int)items.size();
+  if (s_listSel < 0) s_listSel = 0;
+  if (total > 0 && s_listSel >= total) s_listSel = total - 1;
+
+  int pageStart = (rows > 0) ? ((s_listSel / rows) * rows) : 0;
+  const bool needFull =
+      (s_lastListScreen != s_screen) ||
+      (s_lastBrowseVersion != s_browseVersion) ||
+      (s_lastPageStart != pageStart) ||
+      (s_lastSel < 0);
+
+  if (needFull) {
+    tft.fillRect(0, listTopY(), 240, footerY() - listTopY(), FEATURE_BG);
+    for (int r = 0; r < rows; r++) {
+      int idx = pageStart + r;
+      if (idx >= total) break;
+      drawListRow(top + r * LIST_ROW_H, items[idx], "", idx == s_listSel);
+    }
+  } else {
+    int oldSel = s_lastSel;
+    int newSel = s_listSel;
+    int oldRow = oldSel - pageStart;
+    int newRow = newSel - pageStart;
+    if (oldRow >= 0 && oldRow < rows && oldSel >= 0 && oldSel < total) {
+      drawListRow(top + oldRow * LIST_ROW_H, items[oldSel], "", false);
+    }
+    if (newRow >= 0 && newRow < rows && newSel >= 0 && newSel < total) {
+      drawListRow(top + newRow * LIST_ROW_H, items[newSel], "", true);
+    }
+  }
+
+  s_lastListScreen = s_screen;
+  s_lastSel = s_listSel;
+  s_lastPageStart = pageStart;
+  s_lastBrowseVersion = s_browseVersion;
+
+  FeatureUI::drawFooterBg();
+}
+
+static void layoutFooterRemote() {
+  FeatureUI::layoutFooter4(
+    s_footerBtns,
+    "Back",   FeatureUI::ButtonStyle::Secondary,
+    "Browse", FeatureUI::ButtonStyle::Secondary,
+    "Favs",   FeatureUI::ButtonStyle::Secondary,
+    "Reload", FeatureUI::ButtonStyle::Secondary
+  );
+}
+
+static void layoutFooterBrowse() {
+  FeatureUI::layoutFooter4(
+    s_footerBtns,
+    "Back",   FeatureUI::ButtonStyle::Secondary,
+    "Select", FeatureUI::ButtonStyle::Primary,
+    "Prev",   FeatureUI::ButtonStyle::Secondary,
+    "Next",   FeatureUI::ButtonStyle::Secondary
+  );
+}
+
+static void layoutKeyButtons() {
+  const int footerY = tft.height() - FeatureUI::FOOTER_H;
+  const int topY = kHeaderY + kHeaderH + 8;
+  const int bottomY = footerY - 8;
+
+  const int padX = 8;
+  const int gap = 6;
+
+  // Top row
+  const int topBtnH = 36;
+  const int topBtnW = (240 - 2 * padX - 2 * gap) / 3;
+  const int yTop = topY;
+  const int x0 = padX;
+  const int x1 = x0 + topBtnW + gap;
+  const int x2 = x1 + topBtnW + gap;
+  s_keyBtns[(int)Power] = {(int16_t)x0,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Power),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)Mute]  = {(int16_t)x1,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Mute), FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)Back]  = {(int16_t)x2,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Back), FeatureUI::ButtonStyle::Secondary,true};
+
+  // Middle area
+  const int yMidTop = yTop + topBtnH + 10;
+  const int midH = bottomY - yMidTop;
+  const int rockerW = 56;
+  const int rockerH = 74;
+  const int dpadSize = 96;
+  const int dpadX = (240 - dpadSize) / 2;
+  const int dpadY = yMidTop + (midH - dpadSize) / 2;
+
+  // Rockers
+  const int volX = padX;
+  const int chX = 240 - padX - rockerW;
+  const int rockerY = yMidTop + (midH - rockerH) / 2;
+  s_keyBtns[(int)VolUp] = {(int16_t)volX,(int16_t)rockerY,(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(VolUp),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)VolDn] = {(int16_t)volX,(int16_t)(rockerY + rockerH/2 + 2),(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(VolDn),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)ChUp]  = {(int16_t)chX,(int16_t)rockerY,(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(ChUp),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)ChDn]  = {(int16_t)chX,(int16_t)(rockerY + rockerH/2 + 2),(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(ChDn),FeatureUI::ButtonStyle::Secondary,true};
+
+  // D-pad (cross)
+  const int unit = 28;
+  const int okSize = 40;
+  const int okX = dpadX + (dpadSize - okSize) / 2;
+  const int okY = dpadY + (dpadSize - okSize) / 2;
+  s_keyBtns[(int)Ok]    = {(int16_t)okX,(int16_t)okY,(int16_t)okSize,(int16_t)okSize,keyLabel(Ok),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)Up]    = {(int16_t)(dpadX + (dpadSize - unit)/2),(int16_t)dpadY,(int16_t)unit,(int16_t)unit,keyLabel(Up),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)Down]  = {(int16_t)(dpadX + (dpadSize - unit)/2),(int16_t)(dpadY + dpadSize - unit),(int16_t)unit,(int16_t)unit,keyLabel(Down),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)Left]  = {(int16_t)dpadX,(int16_t)(dpadY + (dpadSize - unit)/2),(int16_t)unit,(int16_t)unit,keyLabel(Left),FeatureUI::ButtonStyle::Secondary,true};
+  s_keyBtns[(int)Right] = {(int16_t)(dpadX + dpadSize - unit),(int16_t)(dpadY + (dpadSize - unit)/2),(int16_t)unit,(int16_t)unit,keyLabel(Right),FeatureUI::ButtonStyle::Secondary,true};
+}
+
+static void drawKeys() {
+  layoutKeyButtons();
+  const int footerY = tft.height() - FeatureUI::FOOTER_H;
+  const int topY = kHeaderY + kHeaderH + 6;
+  tft.fillRect(0, topY, 240, footerY - topY, FEATURE_BG);
+
+  if (s_profiles.empty()) {
+    tft.setTextFont(2);
+    tft.setTextColor(UI_WARN, FEATURE_BG);
+    tft.setCursor(10, topY + 20);
+    tft.print("No profiles");
+    tft.setTextFont(1);
+    tft.setTextColor(UI_TEXT, FEATURE_BG);
+    tft.setCursor(10, topY + 38);
+    tft.print("Add SD profiles:");
+    tft.setCursor(10, topY + 50);
+    tft.print("/ir_profiles.json or /ir_profiles/*.json");
+    return;
+  }
+
+  const Profile& p = s_profiles[s_profileIdx];
+  for (int i = 0; i < (int)KeyCount; i++) {
+    bool ok = p.has[i];
+    s_keyBtns[i].disabled = !ok;
+  }
+  for (int i = 0; i < (int)KeyCount; i++) {
+    drawKeyButton((KeyId)i, false);
+  }
+}
+
+static void drawFooter() {
+  FeatureUI::drawFooterBg();
+  const bool hasProfiles = !s_profiles.empty();
+  if (s_screen == Screen::Remote) {
+    layoutFooterRemote();
+  } else {
+    layoutFooterBrowse();
+  }
+  for (int i = 0; i < 4; i++) FeatureUI::drawButton(s_footerBtns[i], false);
+}
+
+static void drawAll() {
+  if (s_screen == Screen::Remote) {
+    tft.fillScreen(FEATURE_BG);
+    float v = readBatteryVoltage();
+    drawStatusBar(v, true);
+    drawHeader();
+    drawKeys();
+    drawFooter();
+    s_uiDrawn = true;
+    return;
+  }
+
+  drawFooter();
+  if (s_screen == Screen::Category) drawListScreen("Browse: Category", s_categories);
+  else if (s_screen == Screen::Brand) drawListScreen("Browse: Brand", s_brands);
+  else if (s_screen == Screen::Profile) {
+    std::vector<String> names;
+    names.reserve(s_filteredProfileIdx.size());
+    for (int idx : s_filteredProfileIdx) {
+      if (idx < 0 || idx >= (int)s_profiles.size()) continue;
+      const bool fav = isFavoriteId(profileIdForIndex(idx));
+      String nm = s_profiles[idx].name;
+      if (fav) nm = String("* ") + nm;
+      names.push_back(nm);
+    }
+    drawListScreen(s_browseFavoritesOnly ? "Browse: Favorites" : "Browse: Profiles", names);
+  }
+  drawFooter();
+  s_uiDrawn = true;
+}
+
+static void sendKey(KeyId k) {
+  if (s_profiles.empty()) return;
+  const Profile& p = s_profiles[s_profileIdx];
+  if (!p.has[k]) {
+    showNotification("IR", "Key not available in this profile");
+    return;
+  }
+
+  s_send.begin();
+  uint16_t repeat = 0;
+  if (p.proto == decode_type_t::SONY || p.proto == decode_type_t::SONY_38K) repeat = 2;
+
+  if (!s_send.send(p.proto, p.code[k], p.bits, repeat)) {
+    showNotification("IR", "Protocol not enabled in build");
+  }
+}
+
+static void changeProfile(int delta) {
+  if (s_profiles.empty()) return;
+  int n = (int)s_profiles.size();
+  s_profileIdx = (s_profileIdx + delta) % n;
+  if (s_profileIdx < 0) s_profileIdx += n;
+  drawHeader();
+  drawKeys();
+  drawFooter();
+}
+
+void setup() {
+  s_send.begin();
+  s_profileIdx = 0;
+  s_uiDrawn = false;
+  s_screen = Screen::Remote;
+  loadFavorites();
+  refreshProfiles();
+  rebuildCategoriesAndBrands();
+  drawAll();
+}
+
+void loop() {
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
+  if (!s_uiDrawn) drawAll();
+
+  const uint32_t now = millis();
+  static uint32_t lastBtnMs = 0;
+  static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
+  const bool leftNow  = isButtonPressed(BTN_LEFT);
+  const bool rightNow = isButtonPressed(BTN_RIGHT);
+  const bool upNow    = isButtonPressed(BTN_UP);
+  const bool downNow  = isButtonPressed(BTN_DOWN);
+  constexpr uint32_t kBtnDebounceMs = 320;
+  if ((uint32_t)(now - lastBtnMs) > kBtnDebounceMs) {
+    if (s_screen == Screen::Remote) {
+      if (leftNow && !prevLeft) { changeProfile(-1); lastBtnMs = now; }
+      else if (rightNow && !prevRight) { changeProfile(+1); lastBtnMs = now; }
+      else if (upNow && !prevUp) { sendKey(VolUp); lastBtnMs = now; }
+      else if (downNow && !prevDown) { sendKey(VolDn); lastBtnMs = now; }
+    } else {
+      if (upNow && !prevUp) { s_listSel--; s_uiDrawn = false; lastBtnMs = now; }
+      else if (downNow && !prevDown) { s_listSel++; s_uiDrawn = false; lastBtnMs = now; }
+      else if (leftNow && !prevLeft) {
+        if (s_screen == Screen::Category) { s_screen = Screen::Remote; }
+        else if (s_screen == Screen::Brand) { s_screen = Screen::Category; }
+        else if (s_screen == Screen::Profile) { s_screen = s_browseFavoritesOnly ? Screen::Category : Screen::Brand; }
+        s_uiDrawn = false; lastBtnMs = now;
+      } else if (rightNow && !prevRight) {
+        if (s_screen == Screen::Category) {
+          if (!s_categories.empty()) {
+            String cat = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size()-1))];
+            if (cat == "FAVORITES") {
+              s_browseFavoritesOnly = true;
+              s_selectedCategory = "";
+              s_selectedBrand = "";
+              rebuildFilteredProfiles();
+              s_screen = Screen::Profile;
+            } else {
+              s_browseFavoritesOnly = false;
+              s_selectedCategory = cat;
+              rebuildBrandsForCategory(cat);
+              s_screen = Screen::Brand;
+            }
+            s_listSel = 0;
+            s_uiDrawn = false;
+            lastBtnMs = now;
+          }
+        } else if (s_screen == Screen::Brand) {
+          if (!s_brands.empty()) {
+            s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size()-1))];
+            s_browseFavoritesOnly = false;
+            rebuildFilteredProfiles();
+            s_screen = Screen::Profile;
+            s_listSel = 0;
+            s_uiDrawn = false;
+            lastBtnMs = now;
+          }
+        } else if (s_screen == Screen::Profile) {
+          if (!s_filteredProfileIdx.empty()) {
+            int idx = s_filteredProfileIdx[std::max(0, std::min(s_listSel, (int)s_filteredProfileIdx.size()-1))];
+            if (idx >= 0 && idx < (int)s_profiles.size()) {
+              s_profileIdx = idx;
+              s_screen = Screen::Remote;
+              s_uiDrawn = false;
+              lastBtnMs = now;
+            }
+          }
+        }
+      }
+    }
+  }
+  prevLeft = leftNow;
+  prevRight = rightNow;
+  prevUp = upNow;
+  prevDown = downNow;
+
+  static uint32_t lastTouchMs = 0;
+  static bool touchWasDown = false;
+  const bool touchNow = ts.touched();
+  constexpr uint32_t kTouchDebounceMs = 320;
+  if (touchNow && !touchWasDown) {
+    int x, y;
+    touchWasDown = true;
+    if (!readTouchXY(x, y)) return;
+    if ((uint32_t)(now - lastTouchMs) < kTouchDebounceMs) return;
+    lastTouchMs = now;
+
+    if (x > 180 && y >= kHeaderY + 18 && y <= kHeaderY + 34 && s_screen == Screen::Remote) {
+      toggleFavoriteCurrent();
+      drawHeader();
+      return;
+    }
+
+    int f = FeatureUI::hit(s_footerBtns, 4, x, y);
+    if (f >= 0) {
+      if (s_screen == Screen::Remote) {
+        if (f == 0) { feature_exit_requested = true; return; }
+        if (f == 1) { s_screen = Screen::Category; s_listSel = 0; rebuildCategoriesAndBrands(); s_uiDrawn = false; return; }
+        if (f == 2) { s_browseFavoritesOnly = true; rebuildFilteredProfiles(); s_screen = Screen::Profile; s_listSel = 0; s_uiDrawn = false; return; }
+        if (f == 3) { refreshProfiles(); rebuildCategoriesAndBrands(); s_uiDrawn = false; return; }
+      } else {
+
+        if (f == 0) {
+          if (s_screen == Screen::Category) s_screen = Screen::Remote;
+          else if (s_screen == Screen::Brand) s_screen = Screen::Category;
+          else if (s_screen == Screen::Profile) s_screen = s_browseFavoritesOnly ? Screen::Category : Screen::Brand;
+          s_uiDrawn = false; return;
+        }
+        if (f == 1) {
+
+          if (s_screen == Screen::Category) { prevRight = false; }
+
+          if (s_screen == Screen::Category) {
+            if (!s_categories.empty()) {
+              String cat = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size()-1))];
+              if (cat == "FAVORITES") {
+                s_browseFavoritesOnly = true; s_selectedCategory=""; s_selectedBrand="";
+                rebuildFilteredProfiles(); s_screen = Screen::Profile;
+              } else {
+                s_browseFavoritesOnly = false; s_selectedCategory = cat;
+                rebuildBrandsForCategory(cat); s_screen = Screen::Brand;
+              }
+              s_listSel = 0; s_uiDrawn = false; return;
+            }
+          } else if (s_screen == Screen::Brand) {
+            if (!s_brands.empty()) {
+              s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size()-1))];
+              s_browseFavoritesOnly = false; rebuildFilteredProfiles(); s_screen = Screen::Profile;
+              s_listSel = 0; s_uiDrawn = false; return;
+            }
+          } else if (s_screen == Screen::Profile) {
+            if (!s_filteredProfileIdx.empty()) {
+              int idx = s_filteredProfileIdx[std::max(0, std::min(s_listSel, (int)s_filteredProfileIdx.size()-1))];
+              if (idx >= 0 && idx < (int)s_profiles.size()) {
+                s_profileIdx = idx; s_screen = Screen::Remote; s_uiDrawn = false; return;
+              }
+            }
+          }
+        }
+        if (f == 2) { s_listSel -= listRowsVisible(); if (s_listSel < 0) s_listSel = 0; s_uiDrawn = false; return; }
+        if (f == 3) { s_listSel += listRowsVisible(); s_uiDrawn = false; return; }
+      }
+      return;
+    }
+
+    if (s_screen == Screen::Remote) {
+      int k = FeatureUI::hit(s_keyBtns, (int)KeyCount, x, y);
+      if (k >= 0) {
+        if (!s_keyBtns[k].disabled) {
+          drawKeyButton((KeyId)k, true);
+          sendKey((KeyId)k);
+          drawKeyButton((KeyId)k, false);
+        }
+        return;
+      }
+    } else {
+
+      const int top = listTopY();
+      const int rows = listRowsVisible();
+      if (y >= top && y < top + rows * LIST_ROW_H) {
+        int row = (y - top) / LIST_ROW_H;
+        int pageStart = (rows > 0) ? ((s_listSel / rows) * rows) : 0;
+        int idx = pageStart + row;
+        int max = 0;
+        if (s_screen == Screen::Category) max = (int)s_categories.size();
+        else if (s_screen == Screen::Brand) max = (int)s_brands.size();
+        else if (s_screen == Screen::Profile) max = (int)s_filteredProfileIdx.size();
+        if (idx >= 0 && idx < max) { s_listSel = idx; s_uiDrawn = false; return; }
+      }
+    }
+  }
+
+  if (!touchNow) touchWasDown = false;
+
+  delay(10);
+  }
 }

@@ -46,11 +46,12 @@ const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
 int current_menu_index = 0;
 bool is_main_menu = false;
 
-const int NUM_SUBMENU_ITEMS = 7;
+const int NUM_SUBMENU_ITEMS = 8;
 const char *submenu_items[NUM_SUBMENU_ITEMS] = {
     "Packet Monitor",
     "Beacon Spammer",
     "WiFi Deauther",
+    "Probe Request Flood",
     "Deauth Detector",
     "WiFi Scanner",
     "Captive Portal",
@@ -66,33 +67,32 @@ const char *bluetooth_submenu_items[bluetooth_NUM_SUBMENU_ITEMS] = {
     "BLE Rubber Ducky",
     "Back to Main Menu"};
 
-const int nrf_NUM_SUBMENU_ITEMS = 5;
+const int nrf_NUM_SUBMENU_ITEMS = 3;
 const char *nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
     "Scanner",
-    "Analyzer [Coming soon]",
-    "WLAN Jammer [Coming soon]",
     "Proto Kill",
     "Back to Main Menu"};
 
-const int subghz_NUM_SUBMENU_ITEMS = 5;
+const int subghz_NUM_SUBMENU_ITEMS = 4;
 const char *subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
     "Replay Attack",
-    "Bruteforce [Coming soon]",
     "SubGHz Jammer",
     "Saved Profile",
     "Back to Main Menu"};
 
-const int tools_NUM_SUBMENU_ITEMS = 4;
+const int tools_NUM_SUBMENU_ITEMS = 5;
 const char *tools_submenu_items[tools_NUM_SUBMENU_ITEMS] = {
     "Serial Monitor",
     "Update Firmware",
     "Touch Calibrate",
+    "SD File Manager",
     "Back to Main Menu"};
 
-const int ir_NUM_SUBMENU_ITEMS = 3;
+const int ir_NUM_SUBMENU_ITEMS = 4;
 const char *ir_submenu_items[ir_NUM_SUBMENU_ITEMS] = {
     "Record",
     "Saved Profile",
+    "Universal Controller",
     "Back to Main Menu"};
 
 const int about_NUM_SUBMENU_ITEMS = 1;
@@ -113,6 +113,7 @@ const unsigned char *wifi_submenu_icons[NUM_SUBMENU_ITEMS] = {
     bitmap_icon_wifi,
     bitmap_icon_antenna,
     bitmap_icon_wifi_jammer,
+    bitmap_icon_signal,
     bitmap_icon_eye2,
     bitmap_icon_jammer,
     bitmap_icon_bash,
@@ -131,15 +132,12 @@ const unsigned char *bluetooth_submenu_icons[bluetooth_NUM_SUBMENU_ITEMS] = {
 
 const unsigned char *nrf_submenu_icons[nrf_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_scanner,
-    bitmap_icon_question,
-    bitmap_icon_question,
     bitmap_icon_kill,
     bitmap_icon_go_back
 };
 
 const unsigned char *subghz_submenu_icons[subghz_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_antenna,
-    bitmap_icon_question,
     bitmap_icon_no_signal,
     bitmap_icon_list,
     bitmap_icon_go_back
@@ -149,12 +147,14 @@ const unsigned char *tools_submenu_icons[tools_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_bash,
     bitmap_icon_follow,
     bitmap_icon_undo,
+    bitmap_icon_sdcard,
     bitmap_icon_go_back
 };
 
 const unsigned char *ir_submenu_icons[ir_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_led,
     bitmap_icon_list,
+    bitmap_icon_key,
     bitmap_icon_go_back
 };
 
@@ -404,7 +404,7 @@ void handleWiFiSubmenuButtons() {
         last_interaction_time = millis();
         delay(200);
 
-        if (current_submenu_index == 6) {
+        if (current_submenu_index == 7) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
@@ -520,11 +520,23 @@ void handleWiFiSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            DeauthDetect::deauthdetectSetup();
+            ProbeRequestFlood::probeRequestFloodSetup();
             while (current_submenu_index == 3 && !feature_exit_requested) {
                 current_submenu_index = 3;
                 in_sub_menu = true;
-                DeauthDetect::deauthdetectLoop();
+                ProbeRequestFlood::probeRequestFloodLoop();
+                if (isButtonPressed(BTN_SELECT)) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                    while (isButtonPressed(BTN_SELECT)) {
+                    }
+                    break;
+                }
             }
             if (feature_exit_requested) {
                 in_sub_menu = true;
@@ -542,9 +554,31 @@ void handleWiFiSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            WifiScan::wifiscanSetup();
+            DeauthDetect::deauthdetectSetup();
             while (current_submenu_index == 4 && !feature_exit_requested) {
                 current_submenu_index = 4;
+                in_sub_menu = true;
+                DeauthDetect::deauthdetectLoop();
+            }
+            if (feature_exit_requested) {
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
+
+        if (current_submenu_index == 5) {
+            current_submenu_index = 5;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            WifiScan::wifiscanSetup();
+            while (current_submenu_index == 5 && !feature_exit_requested) {
+                current_submenu_index = 5;
                 in_sub_menu = true;
                 WifiScan::wifiscanLoop();
                 if (isButtonPressed(BTN_SELECT)) {
@@ -570,15 +604,14 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-
-        if (current_submenu_index == 5) {
-            current_submenu_index = 5;
+        if (current_submenu_index == 6) {
+            current_submenu_index = 6;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             CaptivePortal::cportalSetup();
-            while (current_submenu_index == 5 && !feature_exit_requested) {
-                current_submenu_index = 5;
+            while (current_submenu_index == 6 && !feature_exit_requested) {
+                current_submenu_index = 6;
                 in_sub_menu = true;
                 CaptivePortal::cportalLoop();
                 if (isButtonPressed(BTN_SELECT)) {
@@ -626,7 +659,7 @@ void handleWiFiSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (current_submenu_index == 6) {
+                if (current_submenu_index == 7) {
                     in_sub_menu = false;
                     feature_active = false;
                     feature_exit_requested = false;
@@ -734,11 +767,11 @@ void handleWiFiSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    DeauthDetect::deauthdetectSetup();
+                    ProbeRequestFlood::probeRequestFloodSetup();
                     while (current_submenu_index == 3 && !feature_exit_requested) {
                         current_submenu_index = 3;
                         in_sub_menu = true;
-                        DeauthDetect::deauthdetectLoop();
+                        ProbeRequestFlood::probeRequestFloodLoop();
                         if (isButtonPressed(BTN_SELECT)) {
                             in_sub_menu = true;
                             is_main_menu = false;
@@ -766,11 +799,11 @@ void handleWiFiSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    WifiScan::wifiscanSetup();
+                    DeauthDetect::deauthdetectSetup();
                     while (current_submenu_index == 4 && !feature_exit_requested) {
                         current_submenu_index = 4;
                         in_sub_menu = true;
-                        WifiScan::wifiscanLoop();
+                        DeauthDetect::deauthdetectLoop();
                         if (isButtonPressed(BTN_SELECT)) {
                             in_sub_menu = true;
                             is_main_menu = false;
@@ -798,9 +831,41 @@ void handleWiFiSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    CaptivePortal::cportalSetup();
+                    WifiScan::wifiscanSetup();
                     while (current_submenu_index == 5 && !feature_exit_requested) {
                         current_submenu_index = 5;
+                        in_sub_menu = true;
+                        WifiScan::wifiscanLoop();
+                        if (isButtonPressed(BTN_SELECT)) {
+                            in_sub_menu = true;
+                            is_main_menu = false;
+                            submenu_initialized = false;
+                            feature_active = false;
+                            feature_exit_requested = false;
+                            displaySubmenu();
+                            delay(200);
+                            while (isButtonPressed(BTN_SELECT)) {
+                            }
+                            break;
+                        }
+                    }
+                    if (feature_exit_requested) {
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
+                } else if (current_submenu_index == 6) {
+                    current_submenu_index = 6;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    CaptivePortal::cportalSetup();
+                    while (current_submenu_index == 6 && !feature_exit_requested) {
+                        current_submenu_index = 6;
                         in_sub_menu = true;
                         CaptivePortal::cportalLoop();
                         if (isButtonPressed(BTN_SELECT)) {
@@ -1337,7 +1402,7 @@ void handleNRFSubmenuButtons() {
         last_interaction_time = millis();
         delay(200);
 
-        if (current_submenu_index == 4) {
+        if (current_submenu_index == 2) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
@@ -1380,14 +1445,14 @@ void handleNRFSubmenuButtons() {
             }
         }
 
-        if (current_submenu_index == 3) {
-            current_submenu_index = 3;
+        if (current_submenu_index == 1) {
+            current_submenu_index = 1;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             ProtoKill::prokillSetup();
-            while (current_submenu_index == 3 && !feature_exit_requested) {
-                current_submenu_index = 3;
+            while (current_submenu_index == 1 && !feature_exit_requested) {
+                current_submenu_index = 1;
                 in_sub_menu = true;
                 ProtoKill::prokillLoop();
                 if (isButtonPressed(BTN_SELECT)) {
@@ -1435,7 +1500,7 @@ void handleNRFSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (current_submenu_index == 4) {
+                if (current_submenu_index == 2) {
                     in_sub_menu = false;
                     feature_active = false;
                     feature_exit_requested = false;
@@ -1474,14 +1539,14 @@ void handleNRFSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (current_submenu_index == 3) {
-                    current_submenu_index = 3;
+                } else if (current_submenu_index == 1) {
+                    current_submenu_index = 1;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     ProtoKill::prokillSetup();
-                    while (current_submenu_index == 3 && !feature_exit_requested) {
-                        current_submenu_index = 3;
+                    while (current_submenu_index == 1 && !feature_exit_requested) {
+                        current_submenu_index = 1;
                         in_sub_menu = true;
                         ProtoKill::prokillLoop();
                         if (isButtonPressed(BTN_SELECT)) {
@@ -1538,7 +1603,7 @@ void handleSubGHzSubmenuButtons() {
         last_interaction_time = millis();
         delay(200);
 
-        if (current_submenu_index == 4) {
+        if (current_submenu_index == 3) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
@@ -1582,15 +1647,15 @@ void handleSubGHzSubmenuButtons() {
             }
         }
 
-        if (current_submenu_index == 2) {
+        if (current_submenu_index == 1) {
 
-            current_submenu_index = 2;
+            current_submenu_index = 1;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             subjammer::subjammerSetup();
-            while (current_submenu_index == 2 && !feature_exit_requested) {
-                current_submenu_index = 2;
+            while (current_submenu_index == 1 && !feature_exit_requested) {
+                current_submenu_index = 1;
                 in_sub_menu = true;
                 subjammer::subjammerLoop();
                 if (isButtonPressed(BTN_SELECT)) {
@@ -1617,15 +1682,15 @@ void handleSubGHzSubmenuButtons() {
             }
         }
 
-        if (current_submenu_index == 3) {
+        if (current_submenu_index == 2) {
 
-            current_submenu_index = 3;
+            current_submenu_index = 2;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             SavedProfile::saveSetup();
-            while (current_submenu_index == 3 && !feature_exit_requested) {
-                current_submenu_index = 3;
+            while (current_submenu_index == 2 && !feature_exit_requested) {
+                current_submenu_index = 2;
                 in_sub_menu = true;
                 SavedProfile::saveLoop();
                 if (isButtonPressed(BTN_SELECT)) {
@@ -1673,7 +1738,7 @@ void handleSubGHzSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (current_submenu_index == 4) {
+                if (current_submenu_index == 3) {
                     in_sub_menu = false;
                     feature_active = false;
                     feature_exit_requested = false;
@@ -1714,15 +1779,15 @@ void handleSubGHzSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (current_submenu_index == 3) {
+                } else if (current_submenu_index == 2) {
 
-                    current_submenu_index = 3;
+                    current_submenu_index = 2;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     SavedProfile::saveSetup();
-                    while (current_submenu_index == 3 && !feature_exit_requested) {
-                        current_submenu_index = 3;
+                    while (current_submenu_index == 2 && !feature_exit_requested) {
+                        current_submenu_index = 2;
                         in_sub_menu = true;
                         SavedProfile::saveLoop();
                         if (isButtonPressed(BTN_SELECT)) {
@@ -1747,15 +1812,15 @@ void handleSubGHzSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (current_submenu_index == 2) {
+                } else if (current_submenu_index == 1) {
 
-                    current_submenu_index = 2;
+                    current_submenu_index = 1;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     subjammer::subjammerSetup();
-                    while (current_submenu_index == 2 && !feature_exit_requested) {
-                        current_submenu_index = 2;
+                    while (current_submenu_index == 1 && !feature_exit_requested) {
+                        current_submenu_index = 1;
                         in_sub_menu = true;
                         subjammer::subjammerLoop();
                         if (isButtonPressed(BTN_SELECT)) {
@@ -1790,8 +1855,9 @@ void handleSubGHzSubmenuButtons() {
 constexpr int TOOLS_IDX_TERMINAL = 0;
 constexpr int TOOLS_IDX_UPDATE   = 1;
 constexpr int TOOLS_IDX_TOUCH    = 2;
+constexpr int TOOLS_IDX_SD_FILES = 3;
 constexpr int TOOLS_IDX_SETTINGS = -1;
-constexpr int TOOLS_IDX_BACK     = 3;
+constexpr int TOOLS_IDX_BACK     = 4;
 
 void handleToolsSubmenuButtons() {
     if (isButtonPressed(BTN_UP)) {
@@ -1900,6 +1966,40 @@ void handleToolsSubmenuButtons() {
                 current_submenu_index = TOOLS_IDX_TOUCH;
                 in_sub_menu = true;
                 TouchCalib::loop();
+                if (isButtonPressed(BTN_SELECT)) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                    while (isButtonPressed(BTN_SELECT)) {}
+                    break;
+                }
+            }
+            if (feature_exit_requested) {
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+            return;
+        }
+
+        if (current_submenu_index == TOOLS_IDX_SD_FILES) {
+            current_submenu_index = TOOLS_IDX_SD_FILES;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            SdFileManager::setup();
+            while (current_submenu_index == TOOLS_IDX_SD_FILES && !feature_exit_requested) {
+                current_submenu_index = TOOLS_IDX_SD_FILES;
+                in_sub_menu = true;
+                SdFileManager::loop();
                 if (isButtonPressed(BTN_SELECT)) {
                     in_sub_menu = true;
                     is_main_menu = false;
@@ -2060,6 +2160,30 @@ void handleToolsSubmenuButtons() {
                         displaySubmenu(); delay(200);
                     }
                 }
+                else if (current_submenu_index == TOOLS_IDX_SD_FILES) {
+                    current_submenu_index = TOOLS_IDX_SD_FILES;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    SdFileManager::setup();
+                    while (current_submenu_index == TOOLS_IDX_SD_FILES && !feature_exit_requested) {
+                        current_submenu_index = TOOLS_IDX_SD_FILES;
+                        in_sub_menu = true;
+                        SdFileManager::loop();
+                        if (isButtonPressed(BTN_SELECT)) {
+                            in_sub_menu = true; is_main_menu = false;
+                            submenu_initialized = false; feature_active = false; feature_exit_requested = false;
+                            displaySubmenu(); delay(200);
+                            while (isButtonPressed(BTN_SELECT)) {}
+                            break;
+                        }
+                    }
+                    if (feature_exit_requested) {
+                        in_sub_menu = true; is_main_menu = false; submenu_initialized = false;
+                        feature_active = false; feature_exit_requested = false;
+                        displaySubmenu(); delay(200);
+                    }
+                }
                 else if (current_submenu_index == TOOLS_IDX_SETTINGS) {
                     current_submenu_index = TOOLS_IDX_SETTINGS;
                     in_sub_menu = true;
@@ -2115,7 +2239,7 @@ void handleIRSubmenuButtons() {
         last_interaction_time = millis();
         delay(200);
 
-        if (current_submenu_index == 2) {
+        if (current_submenu_index == 3) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
@@ -2191,6 +2315,40 @@ void handleIRSubmenuButtons() {
                 delay(200);
             }
         }
+
+        if (current_submenu_index == 2) {
+            current_submenu_index = 2;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            IRUniversalController::setup();
+            while (current_submenu_index == 2 && !feature_exit_requested) {
+                current_submenu_index = 2;
+                in_sub_menu = true;
+                IRUniversalController::loop();
+                if (isButtonPressed(BTN_SELECT)) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                    while (isButtonPressed(BTN_SELECT)) {
+                    }
+                    break;
+                }
+            }
+            if (feature_exit_requested) {
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
     }
 
     if (ts.touched() && !feature_active) {
@@ -2213,7 +2371,7 @@ void handleIRSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (current_submenu_index == 2) {
+                if (current_submenu_index == 3) {
                     in_sub_menu = false;
                     feature_active = false;
                     feature_exit_requested = false;
@@ -2263,6 +2421,38 @@ void handleIRSubmenuButtons() {
                         current_submenu_index = 1;
                         in_sub_menu = true;
                         IRSavedProfile::loop();
+                        if (isButtonPressed(BTN_SELECT)) {
+                            in_sub_menu = true;
+                            is_main_menu = false;
+                            submenu_initialized = false;
+                            feature_active = false;
+                            feature_exit_requested = false;
+                            displaySubmenu();
+                            delay(200);
+                            while (isButtonPressed(BTN_SELECT)) {
+                            }
+                            break;
+                        }
+                    }
+                    if (feature_exit_requested) {
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
+                } else if (current_submenu_index == 2) {
+                    current_submenu_index = 2;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    IRUniversalController::setup();
+                    while (current_submenu_index == 2 && !feature_exit_requested) {
+                        current_submenu_index = 2;
+                        in_sub_menu = true;
+                        IRUniversalController::loop();
                         if (isButtonPressed(BTN_SELECT)) {
                             in_sub_menu = true;
                             is_main_menu = false;

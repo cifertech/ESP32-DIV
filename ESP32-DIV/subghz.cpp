@@ -1397,7 +1397,7 @@ static void drawDetails() {
   tft.printf("Val: %lu  Bit:%d", selectedProfile.value, selectedProfile.bitLength);
 
   tft.setCursor(10, DETAILS_Y + 42);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
   if (selectedPath.endsWith("profiles_current.bin")) {
     tft.print("SRC: current");
   } else {
@@ -1453,7 +1453,7 @@ void updateDisplay() {
         tft.print("No profiles on SD.");
         if (sdLastErr.length()) {
           tft.setCursor(10, 48 + yshift);
-          tft.setTextColor(TFT_DARKGREY);
+          tft.setTextColor(UI_DIM_TEXT);
           tft.print(sdLastErr);
         }
         return;

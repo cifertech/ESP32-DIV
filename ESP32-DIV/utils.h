@@ -52,6 +52,11 @@ namespace Terminal {
   void terminalLoop();
 }
 
+namespace SdFileManager {
+  void setup();
+  void loop();
+}
+
 namespace FeatureUI {
   enum class ButtonStyle : uint8_t { Primary, Secondary, Danger };
 

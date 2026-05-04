@@ -69,7 +69,7 @@ const uint16_t ORANGE = 0xFBE4, GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.5.0"
+#define ESP32DIV_VERSION "v1.5.3"
 #endif
 
 
@@ -82,24 +82,24 @@ static const uint8_t OBF_GH[]   = {111, 97, 124, 96, 125, 106, 38, 107, 103, 101
 static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 102, 109, 124};       
 
 /*──────────────────── I/O & Pins ────────────────────*/
-#define pcf_ADDR 0x20
-#define BTN_UP 7
-#define BTN_DOWN 5
-#define BTN_LEFT 3
-#define BTN_RIGHT 4
-#define BTN_SELECT 6
+#define pcf_ADDR     0x20
+#define BTN_UP       7
+#define BTN_DOWN     5
+#define BTN_LEFT     3
+#define BTN_RIGHT    4
+#define BTN_SELECT   6
 
 /* Buzzer */
 #ifndef BUZZER_PIN
 // User hardware: buzzer on IO2
-#define BUZZER_PIN 2
+#define BUZZER_PIN -1
 #endif
 
 /* Backlight / PWM */
-#define BACKLIGHT_PIN 7
-#define PWM_CHANNEL 0
-#define PWM_FREQ 5000
-#define PWM_RESOLUTION 8
+#define BACKLIGHT_PIN   7
+#define PWM_CHANNEL     0
+#define PWM_FREQ        5000
+#define PWM_RESOLUTION  8
 
 /* XPT2046 (Touch) SPI */
 #define XPT2046_CS   18
@@ -232,7 +232,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 
 /*──────────────────── Battery ────────────────────*/
 #ifndef BATTERY_ADC_PIN
-#define BATTERY_ADC_PIN 34
+#define BATTERY_ADC_PIN -1
 #endif
 #ifndef BATTERY_VDIV_R1
 #define BATTERY_VDIV_R1 200000.0f
@@ -246,13 +246,13 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 
 /*──────────────────── Wi-Fi ────────────────────*/
 #ifndef WIFI_SCAN_ACTIVE_MS
-#define WIFI_SCAN_ACTIVE_MS 500
+#define WIFI_SCAN_ACTIVE_MS  500
 #endif
 #ifndef WIFI_SCAN_PASSIVE_MS
 #define WIFI_SCAN_PASSIVE_MS 0
 #endif
 #ifndef WIFI_SPECTRUM_FFT_N
-#define WIFI_SPECTRUM_FFT_N 256
+#define WIFI_SPECTRUM_FFT_N  256
 #endif
 
 /*──────────────────── BLE ────────────────────*/
@@ -271,10 +271,10 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #define SUBGHZ_DEFAULT_FREQ 433920000UL
 #endif
 #ifndef NRF24_DATA_RATE
-#define NRF24_DATA_RATE 2
+#define NRF24_DATA_RATE    2
 #endif
 #ifndef NRF24_PA_LEVEL
-#define NRF24_PA_LEVEL 3
+#define NRF24_PA_LEVEL     3
 #endif
 #ifndef CC1101_DEFAULT_MOD
 #define CC1101_DEFAULT_MOD 2
@@ -282,10 +282,10 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 
 /*──────────────────── Feature Flags ────────────────────*/
 #ifndef FEATURE_WIFI_TOOLS
-#define FEATURE_WIFI_TOOLS 1
+#define FEATURE_WIFI_TOOLS   1
 #endif
 #ifndef FEATURE_BLE_TOOLS
-#define FEATURE_BLE_TOOLS 1
+#define FEATURE_BLE_TOOLS    1
 #endif
 #ifndef FEATURE_SUBGHZ_TOOLS
 #define FEATURE_SUBGHZ_TOOLS 1
@@ -313,8 +313,19 @@ void displaySubmenu();
 
 /*──────────────────── Runtime UI Palette ────────────────────*/
 struct UiPalette { uint16_t bg, fg, icon, text, accent, line, lable, warn, ok; };
-extern UiPalette UI;                   // current colors
-void applyThemeToPalette(Theme t);     // call on boot and when theme changes
+extern UiPalette UI;                   
+void applyThemeToPalette(Theme t);     
+
+/*──────────────────── UI Text Helpers ────────────────────*/
+// Dim label text color (used for *text* only).
+// Keep UI_LABLE unchanged because it's also used for fills (e.g., status bar bg).
+static inline uint16_t uiDimTextColor() {
+  // In Dark theme, UI_LABLE (L_Dark) is intentionally very dark; brighten text a bit.
+  return (UI.bg == BG_Dark) ? GRAY : UI_LABLE;
+}
+#ifndef UI_DIM_TEXT
+#define UI_DIM_TEXT uiDimTextColor()
+#endif
 
 /*──────────────────── Global State Flags ────────────────────*/
 extern bool in_sub_menu;

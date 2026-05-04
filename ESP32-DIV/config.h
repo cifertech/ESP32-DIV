@@ -127,6 +127,10 @@ namespace Deauther {
   void deautherSetup();
   void deautherLoop();
 }
+namespace ProbeRequestFlood {
+  void probeRequestFloodSetup();
+  void probeRequestFloodLoop();
+}
 namespace FirmwareUpdate {
   void updateSetup();
   void updateLoop();
