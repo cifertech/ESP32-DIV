@@ -58,6 +58,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **Wi-Fi Scanner** – List nearby Wi-Fi networks with extended details
 - **Wi-Fi Deauthentication Attack** - Send deauthentication frames to disrupt client connections
 - **Captive Portal**  - ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages, all before HTTPS/authentication
+- **WiFi Probe Request Flood** – Sends continuous probe requests impersonating a client to stress and analyze access point behavior
 
 #### 🔵 Bluetooth Tools
 - **BLE Jammer** – Disrupt BLE and classic Bluetooth channels
@@ -79,6 +80,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 #### 📺 Infrared (IR) Tools
 - **IR Replay Attack** - Capture real IR remote presses, visualize, replay, and save to SD
 - **IR Saved Profiles** - Browser for IR captures, preserving signal and carrier frequency for accurate retransmission
+- **Universal IR Controller** – Built-in profiles, SD imports, favorites, and remote-style control
 
 <div>&nbsp;</div>
 
