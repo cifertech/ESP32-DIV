@@ -6,7 +6,7 @@
 </div>
 
   <p>
-    ESP32DIV - Advanced Wireless Toolkit
+    ESP32DIV - Multi-purpose wireless offensive and defensive toolkit powered by an ESP32
   </p>
    
 <!-- Badges -->
