@@ -103,7 +103,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **SD File Manager** – Browse and manage files on the SD card
 
 #### ⚙️ System
-- **Settings** – Brightness, dark/light theme, NeoPixel, Wi-Fi/BLE background auto-scan; save preferences to JSON on SD
+- **Settings** – Brightness, dark/light theme, NeoPixel, Wi-Fi/BLE background auto-scan
 
 
 
