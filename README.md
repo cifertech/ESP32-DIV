@@ -52,21 +52,21 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 ## :dart: Features
 
 #### 📡 Wi-Fi Tools
-- **Packet Monitor** – Real-time waterfall graph of all 14 Wi-Fi channels
+- **Packet Monitor** – Real-time waterfall graph of all 14 Wi-Fi channels; optional **PCAP** logging to SD when enabled
 - **Beacon Spammer** – Broadcast fake SSIDs (custom or random)
 - **Deauth Detector** – Monitor for Wi-Fi deauthentication attacks
 - **Wi-Fi Scanner** – List nearby Wi-Fi networks with extended details
-- **Wi-Fi Deauthentication Attack** - Send deauthentication frames to disrupt client connections
-- **Captive Portal**  - ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages, all before HTTPS/authentication
-- **WiFi Probe Request Flood** – Sends continuous probe requests impersonating a client to stress and analyze access point behavior
+- **Wi-Fi Deauthentication Attack** – Send deauthentication frames to disrupt client connections
+- **Captive Portal** – ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages, all before HTTPS/authentication
+- **Probe Request Flood** – Flood probe requests to stress access points and analyze client/AP behavior
 
 #### 🔵 Bluetooth Tools
 - **BLE Jammer** – Disrupt BLE and classic Bluetooth channels
 - **BLE Spoofer** – Broadcast fake BLE advertisements
 - **Sour Apple** – Spoof Apple BLE advertisements (e.g., AirDrop)
 - **BLE Scanner** – Scan for hidden and visible BLE devices
-- **BLE Sniffer** - Scans BLE advertisements, tracking MAC, RSSI, packet count, and last-seen time. Suspicious devices are highlighted
-- **BLE Rubber Ducky** - Acts as a BLE keyboard and executes SD card scripts. Keys are released and advertising stops on exit
+- **BLE Sniffer** – Scans BLE advertisements, tracking MAC, RSSI, packet count, and last-seen time. Suspicious devices are highlighted
+- **BLE Rubber Ducky** – Acts as a BLE keyboard and executes SD card scripts from **`/ducky`**. Keys are released and advertising stops on exit
 
 #### 📶 2.4GHz Tools
 - **2.4GHz Scanner** – Spectrum analyzer for 128 channels (Zigbee, custom RF, etc.)
@@ -78,9 +78,34 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **Saved Profiles** – Store and manage captured signal profiles
 
 #### 📺 Infrared (IR) Tools
-- **IR Replay Attack** - Capture real IR remote presses, visualize, replay, and save to SD
-- **IR Saved Profiles** - Browser for IR captures, preserving signal and carrier frequency for accurate retransmission
+- **IR Replay Attack** – Capture real IR remote presses, visualize, replay, and save to SD
+- **IR Saved Profiles** – Browser for IR captures, preserving signal and carrier frequency for accurate retransmission
 - **Universal IR Controller** – Built-in profiles, SD imports, favorites, and remote-style control
+
+#### 🧲RFID / NFC Tools 
+- **Card Reader** – Read UID and tag identification
+- **Card Clone** – Copy supported writable tags (authorized use only)
+- **Erase** – Wipe supported writable tags
+- **Dump** – Read sectors/blocks when keys are available
+- **Decode Access** – Interpret access bits / ACL-style fields from dumps
+- **Jam Reader** – Impede another reader with RF patterns (lab only)
+- **Tag Disrupt** – Advanced disruption flows for authorized physical tests
+- **Disrupt Emulate** – Disruption plus emulation-style flows (firmware-specific)
+
+#### 🛰️ GPS Tools 
+- **Wardriver** – Log GNSS position with Wi-Fi/BLE observations to SD
+- **Satellite Scanner** – Satellites in view, signal strength, and fix debugging
+
+#### 🧰 Device tools
+- **Serial Monitor** – Mirror serial traffic on the TFT for field debugging
+- **Update Firmware** – Flash new firmware from SD (when supported)
+- **Touch Calibrate** – Four-corner XPT2046 touchscreen calibration
+- **SD File Manager** – Browse and manage files on the SD card
+
+#### ⚙️ System
+- **Settings** – Brightness, dark/light theme, NeoPixel, Wi-Fi/BLE background auto-scan; save preferences to JSON on SD
+
+
 
 <div>&nbsp;</div>
 
