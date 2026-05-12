@@ -84,13 +84,13 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 
 #### 🧲RFID / NFC Tools 
 - **Card Reader** – Read UID and tag identification
-- **Card Clone** – Copy supported writable tags (authorized use only)
+- **Card Clone** – Copy supported writable tags
 - **Erase** – Wipe supported writable tags
 - **Dump** – Read sectors/blocks when keys are available
 - **Decode Access** – Interpret access bits / ACL-style fields from dumps
-- **Jam Reader** – Impede another reader with RF patterns (lab only)
+- **Jam Reader** – Impede another reader with RF patterns
 - **Tag Disrupt** – Advanced disruption flows for authorized physical tests
-- **Disrupt Emulate** – Disruption plus emulation-style flows (firmware-specific)
+- **Disrupt Emulate** – Disruption plus emulation-style flows
 
 #### 🛰️ GPS Tools 
 - **Wardriver** – Log GNSS position with Wi-Fi/BLE observations to SD
@@ -98,7 +98,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 
 #### 🧰 Device tools
 - **Serial Monitor** – Mirror serial traffic on the TFT for field debugging
-- **Update Firmware** – Flash new firmware from SD (when supported)
+- **Update Firmware** – Flash new firmware from SD
 - **Touch Calibrate** – Four-corner XPT2046 touchscreen calibration
 - **SD File Manager** – Browse and manage files on the SD card
 
