@@ -57,7 +57,7 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **Deauth Detector** – Monitor for Wi-Fi deauthentication attacks
 - **Wi-Fi Scanner** – List nearby Wi-Fi networks with extended details
 - **Wi-Fi Deauthentication Attack** – Send deauthentication frames to disrupt client connections
-- **Captive Portal** – ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages, all before HTTPS/authentication
+- **Captive Portal** – ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages
 - **Probe Request Flood** – Flood probe requests to stress access points and analyze client/AP behavior
 
 #### 🔵 Bluetooth Tools
@@ -65,8 +65,8 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 - **BLE Spoofer** – Broadcast fake BLE advertisements
 - **Sour Apple** – Spoof Apple BLE advertisements (e.g., AirDrop)
 - **BLE Scanner** – Scan for hidden and visible BLE devices
-- **BLE Sniffer** – Scans BLE advertisements, tracking MAC, RSSI, packet count, and last-seen time. Suspicious devices are highlighted
-- **BLE Rubber Ducky** – Acts as a BLE keyboard and executes SD card scripts from **`/ducky`**. Keys are released and advertising stops on exit
+- **BLE Sniffer** – Scans BLE advertisements, tracking MAC, RSSI, packet count, and last-seen time. 
+- **BLE Rubber Ducky** – Acts as a BLE keyboard and executes SD card scripts from **`/ducky`**.
 
 #### 📶 2.4GHz Tools
 - **2.4GHz Scanner** – Spectrum analyzer for 128 channels (Zigbee, custom RF, etc.)
