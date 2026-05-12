@@ -1,0 +1,9 @@
+{
+  "chip": "esp32s3",
+  "flash_mode": "dio",
+  "flash_freq": "80m",
+  "bootloader": "ESP32-DIV.ino.bootloader.bin",
+  "partition_table": "ESP32-DIV.ino.partitions.bin",
+  "boot_app0": "boot_app0.bin",
+  "app": "ESP32-DIV.ino.bin"
+}

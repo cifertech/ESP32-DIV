@@ -1,0 +1,16 @@
+{
+  "$comment": "Optional manifest file: place manifest.json next to your firmware .bin files.",
+  "type": "object",
+  "required": ["chip", "bootloader", "partition_table", "boot_app0", "app"],
+  "properties": {
+    "chip": {
+      "enum": ["esp32s3", "esp32", "esp32c3", "esp32s2"]
+    },
+    "flash_mode": { "type": "string", "default": "dio" },
+    "flash_freq": { "type": "string", "default": "80m" },
+    "bootloader": { "type": "string" },
+    "partition_table": { "type": "string" },
+    "boot_app0": { "type": "string" },
+    "app": { "type": "string" }
+  }
+}

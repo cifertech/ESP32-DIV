@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esp32-div-flasher"
+version = "1.2.0"
+description = "ESP32-DIV desktop firmware flasher (GUI + CLI)"
+requires-python = ">=3.10"
+dependencies = [
+    "esptool>=4.6",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+esp32-div-flasher = "flash_div:main"
+
+[tool.setuptools]
+py-modules = ["flash_div"]
