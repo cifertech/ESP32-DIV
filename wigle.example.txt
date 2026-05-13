@@ -1,0 +1,15 @@
+# Save a copy of this file on the SD card as:  /config/wigle.txt
+# Lines starting with # are ignored. Blank lines are ignored until the WiGLE lines are filled.
+
+# WiGLE: https://wigle.net → Log in → My account → API  (API name + encoded token)
+
+YOUR_WIGLE_API_NAME
+YOUR_WIGLE_ENCODED_API_TOKEN
+
+# If this ESP32 has never saved your Wi-Fi, add two more lines (SSID then password):
+# MyHomeSSID
+# MyHomePassword
+
+# If the ESP32 already joined this Wi-Fi once (saved in flash), you can stop here,
+# or put AUTO or - alone on the next line instead of an SSID:
+# AUTO
