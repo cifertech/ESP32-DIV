@@ -28,6 +28,13 @@ constexpr int KEY_START_Y  = 95;
 
 constexpr unsigned long CURSOR_BLINK_MS = 500;
 
+/** Wardriver / FeatureUI expect font 1 + size 1; keyboard uses size 2 for input. */
+static void restoreTftAfterOsKeyboard() {
+  tft.setTextSize(1);
+  tft.setTextFont(1);
+  tft.setTextDatum(TL_DATUM);
+}
+
 void drawInputField(const String& value, bool cursorOn) {
   tft.fillRect(INPUT_X, INPUT_Y, INPUT_W, INPUT_H, KB_SURF());
   tft.drawRect(INPUT_X - 1, INPUT_Y - 1, INPUT_W + 2, INPUT_H + 2, KB_BORDER());
@@ -189,6 +196,7 @@ OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
     if (tx >= 5 && tx <= 75 && ty >= btnY && ty <= btnY + 25) {
       res.cancelled = true;
       res.accepted  = false;
+      restoreTftAfterOsKeyboard();
       return res;
     }
 
@@ -214,6 +222,7 @@ OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
       }
       res.accepted  = true;
       res.cancelled = false;
+      restoreTftAfterOsKeyboard();
       return res;
     }
   }

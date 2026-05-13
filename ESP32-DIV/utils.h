@@ -21,8 +21,12 @@ void updateStatusBar();
 float readBatteryVoltage();
 float readInternalTemperature();
 bool isSDCardAvailable();
-void drawStatusBar(float batteryVoltage, bool forceUpdate = false);
+/** After SPI is used for another device (e.g. PN532 RFID), restore pins and remount SD. */
+void restoreSdAfterSharedSpi();
+void drawStatusBar(float batteryVoltage, bool forceUpdate = false, bool bottomSeparator = false);
 void startStatusBarTask();
+/** Request a status bar pass on the next update (e.g. after SD or ward state changes). */
+void requestStatusBarRedraw();
 
 extern bool feature_exit_requested;
 
@@ -38,6 +42,8 @@ void hideNotification();
 enum class NotificationAction : uint8_t { None, Close, Ok, Save };
 void showNotificationActions(const char* title, const char* message, bool showSave);
 bool isNotificationVisible();
+/** Repaint the modal after a full-screen or body redraw covered it (same cached title/message). */
+void notificationRedrawIfVisible();
 NotificationAction notificationHandleTouch(int x, int y);
 void printWrappedText(int x, int y, int maxWidth, const char* text);
 void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, bool center);

@@ -26,3 +26,17 @@ bool readTouchXY(int& x, int& y) {
   y = ::map(p.y, s.touchYMax, s.touchYMin, 0, TFT_HEIGHT - 1);
   return true;
 }
+
+bool readTouchXYDismiss(int& x, int& y) {
+  if (!ts.touched()) return false;
+  TS_Point p = ts.getPoint();
+  auto& s = settings();
+
+  /* Light taps often stay below normal UI threshold (500). */
+  const uint16_t zThresh = 120;
+  if (p.z < zThresh) return false;
+
+  x = ::map(p.x, s.touchXMin, s.touchXMax, 0, TFT_WIDTH - 1);
+  y = ::map(p.y, s.touchYMax, s.touchYMin, 0, TFT_HEIGHT - 1);
+  return true;
+}

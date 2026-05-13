@@ -558,19 +558,19 @@ void updateDisplay() {
     uiDrawn = false;
 
     tft.fillRect(0, 40, 240, 40, TFT_BLACK);
-    tft.drawLine(0, 80, 240, 80, TFT_WHITE);
+    tft.drawLine(0, 80, 240, 80, ORANGE);
 
     tft.setCursor(5, 20 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Freq:");
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ORANGE);
     tft.setCursor(50, 20 + yshift);
     tft.print(subghz_frequency_list[currentFrequencyIndex] / 1000000.0, 2);
     tft.print(" MHz");
 
     tft.setCursor(175, 20 + yshift);
     bool locked = (autoScanEnabled && lockUntilMs != 0 && (int32_t)(millis() - lockUntilMs) < 0);
-    tft.setTextColor(autoScanEnabled ? ORANGE : TFT_WHITE);
+    tft.setTextColor(autoScanEnabled ? ORANGE : ORANGE);
     if (locked) {
       tft.print("LOCK");
     } else {
@@ -578,30 +578,30 @@ void updateDisplay() {
     }
 
     tft.setCursor(5, 35 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Bit:");
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ORANGE);
     tft.setCursor(50, 35 + yshift);
     tft.printf("%d", receivedBitLength);
 
     tft.setCursor(130, 35 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("RSSI:");
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ORANGE);
     tft.setCursor(170, 35 + yshift);
     tft.printf("%d", ELECHOUSE_cc1101.getRssi());
 
     tft.setCursor(130, 20 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Ptc:");
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ORANGE);
     tft.setCursor(170, 20 + yshift);
     tft.printf("%d", receivedProtocol);
 
     tft.setCursor(5, 50 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Val:");
-    tft.setTextColor(TFT_WHITE);
+    tft.setTextColor(ORANGE);
     tft.setCursor(50, 50 + yshift);
     tft.print(receivedValue);
 
@@ -1846,7 +1846,7 @@ void updateDisplay() {
 
     tft.setTextSize(1);
     tft.setCursor(5, 22 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Freq:");
     tft.setCursor(40, 22 + yshift);
     if (autoMode) {
@@ -1869,14 +1869,14 @@ void updateDisplay() {
     }
 
     tft.setCursor(130, 22 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Mode:");
     tft.setCursor(165, 22 + yshift);
     tft.setTextColor(continuousMode ? TFT_GREEN : TFT_YELLOW);
     tft.print(continuousMode ? "Cont" : "Noise");
 
     tft.setCursor(5, 42 + yshift);
-    tft.setTextColor(TFT_CYAN);
+    tft.setTextColor(WHITE);
     tft.print("Status:");
     tft.setCursor(50, 42 + yshift);
     if (jammingRunning) {

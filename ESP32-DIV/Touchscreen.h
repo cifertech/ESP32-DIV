@@ -20,6 +20,8 @@ extern bool feature_active;
 
 void setupTouchscreen();
 
-#endif
-
 bool readTouchXY(int& x, int& y);
+/** Lower pressure threshold — use for "tap anywhere to dismiss" so light taps register. */
+bool readTouchXYDismiss(int& x, int& y);
+
+#endif

@@ -69,7 +69,7 @@ const uint16_t ORANGE = 0xFBE4, GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.5.3"
+#define ESP32DIV_VERSION "v1.6.0"
 #endif
 
 
@@ -115,9 +115,32 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #define SD_CD    38
 #define SD_CS_PIN 5
 
+/* PN532 RFID/NFC (SPI). Defaults avoid CC1101_CS (5), Touch CS (18), SD pins (10–13).
+ * Wire PN532 to these pins or override before build. Requires Adafruit PN532 library. */
+#ifndef PN532_SCK
+#define PN532_SCK  12
+#endif
+#ifndef PN532_MISO
+#define PN532_MISO 11
+#endif
+#ifndef PN532_MOSI
+#define PN532_MOSI 13
+#endif
+#ifndef PN532_SS
+#define PN532_SS   4
+#endif
+
 /* UART (if you use hardware serial on external pins) */
 #define RX_PIN 6
 #define TX_PIN 3
+
+/* Neo-6M GPS — GPS module TX → ESP RX, GPS RX → ESP TX (optional). Uses UART2 by default. */
+#ifndef GPS_UART_RX
+#define GPS_UART_RX 47
+#endif
+#ifndef GPS_UART_TX
+#define GPS_UART_TX 48
+#endif
 
 /* CC1101 (Sub-GHz) */
 #define CC1101_SCK  12

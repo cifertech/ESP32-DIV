@@ -1,12 +1,14 @@
 #include <SD.h>
 #include <SPI.h>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include "Touchscreen.h"
 #include "config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "icon.h"
+#include "gps.h"
 #include "shared.h"
 #include "utils.h"
 
@@ -17,6 +19,39 @@ static int notifX, notifY, notifWidth, notifHeight;
 static int closeButtonX, closeButtonY, closeButtonSize = 16;
 static int okButtonX, okButtonY, okButtonWidth = 84, okButtonHeight = 24;
 static int saveButtonX, saveButtonY, saveButtonWidth = 84, saveButtonHeight = 24;
+
+static char s_notifTitleCache[64];
+static char s_notifMsgCache[400];
+static bool s_notifShowSaveCache = false;
+
+/** Wrapped line count for modal text (font 1, size 1 — must match draw path). */
+static int countWrappedNotifLines(const String& msgIn, int innerPixelW) {
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  String msg = msgIn;
+  msg.trim();
+  int lines = 0;
+  while (msg.length() > 0 && lines < 48) {
+    int lineEnd = msg.length();
+    while (lineEnd > 0 && tft.textWidth(msg.substring(0, lineEnd)) > innerPixelW) {
+      lineEnd--;
+    }
+    if (lineEnd <= 0) {
+      ++lines;
+      break;
+    }
+    if (lineEnd < msg.length()) {
+      const int lastSpace = msg.substring(0, lineEnd).lastIndexOf(' ');
+      if (lastSpace > 0) {
+        lineEnd = lastSpace;
+      }
+    }
+    ++lines;
+    msg = msg.substring(lineEnd);
+    msg.trim();
+  }
+  return lines;
+}
 
 static size_t decodeObfTo(char* out, size_t outSize, const uint8_t* in, size_t inLen, uint8_t key) {
   if (!out || outSize == 0) return 0;
@@ -51,12 +86,53 @@ static inline bool inRect(int x, int y, int rx, int ry, int rw, int rh) {
 }
 
 static void drawNotificationInternal(const char* title, const char* message, bool showSave) {
+    snprintf(s_notifTitleCache, sizeof(s_notifTitleCache), "%s", title ? title : "");
+    snprintf(s_notifMsgCache, sizeof(s_notifMsgCache), "%s", message ? message : "");
+    s_notifShowSaveCache = showSave;
     notificationHasSave = showSave;
 
-    notifWidth = 200;
-    notifHeight = showSave ? 112 : 98;
-    notifX = (240 - notifWidth) / 2;
-    notifY = (320 - notifHeight) / 2;
+    const int scrW = tft.width();
+    const int scrH = tft.height();
+    notifWidth = (scrW > 232) ? 224 : (scrW - 16);
+    if (notifWidth < 160) {
+        notifWidth = 160;
+    }
+
+    const int messageBoxWidth = notifWidth - 10;
+    const int innerTextW = messageBoxWidth - 6;
+    const int lineH = 12;
+    const int footH = showSave ? 40 : 30;
+    const int topBand = 25;
+
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    String msgProbe = message ? String(message) : String("");
+    msgProbe.trim();
+    int lineCount = countWrappedNotifLines(msgProbe, innerTextW);
+    if (lineCount < 2) {
+        lineCount = 2;
+    }
+    const int maxLinesByScreen = (scrH - topBand - footH - 14) / lineH;
+    int useLines = lineCount;
+    if (useLines > maxLinesByScreen) {
+        useLines = maxLinesByScreen > 2 ? maxLinesByScreen : 2;
+    }
+
+    const int messageBoxHeight = 8 + useLines * lineH;
+    notifHeight = topBand + messageBoxHeight + footH;
+    if (notifHeight > scrH - 8) {
+        notifHeight = scrH - 8;
+        const int availBody = notifHeight - topBand - footH;
+        useLines = (availBody - 8) / lineH;
+        if (useLines < 2) {
+            useLines = 2;
+        }
+    }
+    notifX = (scrW - notifWidth) / 2;
+    notifY = (scrH - notifHeight) / 2;
+    if (notifY < 4) {
+        notifY = 4;
+    }
 
     tft.fillRect(notifX, notifY, notifWidth, notifHeight, LIGHT_GRAY);
     tft.drawRect(notifX, notifY, notifWidth, notifHeight, DARK_GRAY);
@@ -76,27 +152,29 @@ static void drawNotificationInternal(const char* title, const char* message, boo
 
     int messageBoxX = notifX + 5;
     int messageBoxY = notifY + 25;
-    int messageBoxWidth = notifWidth - 10;
-    int messageBoxHeight = notifHeight - 25 - 30;
-    tft.fillRect(messageBoxX, messageBoxY, messageBoxWidth, messageBoxHeight, WHITE);
+    const int messageBoxDrawH = notifHeight - topBand - footH;
+    tft.fillRect(messageBoxX, messageBoxY, messageBoxWidth, messageBoxDrawH, WHITE);
     tft.setTextColor(BLACK, WHITE);
 
     {
-      const int lineH = 12;
-      const int maxY = messageBoxY + messageBoxHeight - lineH;
+      const int maxY = messageBoxY + messageBoxDrawH - lineH;
       String msg = message ? String(message) : String("");
       msg.trim();
       int cursorX = messageBoxX + 3;
       int cursorY = messageBoxY + 4;
       while (msg.length() > 0 && cursorY <= maxY) {
         int lineEnd = msg.length();
-        while (lineEnd > 0 && tft.textWidth(msg.substring(0, lineEnd)) > (messageBoxWidth - 6)) {
+        while (lineEnd > 0 && tft.textWidth(msg.substring(0, lineEnd)) > innerTextW) {
           lineEnd--;
         }
-        if (lineEnd <= 0) break;
+        if (lineEnd <= 0) {
+          break;
+        }
         if (lineEnd < msg.length()) {
           int lastSpace = msg.substring(0, lineEnd).lastIndexOf(' ');
-          if (lastSpace > 0) lineEnd = lastSpace;
+          if (lastSpace > 0) {
+            lineEnd = lastSpace;
+          }
         }
         tft.setCursor(cursorX, cursorY);
         tft.print(msg.substring(0, lineEnd));
@@ -105,7 +183,7 @@ static void drawNotificationInternal(const char* title, const char* message, boo
         cursorY += lineH;
       }
 
-      if (msg.length() > 0 && cursorY > (messageBoxY + 4)) {
+      if (msg.length() > 0) {
         tft.setCursor(cursorX, maxY);
         tft.print("...");
       }
@@ -161,11 +239,19 @@ void showNotification(const char* title, const char* message) {
 }
 
 void hideNotification() {
-    tft.fillRect(notifX, notifY, notifWidth, notifHeight, BLACK);
+    applyThemeToPalette(settings().theme);
+    tft.fillRect(notifX, notifY, notifWidth, notifHeight, UI_BG);
     notificationVisible = false;
 }
 
 bool isNotificationVisible() { return notificationVisible; }
+
+void notificationRedrawIfVisible() {
+    if (!notificationVisible) {
+        return;
+    }
+    drawNotificationInternal(s_notifTitleCache, s_notifMsgCache, s_notifShowSaveCache);
+}
 
 NotificationAction notificationHandleTouch(int x, int y) {
   if (!notificationVisible) return NotificationAction::None;
@@ -353,6 +439,14 @@ float lastBatteryVoltage = 0.0;
 bool sdCardPresent = false;
 bool lastSdCardState = false;
 
+static TaskHandle_t statusBarTaskHandle = nullptr;
+static volatile bool statusBarDirty = true;
+static constexpr uint32_t kStatusBarWardBlinkHalfMs = 900;
+
+void requestStatusBarRedraw() {
+  statusBarDirty = true;
+}
+
 const float R1 = 100000.0;
 const float R2 = 100000.0;
 
@@ -388,14 +482,39 @@ void updateSdCardStatus() {
     lastSdCardState = cardDetected;
 
     Serial.println(sdCardPresent ? "SD Card detected" : "SD Card removed");
+    requestStatusBarRedraw();
   }
 }
 
-void drawStatusBar(float batteryVoltage, bool forceUpdate) {
+static bool statusBarBatteryMeaningfulChange(int newPct, int oldPct, bool force) {
+  if (force || oldPct == -1) {
+    return true;
+  }
+  if (newPct <= 25 || oldPct <= 25) {
+    return newPct != oldPct;
+  }
+  const int d = newPct - oldPct;
+  return (d >= 3 || d <= -3);
+}
+
+static int statusBarTempBand(float t) {
+  if (fabs(static_cast<double>(t) - 53.33) < 0.51) {
+    return 1;
+  }
+  if (t > 55.f) {
+    return 2;
+  }
+  return 0;
+}
+
+void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator) {
   static int lastBatteryPercentage = -1;
-  static int lastWifiDevices      = -1;
-  static int lastBleDevices       = -1;
-  static String lastDisplayedTime = "";
+  static int lastWifiHalf          = -100000;
+  static int lastBleHalf           = -100000;
+  static int lastTempBand          = -100;
+  static int lastSdSnap            = -1;
+  static bool lastWardGpsIcon      = false;
+  static uint32_t lastWardBlinkPhase = 0;
 
   int batteryPercentage = ::map(batteryVoltage * 100, 300, 420, 0, 100);
   batteryPercentage = constrain(batteryPercentage, 0, 100);
@@ -406,12 +525,50 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
   wifiDevices = WifiScan::getLastCount();
   bleDevices  = BleScan::getLastCount();
 
-  float internalTemp = readInternalTemperature();
+  const int wifiHalf = wifiDevices / 2;
+  const int bleHalf  = bleDevices / 2;
 
-  if (batteryPercentage != lastBatteryPercentage ||
-      wifiDevices      != lastWifiDevices      ||
-      bleDevices       != lastBleDevices       ||
-      forceUpdate) {
+  const bool wardGpsIcon = GpsWardriver::statusBarGpsIconActive();
+  const uint32_t wardBlinkPhase =
+      wardGpsIcon ? (millis() / kStatusBarWardBlinkHalfMs) : 0u;
+  const bool wardSatVisible =
+      wardGpsIcon && ((wardBlinkPhase & 1u) == 0u);
+
+  const float internalTemp = readInternalTemperature();
+  const int tempBand         = statusBarTempBand(internalTemp);
+  const int sdSnap           = sdCardPresent ? 1 : 0;
+
+  const bool battCh =
+      statusBarBatteryMeaningfulChange(batteryPercentage, lastBatteryPercentage, forceUpdate);
+  const bool wardBlinkOnly =
+      !forceUpdate && wardGpsIcon && lastWardGpsIcon &&
+      (wardBlinkPhase != lastWardBlinkPhase) && !battCh && wifiHalf == lastWifiHalf &&
+      bleHalf == lastBleHalf && tempBand == lastTempBand && sdSnap == lastSdSnap;
+
+  if (wardBlinkOnly) {
+    constexpr int kBarH   = 20;
+    constexpr int kY      = 4;
+    constexpr int kIconY  = kY - 2;
+    constexpr int kIconW  = 16;
+    constexpr int kGap    = 3;
+    constexpr int kBleIx  = 130;
+    constexpr int kBleDrawX = kBleIx + 25;
+    const int wardGpsX    = kBleDrawX - kGap - kIconW;
+    if (wardSatVisible) {
+      tft.drawBitmap(wardGpsX, kIconY, bitmap_icon_satellite, kIconW, kIconW, TFT_ORANGE);
+    } else {
+      tft.fillRect(wardGpsX, kIconY, kIconW, kIconW, UI_LABLE);
+    }
+    if (bottomSeparator) {
+      tft.drawFastHLine(0, kBarH - 1, tft.width(), TFT_WHITE);
+    }
+    lastWardBlinkPhase = wardBlinkPhase;
+    return;
+  }
+
+  if (battCh || wifiHalf != lastWifiHalf || bleHalf != lastBleHalf || tempBand != lastTempBand ||
+      sdSnap != lastSdSnap || wardGpsIcon != lastWardGpsIcon ||
+      (wardGpsIcon && wardBlinkPhase != lastWardBlinkPhase) || forceUpdate) {
     int barHeight = 20;
     int x = 7;
     int y = 4;
@@ -445,6 +602,12 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
     int clearWidth = tft.width() - bleIconX;
     tft.fillRect(bleIconX, 0, clearWidth, barHeight, UI_LABLE);
 
+    const int bleDrawX = bleIconX + 25;
+    if (wardSatVisible) {
+      const int wardGpsX = bleDrawX - gap - iconW;
+      tft.drawBitmap(wardGpsX, iconY, bitmap_icon_satellite, iconW, iconW, TFT_ORANGE);
+    }
+
     uint16_t wifiColor = (wifiDevices > 0) ? TFT_GREEN : TFT_WHITE;
     uint16_t bleColor  = (bleDevices  > 0) ? TFT_CYAN  : TFT_WHITE;
 
@@ -458,14 +621,14 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
     int wifiY = y + 11;
 
     for (int i = 0; i < 4; i++) {
-      int barHeight = (i + 1) * 3;
-      int barWidth  = 4;
-      int barX      = wifiX + i * 6;
+      const int sigBarH = (i + 1) * 3;
+      const int barWidth  = 4;
+      const int barX      = wifiX + i * 6;
 
       if (wifiStrength > i * 25) {
-        tft.fillRoundRect(barX, wifiY - barHeight, barWidth, barHeight, 1, TFT_GREEN);
+        tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_GREEN);
       } else {
-        tft.drawRoundRect(barX, wifiY - barHeight, barWidth, barHeight, 1, TFT_WHITE);
+        tft.drawRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_WHITE);
       }
     }
 
@@ -486,23 +649,73 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate) {
       tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_nullsdcard, 16, 16, TFT_RED);
     }
 
+    if (bottomSeparator) {
+      tft.drawFastHLine(0, barHeight - 1, tft.width(), TFT_WHITE);
+    }
+
     lastBatteryPercentage = batteryPercentage;
-    lastWifiDevices       = wifiDevices;
-    lastBleDevices        = bleDevices;
+    lastWifiHalf          = wifiHalf;
+    lastBleHalf           = bleHalf;
+    lastTempBand          = tempBand;
+    lastSdSnap            = sdSnap;
+    lastWardGpsIcon       = wardGpsIcon;
+    lastWardBlinkPhase    = wardGpsIcon ? wardBlinkPhase : 0u;
   }
 }
 
-static TaskHandle_t statusBarTaskHandle = nullptr;
-static volatile bool statusBarDirty = true;
-
 static void statusBarTask(void* ) {
-  for (;;) {
+  static int prevBattPct    = -1;
+  static int prevWifiHalf   = -100000;
+  static int prevBleHalf    = -100000;
+  static int prevTempBand   = -100;
+  static int prevSdSnap     = -1;
+  static bool prevWardIcon  = false;
+  static uint32_t prevWardPhase = 0;
 
-    float v = readBatteryVoltage();
+  for (;;) {
     updateSdCardStatus();
+    const float v = readBatteryVoltage();
     currentBatteryVoltage = v;
-    statusBarDirty = true;
-    vTaskDelay(500 / portTICK_PERIOD_MS);
+
+    const int pct = constrain(::map((int)(v * 100.f), 300, 420, 0, 100), 0, 100);
+    const int wifi  = WifiScan::getLastCount();
+    const int ble   = BleScan::getLastCount();
+    const int wifiH = wifi / 2;
+    const int bleH  = ble / 2;
+    const int tBand = statusBarTempBand(readInternalTemperature());
+    const int sdSn  = sdCardPresent ? 1 : 0;
+    const bool ward = GpsWardriver::statusBarGpsIconActive();
+    const uint32_t wPh = ward ? (millis() / kStatusBarWardBlinkHalfMs) : 0u;
+
+    bool need = false;
+    if (statusBarBatteryMeaningfulChange(pct, prevBattPct, false)) {
+      need = true;
+    }
+    if (wifiH != prevWifiHalf || bleH != prevBleHalf) {
+      need = true;
+    }
+    if (tBand != prevTempBand || sdSn != prevSdSnap) {
+      need = true;
+    }
+    if (ward != prevWardIcon) {
+      need = true;
+    }
+    if (ward && wPh != prevWardPhase) {
+      need = true;
+    }
+
+    if (need) {
+      statusBarDirty = true;
+      prevBattPct     = pct;
+      prevWifiHalf    = wifiH;
+      prevBleHalf     = bleH;
+      prevTempBand    = tBand;
+      prevSdSnap      = sdSn;
+      prevWardIcon    = ward;
+      prevWardPhase   = ward ? wPh : 0u;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(400));
   }
 }
 
@@ -529,14 +742,25 @@ void updateStatusBar() {
     return;
   }
 
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastStatusBarUpdate > STATUS_BAR_UPDATE_INTERVAL) {
+  const unsigned long currentMillis = millis();
+  const bool wardOn = GpsWardriver::statusBarGpsIconActive();
+  static uint32_t s_noTaskLastWardPhase = UINT32_MAX;
+  const uint32_t wardPh =
+      wardOn ? (currentMillis / kStatusBarWardBlinkHalfMs) : 0u;
+  const bool wardBlinkTick =
+      wardOn && (s_noTaskLastWardPhase == UINT32_MAX || wardPh != s_noTaskLastWardPhase);
+  if (wardOn) {
+    s_noTaskLastWardPhase = wardPh;
+  } else {
+    s_noTaskLastWardPhase = UINT32_MAX;
+  }
+
+  if (currentMillis - lastStatusBarUpdate > STATUS_BAR_UPDATE_INTERVAL || wardBlinkTick) {
     float batteryVoltage = readBatteryVoltage();
     updateSdCardStatus();
-    if (fabs(batteryVoltage - lastBatteryVoltage) > 0.05 || lastBatteryVoltage == 0) {
-      drawStatusBar(batteryVoltage, false);
-      lastBatteryVoltage = batteryVoltage;
-    }
+    currentBatteryVoltage = batteryVoltage;
+    drawStatusBar(batteryVoltage, false);
+    lastBatteryVoltage = batteryVoltage;
     lastStatusBarUpdate = currentMillis;
   }
 }
@@ -548,6 +772,72 @@ void initSDCard() {
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
 
   updateSdCardStatus();
+}
+
+/** GPIO CS that last mounted SD (-1 = unknown). Tried first to avoid long SD.begin on wrong CS. */
+static int8_t s_sdLastGoodCs = -1;
+
+static bool sdPinIsOkForSdMount(uint8_t pin) {
+#if defined(SD_CS)
+  if (pin == SD_CS) {
+    return true;
+  }
+#endif
+#if defined(SD_CS_PIN)
+#if defined(CC1101_CS)
+  if (SD_CS_PIN != CC1101_CS && pin == SD_CS_PIN) {
+    return true;
+  }
+#else
+  if (pin == SD_CS_PIN) {
+    return true;
+  }
+#endif
+#endif
+  return false;
+}
+
+static void sdAddPinUnique(uint8_t* pins, int* nTry, uint8_t p) {
+  if (!sdPinIsOkForSdMount(p)) {
+    return;
+  }
+  for (int j = 0; j < *nTry; j++) {
+    if (pins[j] == p) {
+      return;
+    }
+  }
+  if (*nTry < 3) {
+    pins[(*nTry)++] = p;
+  }
+}
+
+/** SPI must already be SD wiring. Returns true if SD.begin succeeded. */
+static bool sdTryBeginOrder() {
+  uint8_t tryPins[3];
+  int nTry = 0;
+  if (s_sdLastGoodCs >= 0) {
+    sdAddPinUnique(tryPins, &nTry, (uint8_t)s_sdLastGoodCs);
+  }
+#if defined(SD_CS)
+  sdAddPinUnique(tryPins, &nTry, SD_CS);
+#endif
+#if defined(SD_CS_PIN)
+#if defined(CC1101_CS)
+  if (SD_CS_PIN != CC1101_CS) {
+    sdAddPinUnique(tryPins, &nTry, SD_CS_PIN);
+  }
+#else
+  sdAddPinUnique(tryPins, &nTry, SD_CS_PIN);
+#endif
+#endif
+  for (int i = 0; i < nTry; i++) {
+    if (SD.begin(tryPins[i])) {
+      s_sdLastGoodCs = (int8_t)tryPins[i];
+      return true;
+    }
+  }
+  s_sdLastGoodCs = -1;
+  return false;
 }
 
 bool isSDCardAvailable() {
@@ -574,21 +864,25 @@ bool isSDCardAvailable() {
   #endif
   #endif
 
-  #ifdef SD_CS
-  if (SD.begin(SD_CS)) { sdMounted = true; return true; }
-  #endif
-
-  #ifdef SD_CS_PIN
-  #ifdef CC1101_CS
-  if (SD_CS_PIN != CC1101_CS) {
-    if (SD.begin(SD_CS_PIN)) { sdMounted = true; return true; }
+  if (sdTryBeginOrder()) {
+    sdMounted = true;
+    return true;
   }
-  #else
-  if (SD.begin(SD_CS_PIN)) { sdMounted = true; return true; }
-  #endif
-  #endif
-
   return false;
+}
+
+void restoreSdAfterSharedSpi() {
+#if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+#endif
+  if (SD.exists("/")) {
+    return;
+  }
+  SD.end();
+#if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+#endif
+  (void)sdTryBeginOrder();
 }
 
 void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, bool center) {
@@ -1019,8 +1313,22 @@ static void drawBrightness(uint8_t v, bool selected) {
   drawBrightnessWidget(v, selected);
 }
 
-static Rect rThemeDark()  { Rect r=rowRect(1); return makeRect(r.x + LABEL_W + 6,   r.y + 8, 50, r.h-16); }
-static Rect rThemeLight() { Rect r=rowRect(1); return makeRect(r.x + LABEL_W + 6+54, r.y + 8, 50, r.h-16); }
+static Rect rThemeDark()  {
+  Rect r = rowRect(1);
+  int right = r.x + r.w - 6;
+  tft.setTextFont(2);
+  int wD = (int)tft.textWidth("[Dark]");
+  int wL = (int)tft.textWidth("Light");
+  int gap = 6;
+  return makeRect(right - wD - gap - wL, r.y + 8, wD, r.h - 16);
+}
+static Rect rThemeLight() {
+  Rect r = rowRect(1);
+  int right = r.x + r.w - 6;
+  tft.setTextFont(2);
+  int wL = (int)tft.textWidth("[Light]");
+  return makeRect(right - wL, r.y + 8, wL, r.h - 16);
+}
 
 static void drawThemeWidget(Theme th, bool ) {
 
@@ -1028,18 +1336,26 @@ static void drawThemeWidget(Theme th, bool ) {
   wipeThemeWidgetArea();
 
   Rect r = rowRect(1);
-  int baseX = r.x + LABEL_W + 6;
-  int ty    = r.y + (r.h/2 - 6);
+  int right = r.x + r.w - 6;
+  int ty    = r.y + (r.h / 2 - 6);
 
   setLabelFont();
-  tft.setTextColor(textStrong, UI_BG);
-  tft.setCursor(baseX, ty);
 
-  if (th == Theme::Dark) {
-    tft.print("[Dark]  Light");
-  } else {
-    tft.print("Dark  [Light]");
-  }
+  const char* darkLabel  = (th == Theme::Dark)  ? "[Dark]"  : "Dark";
+  const char* lightLabel = (th == Theme::Light) ? "[Light]" : "Light";
+
+  int wD = (int)tft.textWidth(darkLabel);
+  int wL = (int)tft.textWidth(lightLabel);
+  int gap = 6;
+
+  int lx = right - wL;
+  int dx = lx - gap - wD;
+
+  tft.setTextColor(textStrong, UI_BG);
+  tft.setCursor(dx, ty);
+  tft.print(darkLabel);
+  tft.setCursor(lx, ty);
+  tft.print(lightLabel);
 
   tft.endWrite();
 }

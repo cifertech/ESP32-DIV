@@ -3,11 +3,14 @@
 #include "Touchscreen.h"
 #include "config.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "nvs_flash.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "icon.h"
 #include "shared.h"
+#include "utils.h"
 
 
 namespace Deauther {
@@ -42,6 +45,11 @@ namespace Deauther {
 #define DARK_GRAY UI_FG
 
 namespace PacketMonitor {
+
+/** Toolbar / meter strip fills (0x4208); file-level DARK_GRAY is remapped to UI_FG for text. */
+static constexpr uint16_t kPtmToolbarBg = 0x4208;
+
+static bool s_ptmHwReady = false;
 
 #define MAX_CH 14
 #define SNAP_LEN 2324
@@ -234,6 +242,42 @@ static void pcapStart() {
   pcapLastFlushMs = millis();
 }
 
+static void ptmEnsureNvs() {
+  esp_err_t ret = nvs_flash_init();
+  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    ret = nvs_flash_init();
+  }
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_ERROR_CHECK(ret);
+  }
+}
+
+static void ptmStartRadioAndPcapOnce() {
+  ptmEnsureNvs();
+
+  wifi_mode_t wm = WIFI_MODE_NULL;
+  const esp_err_t gm = esp_wifi_get_mode(&wm);
+  if (gm == ESP_ERR_WIFI_NOT_INIT) {
+    tcpip_adapter_init();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+    ESP_ERROR_CHECK(esp_wifi_start());
+  } else {
+    ESP_ERROR_CHECK(gm);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+  }
+
+  pcapStart();
+  if (pcapEnabled && pcapPath.length()) {
+    Serial.printf("[PCAP] PacketMonitor logging to SD: %s\n", pcapPath.c_str());
+  } else {
+    Serial.println("[PCAP] PacketMonitor: SD/PCAP logging not started (no SD or open failed).");
+  }
+}
+
 static uint16_t pcapChannelToFreqMHz(uint8_t channel) {
   if (channel == 14) return 2484;
   if (channel >= 1 && channel <= 13) return (uint16_t)(2407 + channel * 5);
@@ -394,7 +438,7 @@ void do_sampling_FFT() {
   tft.setTextSize(1);
   tft.setTextFont(1);
 
-  tft.fillRect(30, 20, 130, 16, DARK_GRAY);
+  tft.fillRect(30, 20, 130, 16, kPtmToolbarBg);
 
   tft.setCursor(35, 24);
   tft.print("Ch:");
@@ -545,7 +589,7 @@ void runUI() {
   };
 
   if (!uiDrawn) {
-    tft.fillRect(160, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH - 160, STATUS_BAR_HEIGHT, DARK_GRAY);
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, kPtmToolbarBg);
     for (int i = 0; i < ICON_NUM; i++) {
       if (icons[i] != NULL) {
         tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
@@ -606,7 +650,7 @@ void runUI() {
 }
 
 void ptmSetup() {
-  Serial.begin(115200);
+  s_ptmHwReady = false;
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -640,37 +684,44 @@ void ptmSetup() {
     palette_blue[i] = i - 96;
   }
 
-  sampling_period_us = round(1000000 * (1.0 / samplingFrequency));
-
   preferences.begin("packetmonitor32", false);
   ch = preferences.getUInt("channel", 1);
   preferences.end();
 
-  nvs_flash_init();
-  tcpip_adapter_init();
-  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-
-  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-  ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-  ESP_ERROR_CHECK(esp_wifi_start());
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
+  {
+    float vBat = currentBatteryVoltage;
+    if (vBat < 0.05f) {
+      vBat = readBatteryVoltage();
+    }
+    drawStatusBar(vBat, true);
+  }
 
   uiDrawn = false;
-  tft.fillRect(0, 20, 160, 16, DARK_GRAY);
+  runUI();
 
-  pcapStart();
-  if (pcapEnabled && pcapPath.length()) {
-    Serial.printf("[PCAP] PacketMonitor logging to SD: %s\n", pcapPath.c_str());
-  } else {
-    Serial.println("[PCAP] PacketMonitor: SD/PCAP logging not started (no SD or open failed).");
-  }
+  /* Radio + PCAP init runs on first loop; show a short wait hint on the body. */
+  constexpr int kPtmWaitBodyTop = 40;
+  tft.fillRect(0, kPtmWaitBodyTop, tft.width(), tft.height() - kPtmWaitBodyTop, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(FEATURE_TEXT, TFT_BLACK);
+  tft.setTextFont(2);
+  tft.drawString("PLEASE WAIT", tft.width() / 2, 86);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("802.11 monitor - standby", tft.width() / 2, 112);
+  tft.drawString("Initializing (do not exit)...", tft.width() / 2, 128);
+  tft.drawString("promisc RX + radiotap (19 B)", tft.width() / 2, 144);
+  tft.setTextDatum(TL_DATUM);
 }
 
 void ptmLoop() {
+
+  if (!s_ptmHwReady) {
+    ptmStartRadioAndPcapOnce();
+    s_ptmHwReady = true;
+    constexpr int kPtmWaitBodyTop = 40;
+    tft.fillRect(0, kPtmWaitBodyTop, tft.width(), tft.height() - kPtmWaitBodyTop, TFT_BLACK);
+  }
 
   if (feature_active && isButtonPressed(BTN_SELECT)) {
 
