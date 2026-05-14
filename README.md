@@ -16,7 +16,7 @@
 <a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/github/forks/cifertech/ESP32-DIV?style=social" alt="forks - ESP32-DIV"></a>
    
 <h4>
-    <a href="https://twitter.com/cifertech1">TWITTER</a>
+    <a href="https://twitter.com/techcifer">TWITTER(X)</a>
   <span> · </span>
     <a href="https://www.instagram.com/cifertech/">INSTAGRAM</a>
   <span> · </span>
@@ -178,24 +178,23 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 ESP32DIV consists of two boards:
 
 ### 🧠 Main Board
-| Component | Purpose |
-|-----------|---------|
-| ESP32-S3 | Main MCU — Wi-Fi & BLE |
-| ILI9341 2.8" TFT | Touchscreen UI |
-| IP5306 | LiPo charging & protection |
-| CP2102 | USB-to-serial flashing |
-| PCF8574 | I/O expander for buttons |
-| SD Card Slot | Logs, captured signals, scripts |
-| WS2812 NeoPixels | Status feedback |
-| LF33 | 3.3V regulation |
+- **ESP32-S3** – Main microcontroller with Wi-Fi and BLE
+- **ILI9341 TFT Display** – 2.8" UI display
+- **LF33** – 3.3V regulator
+- **IP5306** – Lithium battery charging and protection
+- **CP2102** – USB to serial for flashing
+- **PCF8574** – I/O expander for buttons
+- **SD Card Slot** – Stores logs and captured signals
+- **Push Buttons** – Navigation and interaction
+- **Antenna Connector** – External antenna support
+- **WS2812 NeoPixels** - Giving better feedback
+- **Buzzer** - It shares a GPIO with the battery voltage divider, so using it is optional.
 
 ### 🛡️ Shield
-| Component | Purpose |
-|-----------|---------|
-| 3× NRF24L01 | 2.4GHz jamming & spoofing |
-| CC1101 | Sub-GHz replay & jamming |
-| IR Transceiver | Capture & replay IR remotes |
-| Multiple antennas | Extended range |
+- **3x NRF24 Modules** – 2.4GHz jamming and spoofing
+- **1x CC1101 Module** – Sub-GHz jamming and replay
+- **Multiple antennas** - Extended range
+- **IR Transceiver** - Capture & replay IR remotes
 
 <div>&nbsp;</div>
 
@@ -231,29 +230,27 @@ ESP32DIV consists of two boards:
 <!-- License --> 
 ## :warning: License
  
-Distributed under the MIT License. See LICENSE.txt for more information.
+> Distributed under the MIT License. See LICENSE.txt for more information.
 
-<!-- Resources --> 
-## 📎 Resources
+<div>&nbsp;</div>
 
-- 📖 [Project WiKi](https://github.com/cifertech/ESP32-DIV/wiki)
-- 🔗 [GitHub Releases](https://github.com/cifertech/ESP32-DIV/releases)
-- 🎥 [YouTube Videos](https://www.youtube.com/playlist?list=PLwydWA9gIJ2p14uvDDpcJkhcJB90Wm7PZ)
 
 <!-- Support & Contributions -->
 ## 💬 Support & Contributions
 
-- 💬 Found a bug or have a feature request? Open an [Issue](https://github.com/cifertech/ESP32-DIV/issues)
-- ⭐ Like the project? Star the repo!
-- 🛠 Want to contribute? Fork it and submit a pull request.
+> - 💬 Found a bug or have a feature request? Open an [Issue](https://github.com/cifertech/ESP32-DIV/issues)
+> - ⭐ Like the project? Star the repo!
+> - 🛠 Want to contribute? Fork it and submit a pull request.
+‎
+<div>&nbsp;</div>
 
 <!-- Contact -->
 ## :handshake: Contact 
 
-▶ Support me on Patreon [patreon.com/cifertech](https://www.patreon.com/cifertech)
-
-CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
-
-Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
+> ▶ Support me on Patreon [patreon.com/cifertech](https://www.patreon.com/cifertech)
+>
+> CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
+>
+> Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
 
  
