@@ -25,8 +25,9 @@
     <a href="https://cifertech.net/">WEBSITE</a>
   </h4>
 </div> 
- 
-<br />
+
+
+---
 
 ## 📖 Explore the ESP32-DIV Wiki
 
@@ -37,73 +38,110 @@ Complete project story, in-depth tutorials, and all the features in [Wiki](https
 
 <!-- About the Project -->
 ## :star2: About the Project
-Welcome to **ESP32DIV**, a powerful open-source multi-band wireless toolkit built on the ESP32!  
-This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency bands and is designed for **wireless testing**, **signal analysis**, **jammer development**, and **protocol spoofing**.
+ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3**. It covers Wi-Fi, BLE, 2.4GHz, Sub-GHz, IR, RFID/NFC, and GPS. all from a compact handheld device with a touchscreen UI. Whether you're analyzing wireless traffic, testing signal resilience, or building your own RF tools, ESP32-DIV gives you a single platform to do it all.
 
-> ⚠️ This project is intended for **educational and research purposes only**. Do not use it for malicious activities or unauthorized access.
+> [!WARNING]
+> This project is intended for **educational and research purposes only**. Use only on networks and devices you own or have explicit permission to test. Unauthorized use may violate local laws.
 
-<div align="center"> 
-  <img src="https://github.com/user-attachments/assets/2a6250cc-270d-460a-9875-5c2654d10fcf" alt="screenshot" width="Auto" height="Auto" />
-</div>
+
 
 <div>&nbsp;</div>
 
 <!-- Features -->
 ## :dart: Features
 
-#### 📡 Wi-Fi Tools
-- **Packet Monitor** – Real-time waterfall graph of all 14 Wi-Fi channels; optional **PCAP** logging to SD when enabled
-- **Beacon Spammer** – Broadcast fake SSIDs (custom or random)
-- **Deauth Detector** – Monitor for Wi-Fi deauthentication attacks
-- **Wi-Fi Scanner** – List nearby Wi-Fi networks with extended details
-- **Wi-Fi Deauthentication Attack** – Send deauthentication frames to disrupt client connections
-- **Captive Portal** – ESP32 runs as AP + DNS + web server. Clone networks, force sign-in pages
-- **Probe Request Flood** – Flood probe requests to stress access points and analyze client/AP behavior
-
-#### 🔵 Bluetooth Tools
-- **BLE Jammer** – Disrupt BLE and classic Bluetooth channels
-- **BLE Spoofer** – Broadcast fake BLE advertisements
-- **Sour Apple** – Spoof Apple BLE advertisements (e.g., AirDrop)
-- **BLE Scanner** – Scan for hidden and visible BLE devices
-- **BLE Sniffer** – Scans BLE advertisements, tracking MAC, RSSI, packet count, and last-seen time. 
-- **BLE Rubber Ducky** – Acts as a BLE keyboard and executes SD card scripts from **`/ducky`**.
-
-#### 📶 2.4GHz Tools
-- **2.4GHz Scanner** – Spectrum analyzer for 128 channels (Zigbee, custom RF, etc.)
-- **Protokill** – Disrupt Zigbee, Wi-Fi, and other 2.4GHz protocols
-
-#### 📻 Sub-GHz Tools
-- **Replay Attack** – Capture and replay Sub-GHz commands (e.g., door remotes)
-- **Sub-GHz Jammer** – Disrupt Sub-GHz communication across various bands
-- **Saved Profiles** – Store and manage captured signal profiles
-
-#### 📺 Infrared (IR) Tools
-- **IR Replay Attack** – Capture real IR remote presses, visualize, replay, and save to SD
-- **IR Saved Profiles** – Browser for IR captures, preserving signal and carrier frequency for accurate retransmission
-- **Universal IR Controller** – Built-in profiles, SD imports, favorites, and remote-style control
-
-#### 🧲RFID / NFC Tools 
-- **Card Reader** – Read UID and tag identification
-- **Card Clone** – Copy supported writable tags
-- **Erase** – Wipe supported writable tags
-- **Dump** – Read sectors/blocks when keys are available
-- **Decode Access** – Interpret access bits / ACL-style fields from dumps
-- **Jam Reader** – Impede another reader with RF patterns
-- **Tag Disrupt** – Advanced disruption flows for authorized physical tests
-- **Disrupt Emulate** – Disruption plus emulation-style flows
-
-#### 🛰️ GPS Tools 
-- **Wardriver** – Log GNSS position with Wi-Fi/BLE observations to SD
-- **Satellite Scanner** – Satellites in view, signal strength, and fix debugging
-
-#### 🧰 Device tools
-- **Serial Monitor** – Mirror serial traffic on the TFT for field debugging
-- **Update Firmware** – Flash new firmware from SD
-- **Touch Calibrate** – Four-corner XPT2046 touchscreen calibration
-- **SD File Manager** – Browse and manage files on the SD card
-
-#### ⚙️ System
-- **Settings** – Brightness, dark/light theme, NeoPixel, Wi-Fi/BLE background auto-scan
+<details>
+<summary><strong>📡 Wi-Fi</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| Packet Monitor | Real-time waterfall graph across all 14 channels; optional PCAP logging to SD |
+| Wi-Fi Scanner | Lists nearby networks with extended details |
+| Beacon Spammer | Broadcasts fake SSIDs (custom or random) |
+| Deauth Attack | Sends deauthentication frames to disrupt client connections |
+| Deauth Detector | Monitors for incoming deauth attacks |
+| Captive Portal | AP + DNS + web server; clone networks and force sign-in pages |
+| Probe Flood | Floods probe requests to stress-test APs |
+ 
+</details>
+<details>
+<summary><strong>🔵 Bluetooth</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| BLE Scanner | Discovers hidden and visible BLE devices |
+| BLE Sniffer | Tracks MAC, RSSI, packet count, and last-seen time |
+| BLE Spoofer | Broadcasts fake BLE advertisements |
+| Sour Apple | Spoof Apple BLE advertisements (e.g., AirDrop popups) |
+| BLE Jammer | Disrupts BLE and classic Bluetooth channels |
+| BLE Rubber Ducky | Acts as a BLE keyboard; executes scripts from `/ducky` on SD |
+ 
+</details>
+<details>
+<summary><strong>📶 2.4GHz</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| 2.4GHz Scanner | Spectrum analyzer across 128 channels (Zigbee, custom RF, etc.) |
+| Protokill | Disrupts Zigbee, Wi-Fi, and other 2.4GHz protocols |
+ 
+</details>
+<details>
+<summary><strong>📻 Sub-GHz</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| Replay Attack | Captures and replays Sub-GHz commands (e.g., garage doors, remotes) |
+| Sub-GHz Jammer | Disrupts Sub-GHz communication across various bands |
+| Saved Profiles | Stores and manages captured signal profiles |
+ 
+</details>
+<details>
+<summary><strong>📺 Infrared (IR)</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| IR Replay Attack | Captures real IR presses, visualizes, replays, and saves to SD |
+| IR Saved Profiles | Browses IR captures; preserves signal and carrier frequency |
+| Universal IR Controller | Built-in profiles, SD imports, favorites, and remote-style control |
+ 
+</details>
+<details>
+<summary><strong>🧲 RFID / NFC</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| Card Reader | Reads UID and tag identification |
+| Card Clone | Copies supported writable tags |
+| Dump | Reads sectors/blocks when keys are available |
+| Decode Access | Interprets access bits and ACL-style fields from dumps |
+| Erase | Wipes supported writable tags |
+| Jam Reader | Impedes another reader with RF patterns |
+| Tag Disrupt | Advanced disruption flows for authorized physical tests |
+| Disrupt Emulate | Disruption combined with emulation-style flows |
+ 
+</details>
+<details>
+<summary><strong>🛰️ GPS</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| Wardriver | Logs GNSS position with Wi-Fi/BLE observations to SD |
+| Satellite Scanner | Shows satellites in view, signal strength, and fix diagnostics |
+ 
+</details>
+<details>
+<summary><strong>🧰 Device & System</strong></summary>
+  
+| Tool | Description |
+|------|-------------|
+| Serial Monitor | Mirrors serial traffic on the TFT for field debugging |
+| SD File Manager | Browses and manages files on the SD card |
+| Update Firmware | Flashes new firmware from SD |
+| Touch Calibrate | Four-corner XPT2046 touchscreen calibration |
+| Settings | Brightness, dark/light theme, NeoPixel, background auto-scan |
+ 
+</details>
 
 
 
@@ -140,23 +178,26 @@ This device supports **Wi-Fi**, **BLE**, **2.4GHz**, and **Sub-GHz** frequency b
 ESP32DIV consists of two boards:
 
 ### 🧠 Main Board
-- **ESP32-S3** – Main microcontroller with Wi-Fi and BLE
-- **ILI9341 TFT Display** – 2.8" UI display
-- **LF33** – 3.3V regulator
-- **IP5306** – Lithium battery charging and protection
-- **CP2102** – USB to serial for flashing
-- **PCF8574** – I/O expander for buttons
-- **SD Card Slot** – Stores logs and captured signals
-- **Push Buttons** – Navigation and interaction
-- **Antenna Connector** – External antenna support
-- **WS2812 NeoPixels** - Giving better feedback
-- **Buzzer** - It shares a GPIO with the battery voltage divider, so using it is optional.
+| Component | Purpose |
+|-----------|---------|
+| ESP32-S3 | Main MCU — Wi-Fi & BLE |
+| ILI9341 2.8" TFT | Touchscreen UI |
+| IP5306 | LiPo charging & protection |
+| CP2102 | USB-to-serial flashing |
+| PCF8574 | I/O expander for buttons |
+| SD Card Slot | Logs, captured signals, scripts |
+| WS2812 NeoPixels | Status feedback |
+| LF33 | 3.3V regulation |
 
 ### 🛡️ Shield
-- **3x NRF24 Modules** – 2.4GHz jamming and spoofing
-- **1x CC1101 Module** – Sub-GHz jamming and replay
-- **Multiple antennas**
-- **Infrared**
+| Component | Purpose |
+|-----------|---------|
+| 3× NRF24L01 | 2.4GHz jamming & spoofing |
+| CC1101 | Sub-GHz replay & jamming |
+| IR Transceiver | Capture & replay IR remotes |
+| Multiple antennas | Extended range |
+
+<div>&nbsp;</div>
 
 <table>
   <tr>
@@ -186,19 +227,25 @@ ESP32DIV consists of two boards:
 
 <div>&nbsp;</div>
 
+
 <!-- License --> 
 ## :warning: License
  
 Distributed under the MIT License. See LICENSE.txt for more information.
-
 
 <!-- Resources --> 
 ## 📎 Resources
 
 - 📖 [Project WiKi](https://github.com/cifertech/ESP32-DIV/wiki)
 - 🔗 [GitHub Releases](https://github.com/cifertech/ESP32-DIV/releases)
-- 🎥 [YouTube Video](https://youtu.be/jVp1zlcsrOY)
+- 🎥 [YouTube Videos](https://www.youtube.com/playlist?list=PLwydWA9gIJ2p14uvDDpcJkhcJB90Wm7PZ)
 
+<!-- Support & Contributions -->
+## 💬 Support & Contributions
+
+- 💬 Found a bug or have a feature request? Open an [Issue](https://github.com/cifertech/ESP32-DIV/issues)
+- ⭐ Like the project? Star the repo!
+- 🛠 Want to contribute? Fork it and submit a pull request.
 
 <!-- Contact -->
 ## :handshake: Contact 
@@ -209,12 +256,4 @@ CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
 
 Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
 
-
-<!-- Support & Contributions -->
-## 💬 Support & Contributions
-
-- 💬 Found a bug or have a feature request? Open an [Issue](https://github.com/cifertech/ESP32-DIV/issues)
-- ⭐ Like the project? Star the repo!
-- 🛠 Want to contribute? Fork it and submit a pull request.
- 
  
