@@ -1,0 +1,78 @@
+# ============================================================
+# Arduino Compile Check
+# Verifies that the ESP32-DIV sketch compiles cleanly on every
+# push to main and on every pull request targeting main.
+# ============================================================
+
+name: Arduino Compile Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ESP32-DIV/**'
+      - '.github/workflows/arduino-compile.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ESP32-DIV/**'
+      - '.github/workflows/arduino-compile.yml'
+
+jobs:
+  compile:
+    name: Compile Sketch (ESP32-S3)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Check out source ─────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Arduino CLI ────────────────────────────────
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v1
+
+      # ── 3. Install the Espressif ESP32 board package ─────────
+      - name: Install ESP32 board package
+        run: |
+          arduino-cli core update-index \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core install esp32:esp32 \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      # ── 4. Install required libraries ────────────────────────
+      - name: Install libraries from Library Manager
+        run: |
+          arduino-cli lib install \
+            "TFT_eSPI" \
+            "PCF8574" \
+            "XPT2046_Touchscreen" \
+            "NimBLE-Arduino" \
+            "RCSwitch" \
+            "arduinoFFT"
+
+      # ── 5. Copy bundled libraries (not on Library Manager) ───
+      - name: Install bundled libraries
+        run: |
+          ARDUINO_LIB_DIR=$(arduino-cli config dump | grep 'user:' | awk '{print $2}')/libraries
+          cp -r Libraries/* "$ARDUINO_LIB_DIR/"
+
+      # ── 6. Compile the sketch ────────────────────────────────
+      - name: Compile ESP32-DIV sketch
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi \
+            --warnings default \
+            ESP32-DIV/ESP32-DIV.ino
+
+      # ── 7. Upload compile artifacts (optional, 7-day retention)
+      - name: Upload compiled binary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-div-firmware
+          path: |
+            /tmp/arduino-sketch-*/ESP32-DIV.ino.bin
+            /tmp/arduino-sketch-*/ESP32-DIV.ino.elf
+          retention-days: 7
+          if-no-files-found: warn
