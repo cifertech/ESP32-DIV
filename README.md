@@ -224,33 +224,33 @@ ESP32DIV consists of two boards:
   </tr>
 </table>
 
-<div>&nbsp;</div>
+
 
 
 <!-- License --> 
 ## :warning: License
  
-> Distributed under the MIT License. See LICENSE.txt for more information.
+Distributed under the MIT License. See LICENSE.txt for more information.
 
-<div>&nbsp;</div>
+
 
 
 <!-- Support & Contributions -->
 ## 💬 Support & Contributions
 
-> - 💬 Found a bug or have a feature request? Open an [Issue](https://github.com/cifertech/ESP32-DIV/issues)
-> - ⭐ Like the project? Star the repo!
-> - 🛠 Want to contribute? Fork it and submit a pull request.
+- 💬 Found a bug or have a feature request? Open an [Issue](https://github.com/cifertech/ESP32-DIV/issues)
+- ⭐ Like the project? Star the repo!
+- 🛠 Want to contribute? Fork it and submit a pull request.
 ‎
-<div>&nbsp;</div>
+
 
 <!-- Contact -->
 ## :handshake: Contact 
 
-> ▶ Support me on Patreon [patreon.com/cifertech](https://www.patreon.com/cifertech)
->
-> CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
->
-> Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
+▶ Support me on Patreon [patreon.com/cifertech](https://www.patreon.com/cifertech)
+
+CiferTech - [@twitter](https://twitter.com/techcifer) - CiferTech@gmali.com
+
+Project Link: [https://github.com/cifertech/ESP32-DIV](https://github.com/cifertech/ESP32-DIV)
 
  
