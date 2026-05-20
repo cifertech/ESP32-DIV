@@ -1,0 +1,19 @@
+REM Name: USB and BLE awareness note
+REM Description: Cybersecurity demo — types a short physical-access warning in Notepad
+DEFAULT_DELAY 80
+DELAY 1000
+GUI r
+DELAY 400
+STRING notepad
+ENTER
+DELAY 600
+STRING Physical access beats many security controls.
+ENTER
+STRING If you did not plug in or pair this keyboard on purpose, treat the PC as suspect.
+ENTER
+STRING - Unplug unknown dongles and forget rogue Bluetooth HID pairings.
+ENTER
+STRING - Rotate passwords you typed while a rogue device was connected.
+ENTER
+STRING - Prefer full-disk encryption and screen lock when you walk away.
+ENTER

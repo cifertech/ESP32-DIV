@@ -1,0 +1,5 @@
+REM Name: Lock screen
+REM Description: Win+L — locks Windows (use responsibly)
+DEFAULT_DELAY 50
+DELAY 800
+GUI l

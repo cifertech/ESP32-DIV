@@ -1,0 +1,8 @@
+REM Name: Open URL from Run
+REM Description: Win+R then types a URL (default handler opens browser). Edit the URL line.
+DEFAULT_DELAY 100
+DELAY 1000
+GUI r
+DELAY 400
+STRING https://www.example.com
+ENTER

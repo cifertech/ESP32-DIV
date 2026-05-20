@@ -1,0 +1,8 @@
+REM Name: Select all and copy
+REM Description: Ctrl+A then Ctrl+C — works in most text fields with focus
+REM Note: Put cursor in a text box first, then run this script
+DEFAULT_DELAY 150
+DELAY 500
+CTRL a
+DELAY 200
+CTRL c

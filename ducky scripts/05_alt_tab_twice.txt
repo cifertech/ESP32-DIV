@@ -1,0 +1,7 @@
+REM Name: Alt-Tab demo
+REM Description: Sends Alt+Tab twice (window switcher on Windows)
+DEFAULT_DELAY 200
+DELAY 1000
+ALT TAB
+DELAY 400
+ALT TAB

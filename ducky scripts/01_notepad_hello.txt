@@ -1,0 +1,11 @@
+REM Name: Notepad hello
+REM Description: Opens Run, launches Notepad, types a short line
+DEFAULT_DELAY 80
+DELAY 1000
+GUI r
+DELAY 400
+STRING notepad
+ENTER
+DELAY 600
+STRING Hello from ESP32 BLE Ducky
+ENTER

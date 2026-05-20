@@ -1,0 +1,5 @@
+REM Name: Task Manager jump-scare
+REM Description: Ctrl+Shift+Esc — looks like admin panic, harmless
+DEFAULT_DELAY 150
+DELAY 1000
+CTRL SHIFT ESC

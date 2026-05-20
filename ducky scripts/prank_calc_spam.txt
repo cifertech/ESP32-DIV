@@ -1,0 +1,28 @@
+REM Name: Calculator spam
+REM Description: Opens Calculator several times via Run — noisy prank, close windows to undo
+DEFAULT_DELAY 100
+DELAY 800
+GUI r
+DELAY 350
+STRING calc
+ENTER
+DELAY 500
+GUI r
+DELAY 350
+STRING calc
+ENTER
+DELAY 500
+GUI r
+DELAY 350
+STRING calc
+ENTER
+DELAY 500
+GUI r
+DELAY 350
+STRING calc
+ENTER
+DELAY 500
+GUI r
+DELAY 350
+STRING calc
+ENTER

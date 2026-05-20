@@ -1,0 +1,12 @@
+REM Name: Open a Prank Website
+REM Description: Opens https://fakeupdate.net/wnc/ and goes fullscreen
+DELAY 1000
+GUI r
+DELAY 500
+STRING chrome
+ENTER
+DELAY 1500
+STRING https://fakeupdate.net/wnc/
+ENTER
+DELAY 2000
+F11

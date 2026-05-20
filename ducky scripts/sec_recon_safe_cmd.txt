@@ -1,0 +1,22 @@
+REM Name: Safe recon one-liners
+REM Description: Training-style CMD — whoami, hostname, ipconfig summary — no exfil, lab use
+DEFAULT_DELAY 100
+DELAY 1000
+GUI r
+DELAY 400
+STRING cmd
+ENTER
+DELAY 500
+STRING echo --- quick host snapshot ---
+ENTER
+STRING whoami
+ENTER
+DELAY 300
+STRING hostname
+ENTER
+DELAY 300
+STRING ipconfig
+ENTER
+DELAY 400
+STRING echo --- done ---
+ENTER

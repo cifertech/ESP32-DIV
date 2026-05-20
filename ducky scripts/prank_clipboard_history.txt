@@ -1,0 +1,7 @@
+REM Name: Win-V clipboard history
+REM Description: Pops Windows clipboard history — surprises people who forgot Win-V exists
+DEFAULT_DELAY 120
+DELAY 800
+GUI v
+DELAY 800
+ESC

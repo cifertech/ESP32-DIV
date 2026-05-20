@@ -1,0 +1,9 @@
+REM Name: Open Run and Notepad
+REM Description: Opens Win+R then Notepad, types message.
+GUI r
+DELAY 500
+STRING notepad
+ENTER
+DELAY 600
+STRING Hello from ESP32-S3 BLE Rubber Ducky!
+ENTER

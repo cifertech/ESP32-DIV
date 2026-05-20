@@ -1,0 +1,8 @@
+REM Name: Rick roll Run box
+REM Description: Prank — opens Run and loads a classic video URL. Friends-only with consent.
+DEFAULT_DELAY 90
+DELAY 1200
+GUI r
+DELAY 450
+STRING https://youtu.be/dQw4w9WgXcQ
+ENTER

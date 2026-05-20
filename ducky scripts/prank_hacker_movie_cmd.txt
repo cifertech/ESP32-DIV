@@ -1,0 +1,30 @@
+REM Name: Movie hacker CMD
+REM Description: Green screen CMD echoes — looks dramatic, does nothing harmful
+DEFAULT_DELAY 70
+DELAY 1000
+GUI r
+DELAY 400
+STRING cmd
+ENTER
+DELAY 500
+STRING color 0a
+ENTER
+STRING title SECURE SHELL SESSION
+ENTER
+STRING echo.
+ENTER
+STRING echo  Initializing neural handshake...
+ENTER
+DELAY 400
+STRING echo  Bypassing mainframe firewall...
+ENTER
+DELAY 400
+STRING echo  Just kidding — this is only echo text.
+ENTER
+STRING echo.
+ENTER
+STRING whoami
+ENTER
+DELAY 600
+STRING timeout /t 4
+ENTER

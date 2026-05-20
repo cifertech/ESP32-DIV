@@ -1,0 +1,14 @@
+REM Name: CMD one-liner
+REM Description: Opens Run, runs cmd, prints text, exits
+DEFAULT_DELAY 120
+DELAY 1000
+GUI r
+DELAY 400
+STRING cmd
+ENTER
+DELAY 500
+STRING echo ESP32-DIV BLE Ducky test OK
+ENTER
+DELAY 200
+STRING exit
+ENTER

@@ -1,0 +1,12 @@
+REM Name: Timing template
+REM Description: Mix of DELAY, DEFAULT_DELAY, WAIT_FOR — copy and tune for your PC
+DEFAULT_DELAY 50
+DELAY 2000
+REM big pause so you can focus the right window
+WAIT_FOR 500
+STRING defaultDelay adds pause after most commands in this firmware.
+ENTER
+DEFAULT_DELAY 0
+DELAY 300
+STRING This line used explicit DELAY only.
+ENTER

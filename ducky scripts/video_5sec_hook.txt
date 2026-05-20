@@ -1,0 +1,15 @@
+REM Name: 5 second hook
+REM Description: Ultra short for TikTok or cold open — Run, Notepad, one line, fullscreen
+DEFAULT_DELAY 50
+DELAY 1500
+GUI r
+DELAY 350
+STRING notepad
+ENTER
+DELAY 450
+STRING This text is not from the laptop keyboard. It is BLE HID from ESP32-DIV.
+ENTER
+DELAY 300
+F11
+DELAY 4000
+F11

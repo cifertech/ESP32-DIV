@@ -1,0 +1,38 @@
+REM Name: Video hero demo
+REM Description: For short clips — green CMD + Notepad fullscreen hook, ESP32-DIV branding
+REM Use: Start recording, focus desktop, run script, you get ~20s of b-roll
+DEFAULT_DELAY 55
+DELAY 2500
+GUI r
+DELAY 400
+STRING cmd
+ENTER
+DELAY 550
+STRING color 0a
+ENTER
+STRING cls
+ENTER
+DELAY 200
+STRING echo.
+ENTER
+STRING echo   [[[  ESP32-DIV  ]]]  BLE HID DEMO
+ENTER
+STRING echo   You are watching keystrokes injected over Bluetooth.
+ENTER
+STRING echo.
+ENTER
+DELAY 400
+STRING whoami
+ENTER
+DELAY 700
+GUI r
+DELAY 400
+STRING notepad
+ENTER
+DELAY 500
+STRING Like + Subscribe — this was one .duck file on the SD card.
+ENTER
+DELAY 400
+F11
+DELAY 3500
+F11

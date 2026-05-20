@@ -1,0 +1,5 @@
+REM Name: Ubuntu terminal (Ctrl+Alt+T)
+REM Description: Opens terminal on many Linux desktops — not for Windows
+DEFAULT_DELAY 200
+DELAY 1000
+CTRL ALT t
