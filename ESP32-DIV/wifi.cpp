@@ -1841,7 +1841,7 @@ static int last_rendered_index = -1;
 
 static void drawNetworkRow(int i, int y, bool isSel) {
   char buf[64];
-  char ssid[12];
+  char ssid[16];  // 11 chars + "..." + NUL; must leave room for the ellipsis below
   String fullSSID = WiFi.SSID(i);
   strncpy(ssid, fullSSID.c_str(), 11);
   ssid[11] = '\0';
@@ -3602,7 +3602,7 @@ void drawScanScreen() {
 
         for (int i = start_index; i < end_index && y < LIST_BOTTOM_Y; i++) {
             char buf[64];
-            char ssid[12];
+            char ssid[16];  // 11 chars + "..." + NUL
             strncpy(ssid, (char*)ap_list[i].ssid, 11);
             ssid[11] = '\0';
             if (strlen((char*)ap_list[i].ssid) > 11) strcat(ssid, "...");
@@ -4225,7 +4225,7 @@ void drawScanScreen() {
 
         for (int i = start_index; i < end_index && y < LIST_BOTTOM_Y; i++) {
             char buf[64];
-            char ssid[12];
+            char ssid[16];  // 11 chars + "..." + NUL
             strncpy(ssid, (char*)ap_list[i].ssid, 11);
             ssid[11] = '\0';
             if (strlen((char*)ap_list[i].ssid) > 11) strcat(ssid, "...");
@@ -5396,7 +5396,7 @@ bool selectWiFiNetwork() {
     for (int i = startIndex; i < end_index && y_pos < 300; i++) {
       if (x >= 10 && x < SCREEN_WIDTH - 10 && y >= y_pos && y < y_pos + NETWORK_ROW_HEIGHT) {
         char buf[64];
-        char ssid[12];
+        char ssid[16];  // 11 chars + "..." + NUL
         strncpy(ssid, networks[i].ssid, 11);
         ssid[11] = '\0';
         if (strlen(networks[i].ssid) > 11) strcat(ssid, "...");
@@ -5463,7 +5463,7 @@ void drawNetworkList(int startIndex, int numNetworks, NetworkInfo* networks, int
 
     for (int i = start_index; i < end_index && y < 300; i++) {
       char buf[64];
-      char ssid[12];
+      char ssid[16];  // 11 chars + "..." + NUL
       strncpy(ssid, networks[i].ssid, 11);
       ssid[11] = '\0';
       if (strlen(networks[i].ssid) > 11) strcat(ssid, "...");
