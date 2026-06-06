@@ -1,33 +1,29 @@
 <div align="center">
 
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/a30bde48-e39d-4b11-8749-3401bcb82a68" width="150">
-  <h1><span>ESP32-DIV</span></h1>
+  <img src="https://github.com/user-attachments/assets/1f70e8ba-d8be-4889-959a-700294068a3e" alt="ESP32-DIV Banner" width="100%"/>
+
+  <br/>
+  <br/>
+
+  <p align="center">
+    <a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/static/v1?label=cifertech&message=ESP32-DIV&color=orange&logo=github"/></a>
+    <a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/github/stars/cifertech/ESP32-DIV?style=social"/></a>
+    <a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/github/forks/cifertech/ESP32-DIV?style=social"/></a>
+    <img src="https://img.shields.io/github/downloads/cifertech/esp32-div/total?color=orange&label=downloads&logo=github"/>
+    <img src="https://img.shields.io/badge/ESP32-Offensive%20%2B%20Defensive-orange?logo=espressif"/>
+    <img src="https://img.shields.io/badge/license-MIT-orange"/>
+  </p>
+
+  <p align="center">
+    <a href="https://twitter.com/techcifer"><img src="https://img.shields.io/badge/Twitter-orange?logo=x&logoColor=black"/></a>
+    <a href="https://www.instagram.com/cifertech/"><img src="https://img.shields.io/badge/Instagram-orange?logo=instagram&logoColor=black"/></a>
+    <a href="https://www.youtube.com/c/techcifer"><img src="https://img.shields.io/badge/YouTube-orange?logo=youtube&logoColor=black"/></a>
+    <a href="https://cifertech.net/"><img src="https://img.shields.io/badge/Website-orange?logo=googlechrome&logoColor=black"/></a>
+  </p>
+
 </div>
 
-  <p>
-    ESP32DIV - Multi-purpose wireless offensive and defensive toolkit powered by an ESP32
-  </p>
-   
-<!-- Badges -->
-<a href="https://github.com/cifertech/ESP32-DIV" title="Go to GitHub repo"><img src="https://img.shields.io/static/v1?label=cifertech&message=ESP32-DIV&color=purple&logo=github" alt="cifertech - ESP32-DIV"></a>
-![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/cifertech/esp32-div/total)
-<a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/github/stars/cifertech/ESP32-DIV?style=social" alt="stars - ESP32-DIV"></a>
-<a href="https://github.com/cifertech/ESP32-DIV"><img src="https://img.shields.io/github/forks/cifertech/ESP32-DIV?style=social" alt="forks - ESP32-DIV"></a>
-   
-<h4>
-    <a href="https://twitter.com/techcifer">TWITTER(X)</a>
-  <span> · </span>
-    <a href="https://www.instagram.com/cifertech/">INSTAGRAM</a>
-  <span> · </span>
-    <a href="https://www.youtube.com/c/techcifer">YOUTUBE</a>
-  <span> · </span>
-    <a href="https://cifertech.net/">WEBSITE</a>
-  </h4>
-</div> 
-
-
----
+&nbsp;
 
 ## 📖 Explore the ESP32-DIV Wiki
 
