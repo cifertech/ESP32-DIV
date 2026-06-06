@@ -41,7 +41,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 
 
 
-<div>&nbsp;</div>
+
 
 <!-- Features -->
 ## :dart: Features
