@@ -29,12 +29,15 @@
 
 Complete project story, in-depth tutorials, and all the features in [Wiki](https://github.com/cifertech/ESP32-DIV/wiki)! From Wi-Fi deauthentication attacks to Sub-GHz signal replay, the Wiki covers everything you need to get started. [Click here to explore now!](https://github.com/cifertech/ESP32-DIV/wiki)
 
+> 💡 **Tip:** Always check the [Wiki](https://github.com/cifertech/ESP32-DIV/wiki) and existing [Issues](https://github.com/cifertech/ESP32-DIV/issues) before opening a new report. Many common problems are already documented there.
+
 
 <div>&nbsp;</div>
 
 <!-- About the Project -->
 ## :star2: About the Project
 ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3**. It covers Wi-Fi, BLE, 2.4GHz, Sub-GHz, IR, RFID/NFC, and GPS. all from a compact handheld device with a touchscreen UI. Whether you're analyzing wireless traffic, testing signal resilience, or building your own RF tools, ESP32-DIV gives you a single platform to do it all.
+
 
 > [!WARNING]
 > This project is intended for **educational and research purposes only**. Use only on networks and devices you own or have explicit permission to test. Unauthorized use may violate local laws.
