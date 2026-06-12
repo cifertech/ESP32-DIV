@@ -423,6 +423,28 @@ void layoutFooter1(Button& btn, const char* label, ButtonStyle style, bool disab
   btn = {(int16_t)x,(int16_t)y,(int16_t)w,(int16_t)BTN_H,label,style,disabled};
 }
 
+void layoutFooter5(Button (&btns)[5],
+                   const char* l0, ButtonStyle s0,
+                   const char* l1, ButtonStyle s1,
+                   const char* l2, ButtonStyle s2,
+                   const char* l3, ButtonStyle s3,
+                   const char* l4, ButtonStyle s4,
+                   bool d0, bool d1, bool d2, bool d3, bool d4) {
+  int availW = tft.width() - 2*PAD_X;
+  int w = (availW - 4*GAP_X) / 5;
+  int y = tft.height() - FOOTER_H + (FOOTER_H - BTN_H)/2;
+  int x0 = PAD_X;
+  int x1 = x0 + w + GAP_X;
+  int x2 = x1 + w + GAP_X;
+  int x3 = x2 + w + GAP_X;
+  int x4 = x3 + w + GAP_X;
+  btns[0] = {(int16_t)x0,(int16_t)y,(int16_t)w,(int16_t)BTN_H,l0,s0,d0};
+  btns[1] = {(int16_t)x1,(int16_t)y,(int16_t)w,(int16_t)BTN_H,l1,s1,d1};
+  btns[2] = {(int16_t)x2,(int16_t)y,(int16_t)w,(int16_t)BTN_H,l2,s2,d2};
+  btns[3] = {(int16_t)x3,(int16_t)y,(int16_t)w,(int16_t)BTN_H,l3,s3,d3};
+  btns[4] = {(int16_t)x4,(int16_t)y,(int16_t)w,(int16_t)BTN_H,l4,s4,d4};
+}
+
 int hit(const Button* btns, int n, int x, int y) {
   for (int i = 0; i < n; ++i) {
     const auto& b = btns[i];
@@ -475,7 +497,11 @@ float readInternalTemperature() {
 
 void updateSdCardStatus() {
 
+#ifdef SD_CD
   bool cardDetected = !digitalRead(SD_CD);
+#else
+  bool cardDetected = true;
+#endif
 
   if (cardDetected != lastSdCardState) {
     sdCardPresent = cardDetected;
@@ -732,6 +758,10 @@ void startStatusBarTask() {
   );
 }
 
+void pauseBackgroundRadioTasks() {
+  GpsWardriver::stopBackgroundIfRunning();
+}
+
 void updateStatusBar() {
 
   if (statusBarTaskHandle != nullptr) {
@@ -765,11 +795,94 @@ void updateStatusBar() {
   }
 }
 
+#if HAS_PCF8574_BUTTONS
+static uint8_t s_pcf8574Addr = 0;
+
+uint8_t getPcf8574Address() {
+  return s_pcf8574Addr;
+}
+
+bool initPcf8574Buttons() {
+  pcf.pinMode(BTN_UP, INPUT_PULLUP);
+  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
+  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
+  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
+
+#if PCF8574_AUTO_DETECT
+  for (uint8_t addr = PCF8574_ADDR_MIN; addr <= PCF8574_ADDR_MAX; addr++) {
+    if (pcf.begin(addr)) {
+      s_pcf8574Addr = addr;
+      Serial.printf("[PCF8574] auto-detected at 0x%02X\n", addr);
+      break;
+    }
+  }
+  if (s_pcf8574Addr == 0) {
+    Serial.println("[PCF8574] not found (scanned 0x20-0x27)");
+    return false;
+  }
+#else
+  if (!pcf.begin(PCF8574_I2C_ADDR)) {
+    Serial.printf("[PCF8574] not found at fixed address 0x%02X\n", PCF8574_I2C_ADDR);
+    return false;
+  }
+  s_pcf8574Addr = PCF8574_I2C_ADDR;
+  Serial.printf("[PCF8574] using fixed address 0x%02X\n", s_pcf8574Addr);
+#endif
+
+  for (int pin = 0; pin < 8; pin++) {
+    Serial.print("Button ");
+    Serial.print(pin);
+    Serial.print(": ");
+    Serial.println(pcf.digitalRead(pin) ? "Released" : "Pressed");
+  }
+  return true;
+}
+#else
+uint8_t getPcf8574Address() {
+  return 0;
+}
+
+bool initPcf8574Buttons() {
+  return false;
+}
+#endif
+
+#if TOUCH_SHARES_TFT_SPI
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static SPIClass s_sdSpi(FSPI);
+#elif defined(CONFIG_IDF_TARGET_ESP32)
+static SPIClass s_sdSpi(VSPI);
+#else
+static SPIClass s_sdSpi(FSPI);
+#endif
+#endif
+
+void sdSpiInit() {
+#if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
+#if TOUCH_SHARES_TFT_SPI
+  s_sdSpi.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+#else
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+#endif
+#endif
+}
+
+bool sdMountChipSelect(uint8_t cs) {
+#if TOUCH_SHARES_TFT_SPI
+  return SD.begin(cs, s_sdSpi);
+#else
+  return SD.begin(cs);
+#endif
+}
+
 void initSDCard() {
 
+#ifdef SD_CD
   pinMode(SD_CD, INPUT_PULLUP);
+#endif
 
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  sdSpiInit();
 
   updateSdCardStatus();
 }
@@ -831,7 +944,7 @@ static bool sdTryBeginOrder() {
 #endif
 #endif
   for (int i = 0; i < nTry; i++) {
-    if (SD.begin(tryPins[i])) {
+    if (sdMountChipSelect(tryPins[i])) {
       s_sdLastGoodCs = (int8_t)tryPins[i];
       return true;
     }
@@ -858,7 +971,7 @@ bool isSDCardAvailable() {
   #ifdef SD_MISO
   #ifdef SD_MOSI
   #ifdef SD_CS
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  sdSpiInit();
   #endif
   #endif
   #endif
@@ -873,14 +986,14 @@ bool isSDCardAvailable() {
 
 void restoreSdAfterSharedSpi() {
 #if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  sdSpiInit();
 #endif
   if (SD.exists("/")) {
     return;
   }
   SD.end();
 #if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  sdSpiInit();
 #endif
   (void)sdTryBeginOrder();
 }
@@ -996,6 +1109,71 @@ int blank[19];
 long baudRates[] = {9600, 19200, 38400, 57600, 115200};
 byte baudIndex = 0;
 
+static int terminalContentBottom() {
+  return featureHasTouchNavBar() ? (int)touchNavContentBottomY() : DISPLAY_HEIGHT;
+}
+
+static int terminalBotFixedArea() {
+  const int bottom = terminalContentBottom();
+  return (bottom < DISPLAY_HEIGHT) ? (DISPLAY_HEIGHT - bottom) : BOT_FIXED_AREA;
+}
+
+static void terminalUpdateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  setTouchNavLabels("Exit", nullptr, terminalActive ? "Pause" : "Active", nullptr, "Baud");
+  redrawTouchButtonBar();
+}
+
+static void terminalCycleBaud() {
+  if (terminalActive) {
+    terminalActive = false;
+    terminalUpdateNavLabels();
+    return;
+  }
+  baudIndex = (baudIndex + 1) % 5;
+  Serial.end();
+  delay(100);
+  Serial.begin(baudRates[baudIndex]);
+  tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
+  tft.setTextColor(TFT_WHITE, TFT_WHITE);
+  String baudMsg = " Serial Terminal - " + String(baudRates[baudIndex]) + " baud ";
+  tft.drawCentreString(baudMsg, DISPLAY_WIDTH / 2, 37, 2);
+  delay(10);
+}
+
+static void terminalSetActive(bool active) {
+  terminalActive = active;
+  delay(10);
+  tft.fillRect(0, 37, DISPLAY_WIDTH, 16, ORANGE);
+  tft.setTextColor(TFT_WHITE, TFT_WHITE);
+  if (active) {
+    tft.drawCentreString(" Serial Terminal Active ", DISPLAY_WIDTH / 2, 37, 2);
+  } else {
+    String baudMsg = " Serial Terminal - " + String(baudRates[baudIndex]) + " baud ";
+    tft.drawCentreString(baudMsg, DISPLAY_WIDTH / 2, 37, 2);
+  }
+  terminalUpdateNavLabels();
+}
+
+static void terminalHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    feature_exit_requested = true;
+    return;
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    terminalCycleBaud();
+    return;
+  }
+  if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+    terminalSetActive(!terminalActive);
+  }
+}
+
 void runUI() {
 
     #define STATUS_BAR_Y_OFFSET 20
@@ -1074,7 +1252,7 @@ void runUI() {
 
     if (millis() - lastTouchCheck >= touchCheckInterval) {
         int x, y;
-        if (feature_active && readTouchXY(x, y)) {
+        if (!featureHasTouchNavBar() && feature_active && readTouchXY(x, y)) {
             if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
                 for (int i = 0; i < ICON_NUM; i++) {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
@@ -1104,7 +1282,10 @@ int scroll_line() {
   tft.fillRect(0, yStart, blank[(yStart - TOP_FIXED_AREA) / TEXT_HEIGHT], TEXT_HEIGHT, TFT_BLACK);
 
   yStart += TEXT_HEIGHT;
-  if (yStart >= DISPLAY_HEIGHT - BOT_FIXED_AREA) yStart = TOP_FIXED_AREA + (yStart - DISPLAY_HEIGHT + BOT_FIXED_AREA);
+  const int scrollLimit = DISPLAY_HEIGHT - terminalBotFixedArea();
+  if (yStart >= scrollLimit) {
+    yStart = TOP_FIXED_AREA + (yStart - scrollLimit);
+  }
   scrollAddress(yStart);
   delay(1);
   return yTemp;
@@ -1138,15 +1319,23 @@ void terminalSetup() {
 
   Serial.begin(baudRates[baudIndex]);
 
-  setupScrollArea(TOP_FIXED_AREA, BOT_FIXED_AREA);
+  const int bfa = terminalBotFixedArea();
+  yArea = DISPLAY_HEIGHT - TOP_FIXED_AREA - bfa;
+  yDraw = DISPLAY_HEIGHT - bfa - TEXT_HEIGHT;
+  setupScrollArea(TOP_FIXED_AREA, bfa);
 
   for (byte i = 0; i < 19; i++) blank[i] = 0;
 
+  terminalUpdateNavLabels();
 }
 
 void terminalLoop() {
 
   updateStatusBar();
+  if (featureHasTouchNavBar()) {
+    maintainTouchNavBar();
+  }
+  terminalHandleNavButtons();
   runUI();
 
   if (terminalActive) {
@@ -1210,11 +1399,12 @@ static int  sel = 0;
 static bool dirtySettings = false;
 static bool uiDirty = false;
 
-static const char* items[] = {"Brightness", "Theme", "NeoPixel", "Auto Scan"};
+static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan"};
 static const int N = sizeof(items)/sizeof(items[0]);
 
 static uint8_t  last_brightness;
 static Theme    last_theme;
+static uint8_t  last_accent;
 static bool     last_neopixel;
 static bool     last_autoScan;
 static int      last_sel;
@@ -1259,6 +1449,10 @@ static void wipeBrightnessWidgetArea() {
 }
 static void wipeThemeWidgetArea() {
   Rect r = rowRect(1);
+  tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
+}
+static void wipeAccentWidgetArea() {
+  Rect r = rowRect(2);
   tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
 }
 static void wipeSwitchWidgetArea(int row) {
@@ -1364,6 +1558,41 @@ static void drawTheme(Theme th, bool selected) {
   drawThemeWidget(th, selected);
 }
 
+static Rect rAccentSwatch() {
+  Rect r = rowRect(2);
+  int sw = 18;
+  int sx = r.x + r.w - sw - 6;
+  int sy = r.y + (r.h - sw) / 2;
+  return makeRect(sx, sy, sw, sw);
+}
+static void drawAccentWidget(uint8_t preset, bool ) {
+  tft.startWrite();
+  wipeAccentWidgetArea();
+
+  Rect r = rowRect(2);
+  int right = r.x + r.w - 6;
+  int ty = r.y + (r.h / 2 - 6);
+
+  setLabelFont();
+  const char* name = accentPresetName(preset);
+  int nameW = (int)tft.textWidth(name);
+  Rect sw = rAccentSwatch();
+  int nameX = sw.x - 8 - nameW;
+
+  tft.setTextColor(textStrong, UI_BG);
+  tft.setCursor(nameX, ty);
+  tft.print(name);
+
+  tft.fillRoundRect(sw.x, sw.y, sw.w, sw.h, 4, accentColor565(preset));
+  tft.drawRoundRect(sw.x, sw.y, sw.w, sw.h, 4, cardEdge);
+
+  tft.endWrite();
+}
+static void drawAccent(uint8_t preset, bool selected) {
+  drawCardStatic(2, selected);
+  drawAccentWidget(preset, selected);
+}
+
 static Rect rSwitchTrack(int row){
   Rect r = rowRect(row);
   const int w = 34;
@@ -1413,8 +1642,8 @@ static void drawSwitchRow(bool on, bool selected, int row) {
   drawSwitchWidgetRow(on, selected, row);
 }
 
-static void drawNeoPixel(bool on, bool selected) { drawSwitchRow(on, selected, 2); }
-static void drawAutoScan(bool on, bool selected) { drawSwitchRow(on, selected, 3); }
+static void drawNeoPixel(bool on, bool selected) { drawSwitchRow(on, selected, 3); }
+static void drawAutoScan(bool on, bool selected) { drawSwitchRow(on, selected, 4); }
 
 static Rect backRect(){
   int h = tft.height();
@@ -1477,15 +1706,17 @@ static void drawAll() {
   auto& s = settings();
   drawBrightness(s.brightness, sel==0);
   drawTheme(s.theme, sel==1);
-  drawNeoPixel(s.neopixelEnabled, sel==2);
+  drawAccent(s.accentColor, sel==2);
+  drawNeoPixel(s.neopixelEnabled, sel==3);
   bool autoScan = (s.autoWifiScan || s.autoBleScan);
-  drawAutoScan(autoScan, sel==3);
+  drawAutoScan(autoScan, sel==4);
 
   drawFooter(false, false);
 
   last_sel        = sel;
   last_brightness = s.brightness;
   last_theme      = s.theme;
+  last_accent     = s.accentColor;
   last_neopixel   = s.neopixelEnabled;
   last_autoScan     = autoScan;
   uiDirty = false;
@@ -1494,7 +1725,7 @@ static void drawAll() {
 static void redrawIfChanged() {
   auto& s = settings();
 
-  if (s.theme != last_theme) {
+  if (s.theme != last_theme || s.accentColor != last_accent) {
     applyThemeToPalette(s.theme);
     buildPalette();
     drawAll();
@@ -1504,9 +1735,10 @@ static void redrawIfChanged() {
   if (sel != last_sel) {
     drawCardStatic(0, sel==0);  drawBrightnessWidget(s.brightness, sel==0);
     drawCardStatic(1, sel==1);  drawThemeWidget(s.theme, sel==1);
-    drawCardStatic(2, sel==2);  drawSwitchWidgetRow(s.neopixelEnabled, sel==2, 2);
+    drawCardStatic(2, sel==2);  drawAccentWidget(s.accentColor, sel==2);
+    drawCardStatic(3, sel==3);  drawSwitchWidgetRow(s.neopixelEnabled, sel==3, 3);
     bool autoScan = (s.autoWifiScan || s.autoBleScan);
-    drawCardStatic(3, sel==3);  drawSwitchWidgetRow(autoScan, sel==3, 3);
+    drawCardStatic(4, sel==4);  drawSwitchWidgetRow(autoScan, sel==4, 4);
     last_sel = sel;
   } else {
     if (s.brightness != last_brightness) {
@@ -1514,12 +1746,12 @@ static void redrawIfChanged() {
       last_brightness = s.brightness;
     }
     if (s.neopixelEnabled != last_neopixel) {
-      drawSwitchWidgetRow(s.neopixelEnabled, sel==2, 2);
+      drawSwitchWidgetRow(s.neopixelEnabled, sel==3, 3);
       last_neopixel = s.neopixelEnabled;
     }
     bool autoScan = (s.autoWifiScan || s.autoBleScan);
     if (autoScan != last_autoScan) {
-      drawSwitchWidgetRow(autoScan, sel==3, 3);
+      drawSwitchWidgetRow(autoScan, sel==4, 4);
       last_autoScan = autoScan;
     }
     if (s.theme != last_theme) {
@@ -1547,6 +1779,18 @@ static bool applyTheme(Theme t){
   if (s.theme == t) return false;
   s.theme = t;
   applyThemeToPalette(t);
+  buildPalette();
+  dirtySettings = true;
+  uiDirty = true;
+  lastChangeMs = millis();
+  return true;
+}
+static bool applyAccent(uint8_t preset){
+  auto& s = settings();
+  preset = accentPresetClamp(preset);
+  if (s.accentColor == preset) return false;
+  s.accentColor = preset;
+  applyThemeToPalette(s.theme);
   buildPalette();
   dirtySettings = true;
   uiDirty = true;
@@ -1642,7 +1886,13 @@ static void handleTouch() {
       applyTheme(Theme::Light);
     }
   } else if (sel == 2) {
-    Rect tr = rSwitchTrack(2);
+    Rect sw = rAccentSwatch();
+    if (tx >= sw.x - 80 && tx <= sw.x + sw.w && ty >= sw.y - 8 && ty <= sw.y + sw.h + 8) {
+      uint8_t next = (s.accentColor + 1) % ACCENT_PRESET_COUNT;
+      applyAccent(next);
+    }
+  } else if (sel == 3) {
+    Rect tr = rSwitchTrack(3);
     if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
       uint32_t now = millis();
       if (now - lastToggleMs > 120) {
@@ -1650,8 +1900,8 @@ static void handleTouch() {
         lastToggleMs = now;
       }
     }
-  } else if (sel == 3) {
-    Rect tr = rSwitchTrack(3);
+  } else if (sel == 4) {
+    Rect tr = rSwitchTrack(4);
     if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
       uint32_t now = millis();
       if (now - lastToggleMs > 120) {
@@ -1712,8 +1962,9 @@ void loop(){
     auto& s=settings();
     if (sel==0 && s.brightness>0)      { applyBrightness(s.brightness>8? s.brightness-8:0); }
     else if (sel==1)                   { applyTheme(Theme::Dark); }
-    else if (sel==2)                   { applyNeoPixel(false); }
-    else if (sel==3)                   { applyAutoScan(false); }
+    else if (sel==2)                   { applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT); }
+    else if (sel==3)                   { applyNeoPixel(false); }
+    else if (sel==4)                   { applyAutoScan(false); }
     changedByButtons=true;
     lastActionMs = now;
   }
@@ -1721,8 +1972,9 @@ void loop(){
     auto& s=settings();
     if (sel==0 && s.brightness<255)    { applyBrightness(s.brightness+8); }
     else if (sel==1)                   { applyTheme(Theme::Light); }
-    else if (sel==2)                   { applyNeoPixel(true); }
-    else if (sel==3)                   { applyAutoScan(true); }
+    else if (sel==2)                   { applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT); }
+    else if (sel==3)                   { applyNeoPixel(true); }
+    else if (sel==4)                   { applyAutoScan(true); }
     changedByButtons=true;
     lastActionMs = now;
   }
@@ -1789,6 +2041,128 @@ static Button confirmBtns[2];
 
 static String lastErr;
 
+static int sdFmContentBottom() {
+  return featureHasTouchNavBar() ? (int)touchNavContentBottomY()
+                                 : (int)(tft.height() - FeatureUI::FOOTER_H - 2);
+}
+
+static void sdFmRestoreNavChrome() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  invalidateTouchButtonCue();
+  maintainTouchNavBar();
+}
+
+static char s_sdFmNavCache[5][12] = {{0}};
+
+static void sdFmResetNavLabelCache() {
+  for (int i = 0; i < 5; ++i) {
+    s_sdFmNavCache[i][0] = '\0';
+  }
+}
+
+static void sdFmApplyNavLabels(const char* left, const char* down, const char* center,
+                               const char* up, const char* right) {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  const char* src[5] = {left, down, center, up, right};
+  bool same = true;
+  for (int i = 0; i < 5; ++i) {
+    const char* s = (src[i] && src[i][0]) ? src[i] : "";
+    if (strcmp(s_sdFmNavCache[i], s) != 0) {
+      same = false;
+      break;
+    }
+  }
+  if (same) {
+    return;
+  }
+  for (int i = 0; i < 5; ++i) {
+    const char* s = (src[i] && src[i][0]) ? src[i] : "";
+    strncpy(s_sdFmNavCache[i], s, sizeof(s_sdFmNavCache[i]) - 1);
+    s_sdFmNavCache[i][sizeof(s_sdFmNavCache[i]) - 1] = '\0';
+  }
+  setTouchNavLabels(left, down, center, up, right);
+  redrawTouchButtonBar();
+}
+
+static void sdFmUpdateBrowserNavLabels() {
+  sdFmApplyNavLabels("Exit", "Next", "Refresh", "Prev", "Open");
+}
+
+static void sdFmUpdateInfoNavLabels() {
+  sdFmApplyNavLabels("Back", nullptr, "Delete", nullptr, nullptr);
+}
+
+static void sdFmUpdateConfirmNavLabels() {
+  sdFmApplyNavLabels("Cancel", nullptr, "Delete", nullptr, nullptr);
+}
+
+static void clampSel();
+static bool reloadDir(const String& path, String* errOut);
+static void resetListDrawCache();
+static void drawBrowserPage(bool full = true);
+static void drawConfirmDeletePage();
+static void openSelected();
+static bool deleteSelected(String* errOut);
+
+static void sdFmHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (page == Page::Browser) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      feature_exit_requested = true;
+      return;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_UP) && !entries.empty()) {
+      sel--;
+      clampSel();
+      drawBrowserPage(false);
+      return;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_DOWN) && !entries.empty()) {
+      sel++;
+      clampSel();
+      drawBrowserPage(false);
+      return;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+      openSelected();
+      return;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+      reloadDir(cwd, nullptr);
+      drawBrowserPage(true);
+    }
+  } else if (page == Page::Info) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      drawBrowserPage();
+      return;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+      drawConfirmDeletePage();
+    }
+  } else if (page == Page::ConfirmDelete) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      drawBrowserPage();
+      return;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+      String err;
+      const bool ok = deleteSelected(&err);
+      if (!ok) {
+        showNotification("Delete", err.c_str());
+        delay(500);
+      }
+      reloadDir(cwd, nullptr);
+      drawBrowserPage();
+    }
+  }
+}
+
 static File sdOpenCompat(const String& path) {
   File f = SD.open(path.c_str());
   if (f) return f;
@@ -1843,7 +2217,7 @@ static void clampSel() {
 
 static void listLayout(int& top, int& bottom, int& rowH, int& maxVisible) {
   top = STATUS_BAR_H + HEADER_H + 6;
-  bottom = tft.height() - FeatureUI::FOOTER_H - 2;
+  bottom = sdFmContentBottom();
   rowH = 22;
   maxVisible = max(1, (bottom - top) / rowH);
 }
@@ -1944,6 +2318,7 @@ static bool reloadDir(const String& path, String* errOut = nullptr) {
   sel = 0;
   listStart = 0;
   uiDirty = true;
+  resetListDrawCache();
   return true;
 }
 
@@ -1977,23 +2352,94 @@ static void drawHeader(const char* title) {
   tft.drawLine(0, y0 + HEADER_H, w, y0 + HEADER_H, UI_LINE);
 }
 
-static void drawList() {
+static void drawHeaderSelCounter() {
+  const int w = tft.width();
+  const int y0 = STATUS_BAR_H;
+  String right = entries.empty()
+    ? String("0/0")
+    : String(sel + 1) + "/" + String((int)entries.size());
+  int rightW = tft.textWidth(right, 1);
+  tft.fillRect(w - 8 - max(rightW, 40), y0 + 38, max(rightW, 40) + 4, 14, FEATURE_BG);
+  tft.setTextFont(1);
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  tft.setCursor(w - 8 - rightW, y0 + 40);
+  tft.print(right);
+}
+
+static void drawListRow(int idx, int y, int rowH, bool selected) {
+  const int x = 8;
+  const int w = tft.width() - 16;
+  uint16_t bg = selected ? UI_FG : FEATURE_BG;
+  uint16_t fg = selected ? UI_ICON : UI_TEXT;
+
+  tft.fillRect(x, y, w, rowH - 1, bg);
+  tft.drawLine(x, y + rowH - 1, x + w, y + rowH - 1, UI_LINE);
+
+  tft.setTextFont(1);
+  tft.setTextColor(fg, bg);
+  String label = entries[idx].name;
+  if (entries[idx].isDir && !entries[idx].isUp) label = label + "/";
+  label = ellipsize(label, w - 80, 1);
+  tft.setCursor(x + 4, y + 6);
+  tft.print(label);
+
+  String right = entries[idx].isDir ? "DIR" : "";
+  if (!entries[idx].isDir && !entries[idx].isUp) {
+    char sbuf[16];
+    uint32_t kb = (entries[idx].size + 1023) / 1024;
+    snprintf(sbuf, sizeof(sbuf), "%lukB", (unsigned long)kb);
+    right = sbuf;
+  }
+  if (right.length()) {
+    int tw = tft.textWidth(right, 1);
+    tft.setCursor(x + w - tw - 6, y + 6);
+    tft.print(right);
+  }
+}
+
+static void drawListScrollbar(int top, int bottom, int start, int maxVisible) {
+  if ((int)entries.size() <= maxVisible) {
+    return;
+  }
+  int scrollBarX = tft.width() - 6;
+  int scrollBarHeight = bottom - top - 6;
+  int scrollBarY = top + 3;
+  int indicatorHeight = (maxVisible * scrollBarHeight) / (int)entries.size();
+  if (indicatorHeight < 6) indicatorHeight = 6;
+  int indicatorY = scrollBarY;
+  indicatorY = scrollBarY + (start * (scrollBarHeight - indicatorHeight)) /
+                            max(1, (int)entries.size() - maxVisible);
+  tft.fillRect(scrollBarX, scrollBarY, 3, scrollBarHeight, UI_LINE);
+  tft.fillRect(scrollBarX, indicatorY, 3, indicatorHeight, UI_ACCENT);
+}
+
+static int s_lastListSel = -1;
+static int s_lastListStart = -1;
+
+static void resetListDrawCache() {
+  s_lastListSel = -1;
+  s_lastListStart = -1;
+}
+
+static void drawList(bool full = true) {
   int top, bottom, rowH, maxVisible;
   listLayout(top, bottom, rowH, maxVisible);
 
-  tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
-
   if (!isSDCardAvailable()) {
+    tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
     tft.setTextFont(2);
     tft.setTextColor(UI_WARN, COL_BG);
     tft.drawCentreString("SD not mounted", tft.width() / 2, top + 30, 2);
+    resetListDrawCache();
     return;
   }
 
   if (entries.empty()) {
+    tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
     tft.setTextFont(2);
     tft.setTextColor(UI_TEXT, COL_BG);
     tft.drawCentreString("Empty folder", tft.width() / 2, top + 30, 2);
+    resetListDrawCache();
     return;
   }
 
@@ -2003,54 +2449,39 @@ static void drawList() {
   int start = listStart;
   int end = min((int)entries.size(), start + maxVisible);
 
-  const int x = 8;
-  const int w = tft.width() - 16;
-
-  for (int i = start; i < end; ++i) {
-    int y = top + (i - start) * rowH;
-    bool selected = (i == sel);
-    uint16_t bg = selected ? UI_FG : FEATURE_BG;
-    uint16_t fg = selected ? UI_ICON : UI_TEXT;
-
-    tft.fillRect(x, y, w, rowH - 1, bg);
-    tft.drawLine(x, y + rowH - 1, x + w, y + rowH - 1, UI_LINE);
-
-    tft.setTextFont(1);
-    tft.setTextColor(fg, bg);
-    String label = entries[i].name;
-    if (entries[i].isDir && !entries[i].isUp) label = label + "/";
-    label = ellipsize(label, w - 80, 1);
-    tft.setCursor(x + 4, y + 6);
-    tft.print(label);
-
-    String right = entries[i].isDir ? "DIR" : "";
-    if (!entries[i].isDir && !entries[i].isUp) {
-      char sbuf[16];
-      uint32_t kb = (entries[i].size + 1023) / 1024;
-      snprintf(sbuf, sizeof(sbuf), "%lukB", (unsigned long)kb);
-      right = sbuf;
+  const bool windowChanged = full || s_lastListSel < 0 || s_lastListStart != start;
+  if (windowChanged) {
+    tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
+    for (int i = start; i < end; ++i) {
+      int y = top + (i - start) * rowH;
+      drawListRow(i, y, rowH, i == sel);
     }
-    if (right.length()) {
-      int tw = tft.textWidth(right, 1);
-      tft.setCursor(x + w - tw - 6, y + 6);
-      tft.print(right);
-    }
+    drawListScrollbar(top, bottom, start, maxVisible);
+    drawHeaderSelCounter();
+    s_lastListSel = sel;
+    s_lastListStart = start;
+    return;
   }
 
-  if ((int)entries.size() > maxVisible) {
-    int scrollBarX = tft.width() - 6;
-    int scrollBarHeight = bottom - top - 6;
-    int scrollBarY = top + 3;
-    int indicatorHeight = (maxVisible * scrollBarHeight) / (int)entries.size();
-    if (indicatorHeight < 6) indicatorHeight = 6;
-    int indicatorY = scrollBarY;
-    indicatorY = scrollBarY + (start * (scrollBarHeight - indicatorHeight)) / max(1, (int)entries.size() - maxVisible);
-    tft.fillRect(scrollBarX, scrollBarY, 3, scrollBarHeight, UI_LINE);
-    tft.fillRect(scrollBarX, indicatorY, 3, indicatorHeight, UI_ACCENT);
+  if (s_lastListSel != sel) {
+    drawHeaderSelCounter();
+    const int oldSel = s_lastListSel;
+    const int newSel = sel;
+    if (oldSel >= start && oldSel < end) {
+      drawListRow(oldSel, top + (oldSel - start) * rowH, rowH, false);
+    }
+    if (newSel >= start && newSel < end) {
+      drawListRow(newSel, top + (newSel - start) * rowH, rowH, true);
+    }
+    s_lastListSel = sel;
   }
 }
 
 static void drawBrowserFooter() {
+  if (featureHasTouchNavBar()) {
+    sdFmUpdateBrowserNavLabels();
+    return;
+  }
   bool sdOk = isSDCardAvailable();
   bool hasSel = !entries.empty();
   bool selIsUp = false;
@@ -2074,39 +2505,46 @@ static void drawBrowserFooter() {
   for (auto& b : browserBtns) FeatureUI::drawButton(b);
 }
 
-static void drawBrowserPage(bool full = true) {
+static void drawBrowserPage(bool full) {
   page = Page::Browser;
   if (full) {
-    tft.fillScreen(COL_BG);
+    featureClearContent(COL_BG);
     currentBatteryVoltage = readBatteryVoltage();
     drawStatusBar(currentBatteryVoltage, true);
+    drawHeader("SD File Manager");
+    drawBrowserFooter();
+    drawList(true);
+    sdFmRestoreNavChrome();
+    uiDirty = false;
+    return;
   }
 
-  drawHeader("SD File Manager");
-  drawBrowserFooter();
-
-  drawList();
+  drawList(false);
   uiDirty = false;
 }
 
 static void drawInfoPage() {
   page = Page::Info;
-  tft.fillScreen(COL_BG);
+  featureClearContent(COL_BG);
   currentBatteryVoltage = readBatteryVoltage();
   drawStatusBar(currentBatteryVoltage, true);
   drawHeader("File info");
 
-  FeatureUI::drawFooterBg();
-  FeatureUI::layoutFooter2(
-    infoBtns,
-    "Back",   ButtonStyle::Secondary,
-    "Delete", ButtonStyle::Danger,
-    false, (entries.empty() || !isSDCardAvailable())
-  );
-  for (auto& b : infoBtns) FeatureUI::drawButton(b);
+  if (featureHasTouchNavBar()) {
+    sdFmUpdateInfoNavLabels();
+  } else {
+    FeatureUI::drawFooterBg();
+    FeatureUI::layoutFooter2(
+      infoBtns,
+      "Back",   ButtonStyle::Secondary,
+      "Delete", ButtonStyle::Danger,
+      false, (entries.empty() || !isSDCardAvailable())
+    );
+    for (auto& b : infoBtns) FeatureUI::drawButton(b);
+  }
 
   const int top = STATUS_BAR_H + HEADER_H + 6;
-  const int bottom = tft.height() - FeatureUI::FOOTER_H - 2;
+  const int bottom = sdFmContentBottom();
   tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
 
   if (entries.empty()) {
@@ -2145,27 +2583,32 @@ static void drawInfoPage() {
   tft.setCursor(8, top + 102);
   tft.print(e.path);
 
+  sdFmRestoreNavChrome();
   uiDirty = false;
 }
 
 static void drawConfirmDeletePage() {
   page = Page::ConfirmDelete;
-  tft.fillScreen(COL_BG);
+  featureClearContent(COL_BG);
   currentBatteryVoltage = readBatteryVoltage();
   drawStatusBar(currentBatteryVoltage, true);
   drawHeader("Confirm delete");
 
-  FeatureUI::drawFooterBg();
-  FeatureUI::layoutFooter2(
-    confirmBtns,
-    "Cancel", ButtonStyle::Secondary,
-    "Delete", ButtonStyle::Danger,
-    false, false
-  );
-  for (auto& b : confirmBtns) FeatureUI::drawButton(b);
+  if (featureHasTouchNavBar()) {
+    sdFmUpdateConfirmNavLabels();
+  } else {
+    FeatureUI::drawFooterBg();
+    FeatureUI::layoutFooter2(
+      confirmBtns,
+      "Cancel", ButtonStyle::Secondary,
+      "Delete", ButtonStyle::Danger,
+      false, false
+    );
+    for (auto& b : confirmBtns) FeatureUI::drawButton(b);
+  }
 
   const int top = STATUS_BAR_H + HEADER_H + 6;
-  const int bottom = tft.height() - FeatureUI::FOOTER_H - 2;
+  const int bottom = sdFmContentBottom();
   tft.fillRect(0, top, tft.width(), bottom - top, COL_BG);
 
   tft.setTextFont(2);
@@ -2179,6 +2622,7 @@ static void drawConfirmDeletePage() {
     tft.drawCentreString(e.name.c_str(), tft.width()/2, top + 48, 1);
   }
 
+  sdFmRestoreNavChrome();
   uiDirty = false;
 }
 
@@ -2257,7 +2701,10 @@ static void handleTap(int x, int y) {
       return;
     }
 
-    int f = FeatureUI::hit(browserBtns, 4, x, y);
+    int f = -1;
+    if (!featureHasTouchNavBar()) {
+      f = FeatureUI::hit(browserBtns, 4, x, y);
+    }
     if (f >= 0) {
       FeatureUI::drawButton(browserBtns[f], true);
       delay(90);
@@ -2273,11 +2720,14 @@ static void handleTap(int x, int y) {
         delay(120);
         return;
       }
-      if (f == 3) { reloadDir(cwd, nullptr); drawBrowserPage(false); delay(120); return; } // Refresh
+      if (f == 3) { reloadDir(cwd, nullptr); drawBrowserPage(true); delay(120); return; } // Refresh
     }
   }
   else if (page == Page::Info) {
-    int f = FeatureUI::hit(infoBtns, 2, x, y);
+    int f = -1;
+    if (!featureHasTouchNavBar()) {
+      f = FeatureUI::hit(infoBtns, 2, x, y);
+    }
     if (f >= 0) {
       FeatureUI::drawButton(infoBtns[f], true);
       delay(90);
@@ -2289,7 +2739,10 @@ static void handleTap(int x, int y) {
     }
   }
   else if (page == Page::ConfirmDelete) {
-    int f = FeatureUI::hit(confirmBtns, 2, x, y);
+    int f = -1;
+    if (!featureHasTouchNavBar()) {
+      f = FeatureUI::hit(confirmBtns, 2, x, y);
+    }
     if (f >= 0) {
       FeatureUI::drawButton(confirmBtns[f], true);
       delay(90);
@@ -2318,6 +2771,7 @@ static void handleTap(int x, int y) {
 }
 
 void setup() {
+  sdFmResetNavLabelCache();
   page = Page::Browser;
   cwd = "/";
   sel = 0;
@@ -2330,6 +2784,13 @@ void setup() {
 
 void loop() {
   updateStatusBar();
+  if (featureHasTouchNavBar()) {
+    maintainTouchNavBar();
+  }
+  sdFmHandleNavButtons();
+  if (feature_exit_requested) {
+    return;
+  }
   if (uiDirty) {
     switch (page) {
       case Page::Browser:        drawBrowserPage(true); break;
@@ -2338,13 +2799,13 @@ void loop() {
     }
   }
 
-  // Physical navigation (kept lightweight; SELECT is handled by the caller as "exit").
-  if (isButtonPressed(BTN_UP)) {
+  // Physical navigation (kept for devices without touch nav bar).
+  if (!featureHasTouchNavBar() && isButtonPressed(BTN_UP)) {
     if (page == Page::Browser && !entries.empty()) { sel--; clampSel(); drawBrowserPage(false); }
     delay(160);
     return;
   }
-  if (isButtonPressed(BTN_DOWN)) {
+  if (!featureHasTouchNavBar() && isButtonPressed(BTN_DOWN)) {
     if (page == Page::Browser && !entries.empty()) { sel++; clampSel(); drawBrowserPage(false); }
     delay(160);
     return;
@@ -2435,7 +2896,11 @@ void loop(){
     uint16_t yMax = max(ys[2], ys[3]);
     auto& s = settings();
     s.touchXMin = xMin; s.touchXMax = xMax;
+#if defined(BOARD_CYD)
+    s.touchYMin = yMin; s.touchYMax = yMax;
+#else
     s.touchYMin = yMax; s.touchYMax = yMin;
+#endif
 
     bool ok = settingsSave();
 
@@ -2453,9 +2918,10 @@ void loop(){
     return;
   }
 
-  if (ts.touched()){
-    TS_Point p = ts.getPoint();
-    xs[stepIdx]=p.x; ys[stepIdx]=p.y;
+  int16_t rx = 0, ry = 0;
+  if (readTouchRawXY(rx, ry)) {
+    xs[stepIdx] = (uint16_t)rx;
+    ys[stepIdx] = (uint16_t)ry;
     stepIdx++;
     if (stepIdx<4) drawTarget(pts[stepIdx][0], pts[stepIdx][1]);
   }

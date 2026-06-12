@@ -11,6 +11,7 @@ struct AppSettings {
 
   uint8_t  brightness = BKL_LEVEL_MED;
   Theme    theme      = Theme::Dark;
+  uint8_t  accentColor = 0;
 
   bool     neopixelEnabled = false;
 
@@ -24,7 +25,19 @@ struct AppSettings {
 
 };
 
-AppSettings& settings();
+struct AccentOption {
+  const char* name;
+  uint16_t color565;
+};
 
+constexpr uint8_t ACCENT_PRESET_COUNT = 7;
+
+AppSettings& settings();
+uint8_t accentPresetClamp(uint8_t preset);
+uint16_t accentColor565(uint8_t preset);
+const char* accentPresetName(uint8_t preset);
+
+const char* settingsBoardProfileId();
+void settingsApplyBoardTouchDefaults();
 bool settingsLoad();
 bool settingsSave();

@@ -855,6 +855,9 @@ void drawModeTabsGx(Gfx& g, int x0, int x1, int x2, int colW, int y) {
 
 template<typename Gfx>
 void drawFooterHintGx(Gfx& g, const int PW, const int PH, int footerH) {
+  if (featureHasTouchNavBar()) {
+    return;
+  }
   const int y = PH - footerH;
   g.fillRect(0, y, PW, footerH, UI.bg == BG_Dark ? DARK_GRAY : UI_LABLE);
   g.drawLine(0, y, PW, y, UI_ACCENT);
@@ -909,7 +912,7 @@ static void resetSatScannerNavInputState() {
   prevHwRight = isButtonPressed(BTN_RIGHT);
   prevHwUp = isButtonPressed(BTN_UP);
   prevHwDown = isButtonPressed(BTN_DOWN);
-  touchNavArm = !ts.touched();
+  touchNavArm = !isTouchDownDismiss();
 }
 
 /** @return True if redraw should occur immediately */
@@ -966,7 +969,7 @@ bool pollViewNavigation() {
     }
   }
 
-  if (!ts.touched()) {
+  if (!isTouchDownDismiss()) {
     touchNavArm = true;
     return redraw;
   }
@@ -976,7 +979,9 @@ bool pollViewNavigation() {
     return redraw;
   }
 
-  if (ty < kGfxTop || ty >= (int)tft.height() - 52) {
+  const int touchBottom =
+      featureHasTouchNavBar() ? touchNavContentBottomY() : (int)tft.height() - 52;
+  if (ty < kGfxTop || ty >= touchBottom) {
     return redraw;
   }
 
@@ -1038,6 +1043,7 @@ void renderPanelGx(Gfx& g) {
   const int PH = g.height();
 
   constexpr int footerH = 34;
+  const int footerReserve = featureHasTouchNavBar() ? 2 : footerH;
   const int cardW = (PW - (kUiPad * 2) - (kUiGap * 2)) / 3;
   const int cardX0 = kUiPad;
   const int cardX1 = cardX0 + cardW + kUiGap;
@@ -1111,7 +1117,7 @@ void renderPanelGx(Gfx& g) {
     g.drawString("Strongest signals", kUiPad, kBodyTop);
 
     drawSnrTableGx(g, PW, PH, kBodyTop + 15, kListRowsVisible - 2,
-                   listScroll, footerH);
+                   listScroll, footerReserve);
 
   } else {
     char lineUtc[42];
@@ -1206,10 +1212,10 @@ void redrawFeaturePanel(bool statusBarForceFull) {
 }
 
 bool touchRequestsExit() {
-  if (gWardSuppressBottomTouchExit) {
+  if (featureHasTouchNavBar()) {
     return false;
   }
-  if (!ts.touched()) {
+  if (gWardSuppressBottomTouchExit) {
     return false;
   }
   int x = 0, y = 0;
@@ -1317,41 +1323,130 @@ static constexpr int kWardIconRowY = 20;
 static constexpr int kWardIconRowH = 16;
 static constexpr int kWardIconSz = 16;
 static constexpr int kWardBodyY = kWardIconRowY + kWardIconRowH + 4;
+static constexpr int kWardUiRadius = 3;
+static constexpr int kWardInnerPad = 5;
+
+static String wardFitTextWidth(const char* text, int maxW) {
+  String t = text ? text : "";
+  if (maxW <= 0) {
+    return t;
+  }
+  while (t.length() > 0 && tft.textWidth(t) > maxW) {
+    t.remove(t.length() - 1);
+  }
+  return t;
+}
+
+static int wardContentBottom() {
+  return featureHasTouchNavBar() ? touchNavContentBottomY() : (int)tft.height();
+}
+
+static constexpr int kWardCardIconCol = 24;
+static constexpr int kWardCardIconSz = 16;
+static constexpr int kWardTextLineH = 8;
+
+static int wardCardIconY(int cardY, int cardH) {
+  return cardY + (cardH - kWardCardIconSz) / 2;
+}
+
+static int wardCardTextX(int cardPad) { return cardPad + kWardCardIconCol; }
+
+static int wardCardTextMaxW(int cardPad, int cardW, int rightReserve = 0) {
+  const int textX = wardCardTextX(cardPad);
+  return cardW - (textX - cardPad) - kWardInnerPad - rightReserve;
+}
+
+/** Place `lineCount` text rows evenly inside card vertical padding (font height 8px). */
+static void wardCardTextRowYs(int cardY, int cardH, int lineCount, int rowY[3]) {
+  const int innerTop = cardY + kWardInnerPad;
+  const int innerBot = cardY + cardH - kWardInnerPad;
+  if (lineCount <= 1) {
+    rowY[0] = innerTop;
+    return;
+  }
+  if (lineCount == 2) {
+    rowY[0] = innerTop;
+    rowY[1] = innerBot - kWardTextLineH;
+    return;
+  }
+  const int innerH = innerBot - innerTop;
+  const int totalText = lineCount * kWardTextLineH;
+  const int gap = (innerH - totalText) / (lineCount - 1);
+  for (int i = 0; i < lineCount; ++i) {
+    rowY[i] = innerTop + i * (kWardTextLineH + gap);
+  }
+}
 
 /** Settings body layout (must match `wardLayoutSettingsButtons` + draw). */
-static constexpr int kWSetBtnH = 26;
-static constexpr int kWSetPad = 8;
-static constexpr int kWSetGap = 6;
-/** Thin header (icon + Setup); extra vertical gaps between each block (no guide strip). */
-static constexpr int kWSetHeaderY = kWardBodyY + 3;
-static constexpr int kWSetTopRowH = 22;
-static constexpr int kWSetGapAfterHeader = 12;
-static constexpr int kWSetGapModeToRadio = 16;
-static constexpr int kWSetGapRadioToInterval = 16;
-/** Space from interval label line to +/- row (28px card from lblIntY-4; +36 => 12px under card). */
-static constexpr int kWSetIntervalBtnDown = 36;
-static constexpr int kWSetGapIntBtnsToMaxCard = 16;
-/** Space from ROW CAP label line to Rows +/- (28px card; +36 => 12px under card). */
-static constexpr int kWSetMaxBtnDown = 36;
-static constexpr int kWSetGapMaxBtnsToWigle = 18;
+static constexpr int kWSetBtnH = 22;
+static constexpr int kWSetPad = 4;
+static constexpr int kWSetGap = 4;
+static constexpr int kWSetSectionGap = 8;
+static constexpr int kWSetCardBtnGap = 4;
+static constexpr int kWSetCardH = 20;
+static constexpr int kWSetHeaderH = 20;
 
-static constexpr int kWSetLblSrcY = kWSetHeaderY + kWSetTopRowH + kWSetGapAfterHeader;
-static constexpr int kWSetYRadio = kWSetLblSrcY + kWSetGapModeToRadio;
-static constexpr int kWSetLblIntY = kWSetYRadio + kWSetBtnH + kWSetGapRadioToInterval;
-static constexpr int kWSetYIntBtns = kWSetLblIntY + kWSetIntervalBtnDown;
-static constexpr int kWSetLblMaxY = kWSetYIntBtns + kWSetBtnH + kWSetGapIntBtnsToMaxCard;
-static constexpr int kWSetYMaxBtns = kWSetLblMaxY + kWSetMaxBtnDown;
-static constexpr int kWSetWigleRowY = kWSetYMaxBtns + kWSetBtnH + kWSetGapMaxBtnsToWigle;
+struct WardSetLayout {
+  int headerY;
+  int modeBtnY;
+  int intervalCardY;
+  int intervalBtnY;
+  int capCardY;
+  int capBtnY;
+};
 
-static constexpr int kWardSetBtnCount = 9;
-static FeatureUI::Button s_wardSetBtns[kWardSetBtnCount];
+static WardSetLayout wardComputeSetLayout() {
+  WardSetLayout L{};
+  const int bodyTop = kWardBodyY + 4;
+
+  L.headerY = bodyTop;
+  L.modeBtnY = L.headerY + kWSetHeaderH + kWSetSectionGap;
+  L.intervalCardY = L.modeBtnY + kWSetBtnH + kWSetSectionGap;
+  L.intervalBtnY = L.intervalCardY + kWSetCardH + kWSetCardBtnGap;
+  L.capCardY = L.intervalBtnY + kWSetBtnH + kWSetSectionGap;
+  L.capBtnY = L.capCardY + kWSetCardH + kWSetCardBtnGap;
+  return L;
+}
+
+static void wardDrawSetHeader(int pad, int cardW, const WardSetLayout& layout) {
+  const int iconY = layout.headerY + (kWSetHeaderH - kWardCardIconSz) / 2;
+  const int textX = wardCardTextX(pad);
+  const int textY = layout.headerY + (kWSetHeaderH - kWardTextLineH) / 2;
+  tft.fillRoundRect(pad, layout.headerY, cardW, kWSetHeaderH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, layout.headerY, cardW, kWSetHeaderH, kWardUiRadius, UI_LINE);
+  tft.fillRoundRect(pad + 3, layout.headerY + 3, 2, kWSetHeaderH - 6, 1, ORANGE);
+  tft.drawBitmap(pad + kWardInnerPad, iconY, bitmap_icon_document_gear, kWardCardIconSz,
+                 kWardCardIconSz, UI_ICON);
+  tft.setTextFont(1);
+  tft.setTextColor(UI_TEXT, UI_FG);
+  tft.drawString("Setup", textX, textY);
+}
+
+static void wardDrawSetInlineCard(int pad, int cardW, int cardY, const char* label,
+                                  const char* value, uint16_t valueColor = UI_TEXT) {
+  const int textY = cardY + (kWSetCardH - kWardTextLineH) / 2;
+  tft.fillRoundRect(pad, cardY, cardW, kWSetCardH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, cardY, cardW, kWSetCardH, kWardUiRadius, UI_LINE);
+  tft.setTextFont(1);
+  tft.setTextColor(UI_ICON, UI_FG);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(label, pad + 4, textY);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(valueColor, UI_FG);
+  tft.drawString(value ? value : "", pad + cardW - 4, cardY + kWSetCardH / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+static constexpr int kWardSetBtnCount = 7;
+static constexpr int kWardSetBtnTotal = 9;
+static FeatureUI::Button s_wardSetBtns[kWardSetBtnTotal];
 
 static volatile uint32_t s_cfgScanMs = WARDRIVE_SCAN_INTERVAL_MS;
 static volatile int s_cfgMaxAps = WARDRIVE_MAX_APS_PER_SCAN;
 
 /** WiFi-only, BLE-only, or both each scan interval (stored as uint8_t for volatile). */
 enum class WardRadioMode : uint8_t { WiFi = 0, Ble = 1, Both = 2 };
-static volatile uint8_t s_cfgRadioMode = (uint8_t)WardRadioMode::WiFi;
+static volatile uint8_t s_cfgRadioMode = (uint8_t)WardRadioMode::Both;
 
 static TaskHandle_t s_bgTask = nullptr;
 /** True only inside `GpsWardriver::session` main loop (not background handoff return). */
@@ -1371,9 +1466,185 @@ static volatile uint32_t s_fgScans = 0;
 enum class WardPage : uint8_t { Main = 0, Settings, WigleCfg };
 static uint32_t s_editScanMs = WARDRIVE_SCAN_INTERVAL_MS;
 static int s_editMaxAps = WARDRIVE_MAX_APS_PER_SCAN;
-static WardRadioMode s_editRadioMode = WardRadioMode::WiFi;
+static WardRadioMode s_editRadioMode = WardRadioMode::Both;
 static uint32_t s_lastTbMs = 0;
 static uint32_t s_lastWardInputMs = 0;
+static bool s_wardRetrySession = false;
+
+static void wardPumpNavChrome() {
+  if (featureHasTouchNavBar()) {
+    maintainTouchNavBar();
+  }
+}
+
+static void wardSetNavLabels(WardPage page, bool bgOn = false, bool logOn = false) {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  switch (page) {
+    case WardPage::Main:
+      setTouchNavLabels("Setup", logOn ? "Pause" : "Log", "Exit", nullptr,
+                        bgOn ? "Stop" : "RSS");
+      break;
+    case WardPage::Settings:
+      setTouchNavLabels("Back", "Upload", "Save", nullptr, "WiGLE");
+      break;
+    case WardPage::WigleCfg:
+      setTouchNavLabels("Back", nullptr, "Save", nullptr, nullptr);
+      break;
+  }
+  redrawTouchButtonBar();
+}
+
+enum class WardNavEvt : uint8_t { None, Back, Exit, Save, Setup, LogToggle, Rss, Upload, WigleCfg };
+
+static WardNavEvt wardPollNavButtons(WardPage page) {
+  if (!featureHasTouchNavBar()) {
+    return WardNavEvt::None;
+  }
+  if (page == WardPage::Main) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      return WardNavEvt::Setup;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+      return WardNavEvt::LogToggle;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+      return WardNavEvt::Exit;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+      return WardNavEvt::Rss;
+    }
+  } else if (page == WardPage::Settings) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      return WardNavEvt::Back;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+      return WardNavEvt::Upload;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+      return WardNavEvt::Save;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+      return WardNavEvt::WigleCfg;
+    }
+  } else if (page == WardPage::WigleCfg) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      return WardNavEvt::Back;
+    }
+    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+      return WardNavEvt::Save;
+    }
+  }
+  return WardNavEvt::None;
+}
+
+static void wardPrintWrappedPageBg(int x, int y, int maxWidth, const char* text, int lineStepPx,
+                                   uint16_t fg, uint16_t bg, int firstLine, int maxLines) {
+  String message = text ? text : "";
+  int lineNo = 0;
+  int drawn = 0;
+  while (message.length() > 0 && drawn < maxLines) {
+    int nl = message.indexOf('\n');
+    String paragraph = (nl >= 0) ? message.substring(0, nl) : message;
+    message = (nl >= 0) ? message.substring(nl + 1) : "";
+
+    if (paragraph.length() == 0) {
+      if (lineNo >= firstLine) {
+        drawn++;
+      }
+      lineNo++;
+      continue;
+    }
+
+    while (paragraph.length() > 0 && drawn < maxLines) {
+      int lineEnd = (int)paragraph.length();
+      while (tft.textWidth(paragraph.substring(0, lineEnd)) > maxWidth && lineEnd > 1) {
+        lineEnd--;
+      }
+      if (lineEnd < (int)paragraph.length()) {
+        int lastSpace = paragraph.substring(0, lineEnd).lastIndexOf(' ');
+        if (lastSpace > 0) {
+          lineEnd = lastSpace;
+        }
+      }
+
+      if (lineNo >= firstLine) {
+        tft.setTextColor(fg, bg);
+        tft.setCursor(x, y + drawn * lineStepPx);
+        tft.print(paragraph.substring(0, lineEnd));
+        drawn++;
+      }
+      paragraph = paragraph.substring(lineEnd);
+      paragraph.trim();
+      lineNo++;
+    }
+  }
+}
+
+static void wardDrawStartupFailureScreen(const char* title, const char* msg) {
+  const int scrW = tft.width();
+  const int contentBottom = wardContentBottom();
+  const int pad = 8;
+  const int cardW = scrW - 2 * pad;
+
+  tft.fillRect(0, kWardBodyY, scrW, contentBottom - kWardBodyY, FEATURE_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+
+  const int statusY = kWardBodyY + 8;
+  tft.fillRoundRect(pad, statusY, cardW, 36, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, statusY, cardW, 36, kWardUiRadius, UI_LINE);
+  tft.setTextColor(UI_TEXT, UI_FG);
+  tft.drawString(title ? title : "Wardriver", pad + 8, statusY + 6);
+  tft.setTextColor(UI_WARN, UI_FG);
+  tft.drawString("Startup failed", pad + 8, statusY + 20);
+
+  const int actY = statusY + 44;
+  const int actH = contentBottom - actY - 8;
+  if (actH >= 24) {
+    tft.fillRoundRect(pad, actY, cardW, actH, kWardUiRadius, UI_FG);
+    tft.drawRoundRect(pad, actY, cardW, actH, kWardUiRadius, UI_LINE);
+    tft.setTextColor(UI_DIM_TEXT, UI_FG);
+    wardPrintWrappedPageBg(pad + 6, actY + 6, cardW - 12, msg ? msg : "", 10, UI_TEXT, UI_FG, 0,
+                           (actH - 12) / 10);
+  }
+}
+
+/** @return true when Ready pressed (retry session). */
+static bool wardWaitStartupFailureDismiss(const char* title, const char* msg) {
+  wardDrawStartupFailureScreen(title, msg);
+  if (featureHasTouchNavBar()) {
+    setTouchNavLabels("Exit", nullptr, "Ready", nullptr, nullptr);
+    redrawTouchButtonBar();
+  }
+
+  for (;;) {
+    if (feature_exit_requested) {
+      return false;
+    }
+    wardPumpNavChrome();
+    if (isButtonPressed(BTN_LEFT)) {
+      delay(180);
+      drainButtons();
+      return false;
+    }
+    if (isButtonPressed(BTN_SELECT)) {
+      delay(180);
+      drainButtons();
+      return true;
+    }
+    if (featureHasTouchNavBar()) {
+      if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+        return false;
+      }
+      if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+        return true;
+      }
+    }
+    delay(8);
+  }
+}
 
 /** Avoid full-screen clears every UI tick (reduces SPI TFT flicker). */
 struct WardTbSnap {
@@ -1409,12 +1680,14 @@ struct WardSetSnap {
   int maxAps;
   WardRadioMode radio;
 };
-static WardSetSnap s_wardSetSnap = {false, 0, 0, WardRadioMode::WiFi};
+static WardSetSnap s_wardSetSnap = {false, 0, 0, WardRadioMode::Both};
 
 /** Bottom panel on main ward screen: rolling lines (newest at bottom). */
 static constexpr int kWardLogLines = 8;
 static constexpr int kWardLogCols = 34;
+static constexpr int kWardLogLineH = 11;
 static char s_wardLog[kWardLogLines][kWardLogCols + 1];
+static bool s_wardLogGreen[kWardLogLines];
 static bool s_wardLogDirty = false;
 static portMUX_TYPE s_wardLogMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t s_wardLogGen = 0;
@@ -1425,6 +1698,7 @@ static void wardLogClear() {
   taskENTER_CRITICAL(&s_wardLogMux);
   for (int i = 0; i < kWardLogLines; ++i) {
     s_wardLog[i][0] = '\0';
+    s_wardLogGreen[i] = false;
   }
   s_wardLogDirty = true;
   s_wardLogGen++;
@@ -1432,7 +1706,7 @@ static void wardLogClear() {
   taskEXIT_CRITICAL(&s_wardLogMux);
 }
 
-static void wardLogPush(const char* line) {
+static void wardLogPushLine(const char* line, bool green) {
   const char* s = line ? line : "";
   char one[kWardLogCols + 1];
   snprintf(one, sizeof(one), "%s", s);
@@ -1440,12 +1714,16 @@ static void wardLogPush(const char* line) {
   taskENTER_CRITICAL(&s_wardLogMux);
   for (int i = 0; i < kWardLogLines - 1; ++i) {
     memcpy(s_wardLog[i], s_wardLog[i + 1], sizeof(s_wardLog[0]));
+    s_wardLogGreen[i] = s_wardLogGreen[i + 1];
   }
   memcpy(s_wardLog[kWardLogLines - 1], one, sizeof(s_wardLog[0]));
+  s_wardLogGreen[kWardLogLines - 1] = green;
   s_wardLogDirty = true;
   s_wardLogGen++;
   taskEXIT_CRITICAL(&s_wardLogMux);
 }
+
+static void wardLogPush(const char* line) { wardLogPushLine(line, false); }
 
 static void wardLogPushf(const char* fmt, ...) {
   char b[kWardLogCols + 1];
@@ -1455,6 +1733,22 @@ static void wardLogPushf(const char* fmt, ...) {
   va_end(ap);
   b[kWardLogCols] = '\0';
   wardLogPush(b);
+}
+
+static void wardLogPushWifiAp(const char* ssid, int ch, int rssi, const char* macFallback) {
+  const char* name = (ssid && ssid[0]) ? ssid
+                   : (macFallback && macFallback[0]) ? macFallback
+                                                     : "(hidden)";
+  char b[kWardLogCols + 1];
+  snprintf(b, sizeof(b), "W ch%2d %3ddBm %s", ch, rssi, name);
+  wardLogPushLine(b, true);
+}
+
+static void wardLogPushBleDev(const char* name, int rssi, const char* mac) {
+  const char* show = (name && name[0]) ? name : ((mac && mac[0]) ? mac : "?");
+  char b[kWardLogCols + 1];
+  snprintf(b, sizeof(b), "B %3ddBm %s", rssi, show);
+  wardLogPushLine(b, true);
 }
 
 /** Append one line to the ward log and show the usual modal (for errors / WiGLE). */
@@ -1651,12 +1945,72 @@ static void wardAppendCsvString(File& f, const char* s) {
 }
 
 static void wardDrawPill(int x, int y, int w, int h, const char* text, uint16_t fill, uint16_t txt) {
-  tft.fillRoundRect(x, y, w, h, h / 2, fill);
+  const int r = h > 8 ? 4 : 2;
+  tft.fillRoundRect(x, y, w, h, r, fill);
   tft.setTextFont(1);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(txt, fill);
   tft.drawString(text ? text : "", x + w / 2, y + h / 2);
   tft.setTextDatum(TL_DATUM);
+}
+
+struct WardMainLayout {
+  int heroY;
+  int statY;
+  int csvY;
+  int gpsY;
+  int radioY;
+  int hintY;
+  int heroH;
+  int statH;
+  int csvH;
+  int gpsH;
+  int radioH;
+  int hintH;
+};
+
+/** Pack status cards from the top; log panel fills remaining space above the nav bar. */
+static WardMainLayout wardComputeMainLayout(int contentBottom) {
+  WardMainLayout L{};
+  const int bodyTop = kWardBodyY + 4;
+  const int bottomPad = 4;
+  const int gap = featureHasTouchNavBar() ? 3 : 5;
+  const bool compact = featureHasTouchNavBar();
+
+  L.heroH = compact ? 26 : 28;
+  L.statH = compact ? 30 : 34;
+  L.csvH = L.statH;
+  L.gpsH = compact ? 46 : 52;
+  L.radioH = compact ? 30 : 32;
+
+  L.heroY = bodyTop;
+  L.statY = L.heroY + L.heroH + gap;
+  L.csvY = L.statY + L.statH + gap;
+  L.gpsY = L.csvY + L.csvH + gap;
+  L.radioY = L.gpsY + L.gpsH + gap;
+  L.hintY = L.radioY + L.radioH + gap;
+  L.hintH = contentBottom - bottomPad - L.hintY;
+
+  const int minLogH = compact ? 88 : 76;
+  if (L.hintH < minLogH) {
+    L.hintH = minLogH;
+    L.hintY = contentBottom - bottomPad - L.hintH;
+    L.radioY = L.hintY - gap - L.radioH;
+    L.gpsY = L.radioY - gap - L.gpsH;
+    L.csvY = L.gpsY - gap - L.csvH;
+    L.statY = L.csvY - gap - L.statH;
+    L.heroY = L.statY - gap - L.heroH;
+    if (L.heroY < bodyTop) {
+      L.heroY = bodyTop;
+      L.statY = L.heroY + L.heroH + gap;
+      L.csvY = L.statY + L.statH + gap;
+      L.gpsY = L.csvY + L.csvH + gap;
+      L.radioY = L.gpsY + L.gpsH + gap;
+      L.hintY = L.radioY + L.radioH + gap;
+      L.hintH = contentBottom - bottomPad - L.hintY;
+    }
+  }
+  return L;
 }
 
 /** Main: back left; gear, play, RSS flush-right. Settings/WiGLE: back left, save right (no −/+ strip). */
@@ -1725,16 +2079,10 @@ static void wardDrawIconToolbar(WardPage page, bool bgActive, bool logOn) {
 static void wardDrawBody(uint32_t linesWr, uint32_t scans, const char* path, bool logOn,
                          bool bgMode) {
   const int scrW = tft.width();
-  const int scrH = tft.height();
-  const int pad = 8;
+  const int contentBottom = wardContentBottom();
+  const int pad = kWSetPad;
   const int cardW = scrW - 2 * pad;
-  const int heroY = kWardBodyY + 4;
-  const int statY = heroY + 32;
-  const int csvY = statY + 40;
-  const int gpsY = csvY + 34;
-  const int radioY = gpsY + 60;
-  const int hintY = radioY + 40;
-  const int hintH = scrH - hintY - 4;
+  const WardMainLayout layout = wardComputeMainLayout(contentBottom);
   char buf[128];
 
   const bool fullPaint = !s_wardMainSnap.valid;
@@ -1767,148 +2115,195 @@ static void wardDrawBody(uint32_t linesWr, uint32_t scans, const char* path, boo
                         latNow != s_wardMainSnap.latE5 || lonNow != s_wardMainSnap.lonE5 ||
                         altNow != s_wardMainSnap.altM;
   if (fullPaint) {
-    tft.fillRect(0, kWardBodyY, scrW, scrH - kWardBodyY, FEATURE_BG);
+    tft.fillRect(0, kWardBodyY, scrW, contentBottom - kWardBodyY, FEATURE_BG);
   }
   tft.setTextDatum(TL_DATUM);
 
   if (heroDirty) {
-  tft.fillRoundRect(pad, heroY, cardW, 28, 8, UI_FG);
-  tft.drawRoundRect(pad, heroY, cardW, 28, 8, UI_LINE);
-  tft.fillRoundRect(pad + 3, heroY + 6, 3, 16, 2, ORANGE);
-  tft.drawBitmap(pad + 10, heroY + 6, bitmap_icon_satellite, 16, 16, UI_ICON);
-  tft.setTextFont(2);
+  const int innerY = layout.heroY + kWardInnerPad;
+  const int textX = wardCardTextX(pad);
+  tft.fillRoundRect(pad, layout.heroY, cardW, layout.heroH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, layout.heroY, cardW, layout.heroH, kWardUiRadius, UI_LINE);
+  tft.fillRoundRect(pad + 3, innerY, 3, layout.heroH - kWardInnerPad * 2, 2, ORANGE);
+  tft.drawBitmap(pad + kWardInnerPad, innerY, bitmap_icon_satellite, 16, 16, UI_ICON);
+  tft.setTextFont(1);
   tft.setTextColor(UI_TEXT, UI_FG);
-  tft.drawString("Wardrive", pad + 28, heroY + 6);
-  /** Same left X as GPS WAIT pill (40px wide): `scrW - pad - 44`. */
+  tft.drawString("Wardrive", textX, innerY + 1);
   constexpr int kWardStatusPillW = 40;
-  const int statusPillX = scrW - pad - 44;
+  const int statusPillX = scrW - pad - kWardStatusPillW - 4;
+  const int pillY = layout.heroY + (layout.heroH - 18) / 2;
   if (logOn) {
-    wardDrawPill(statusPillX, heroY + 5, kWardStatusPillW, 18, "REC", RED, WHITE);
+    wardDrawPill(statusPillX, pillY, kWardStatusPillW, 18, "REC", RED, WHITE);
   } else {
-    wardDrawPill(statusPillX, heroY + 5, kWardStatusPillW, 18, "OFF", DARK_GRAY, UI_DIM_TEXT);
+    wardDrawPill(statusPillX, pillY, kWardStatusPillW, 18, "OFF", DARK_GRAY, UI_DIM_TEXT);
   }
   if (bgMode) {
     tft.setTextFont(1);
     tft.setTextColor(UI_DIM_TEXT, UI_FG);
-    tft.drawString("BG", statusPillX - 22, heroY + 9);
+    const int bgX = statusPillX - tft.textWidth("BG") - 4;
+    if (bgX >= textX + tft.textWidth("Wardrive") + 4) {
+      tft.drawString("BG", bgX, innerY + 2);
+    }
   }
   }
 
   if (statsDirty) {
   const int colGap = 6;
   const int colW = (cardW - colGap) / 2;
-  tft.fillRoundRect(pad, statY, colW, 34, 8, UI_FG);
-  tft.drawRoundRect(pad, statY, colW, 34, 8, UI_LINE);
+  const int labelY = layout.statY + kWardInnerPad;
+  const int valueY = layout.statY + layout.statH - kWardInnerPad - 8;
+  tft.fillRoundRect(pad, layout.statY, colW, layout.statH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, layout.statY, colW, layout.statH, kWardUiRadius, UI_LINE);
   tft.setTextFont(1);
   tft.setTextColor(UI_ICON, UI_FG);
-  tft.drawString("ROWS", pad + 6, statY + 5);
-  tft.setTextFont(2);
+  tft.drawString("ROWS", pad + kWardInnerPad, labelY);
   tft.setTextColor(UI_TEXT, UI_FG);
   snprintf(buf, sizeof(buf), "%lu", (unsigned long)linesWr);
-  tft.drawString(buf, pad + 6, statY + 16);
+  tft.drawString(buf, pad + kWardInnerPad, valueY);
 
   const int x2 = pad + colW + colGap;
-  tft.fillRoundRect(x2, statY, colW, 34, 8, UI_FG);
-  tft.drawRoundRect(x2, statY, colW, 34, 8, UI_LINE);
-  tft.setTextFont(1);
+  tft.fillRoundRect(x2, layout.statY, colW, layout.statH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(x2, layout.statY, colW, layout.statH, kWardUiRadius, UI_LINE);
   tft.setTextColor(UI_ICON, UI_FG);
-  tft.drawString("SCANS", x2 + 6, statY + 5);
-  tft.setTextFont(2);
+  tft.drawString("SCANS", x2 + kWardInnerPad, labelY);
   tft.setTextColor(UI_TEXT, UI_FG);
   snprintf(buf, sizeof(buf), "%lu", (unsigned long)scans);
-  tft.drawString(buf, x2 + 6, statY + 16);
+  tft.drawString(buf, x2 + kWardInnerPad, valueY);
   }
 
   if (csvDirty) {
-  tft.fillRoundRect(pad, csvY, cardW, 28, 8, UI_FG);
-  tft.drawRoundRect(pad, csvY, cardW, 28, 8, UI_LINE);
-  tft.drawBitmap(pad + 6, csvY + 6, bitmap_icon_document_tag, 16, 16, UI_ICON);
+  const int iconX = pad + kWardInnerPad;
+  const int textX = wardCardTextX(pad);
+  const int maxTextW = wardCardTextMaxW(pad, cardW);
+  const int iconY = wardCardIconY(layout.csvY, layout.csvH);
+  int rowY[2];
+  wardCardTextRowYs(layout.csvY, layout.csvH, 2, rowY);
+  tft.fillRoundRect(pad, layout.csvY, cardW, layout.csvH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, layout.csvY, cardW, layout.csvH, kWardUiRadius, UI_LINE);
+  tft.drawBitmap(iconX, iconY, bitmap_icon_document_tag, kWardCardIconSz, kWardCardIconSz,
+                 UI_ICON);
   tft.setTextFont(1);
   tft.setTextColor(UI_ICON, UI_FG);
-  tft.drawString("CSV", pad + 26, csvY + 4);
+  tft.drawString("CSV", textX, rowY[0]);
   tft.setTextColor(UI_DIM_TEXT, UI_FG);
   if (!safePath[0]) {
-    tft.drawString("no file", pad + 26, csvY + 16);
+    tft.drawString("no file", textX, rowY[1]);
   } else {
-    const size_t L = strlen(safePath);
-    if (L > 18u) {
-      snprintf(buf, sizeof(buf), "%.8s..%.8s", safePath, safePath + L - 8);
+    const size_t pathLen = strlen(safePath);
+    if (pathLen > 18u) {
+      snprintf(buf, sizeof(buf), "%.8s..%.8s", safePath, safePath + pathLen - 8);
     } else {
       snprintf(buf, sizeof(buf), "%s", safePath);
     }
-    tft.drawString(buf, pad + 26, csvY + 16);
+    tft.drawString(wardFitTextWidth(buf, maxTextW), textX, rowY[1]);
   }
   }
 
   if (gpsDirty) {
-  tft.fillRoundRect(pad, gpsY, cardW, 54, 8, UI_FG);
-  tft.drawRoundRect(pad, gpsY, cardW, 54, 8, UI_LINE);
-  tft.drawBitmap(pad + 6, gpsY + 6, bitmap_icon_satellite_dish, 16, 16, UI_ICON);
+  const int iconX = pad + kWardInnerPad;
+  const int textX = wardCardTextX(pad);
+  const int iconY = wardCardIconY(layout.gpsY, layout.gpsH);
+  int rowY[3];
+  wardCardTextRowYs(layout.gpsY, layout.gpsH, 3, rowY);
+  constexpr int kFixPillW = 34;
+  constexpr int kWaitPillW = 40;
+  const int pillW = fix ? kFixPillW : kWaitPillW;
+  const int pillH = 16;
+  const int pillX = scrW - pad - pillW - 2;
+  const int pillY = rowY[0] + (kWardTextLineH - pillH) / 2;
+  const int maxTextW = wardCardTextMaxW(pad, cardW);
+  tft.fillRoundRect(pad, layout.gpsY, cardW, layout.gpsH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, layout.gpsY, cardW, layout.gpsH, kWardUiRadius, UI_LINE);
+  tft.drawBitmap(iconX, iconY, bitmap_icon_satellite_dish, kWardCardIconSz, kWardCardIconSz,
+                 UI_ICON);
   tft.setTextFont(1);
   tft.setTextColor(UI_TEXT, UI_FG);
-  tft.drawString("GPS", pad + 26, gpsY + 8);
-  /** Right edges align at `scrW - pad - 4` (34px FIX vs 40px WAIT/REC). */
+  tft.drawString("GPS", textX, rowY[0]);
   if (fix) {
-    wardDrawPill(scrW - pad - 38, gpsY + 4, 34, 16, "FIX", GREEN, BLACK);
+    wardDrawPill(pillX, pillY, kFixPillW, pillH, "FIX", GREEN, BLACK);
   } else {
-    wardDrawPill(scrW - pad - 44, gpsY + 4, 40, 16, "WAIT", ORANGE, FEATURE_BG);
+    wardDrawPill(pillX, pillY, kWaitPillW, pillH, "WAIT", ORANGE, FEATURE_BG);
   }
   tft.setTextColor(UI_DIM_TEXT, UI_FG);
-  snprintf(buf, sizeof(buf), "S%u H%.1f", (unsigned)satsUsedGga, hdopLive >= 0.f ? (double)hdopLive : -1.0);
-  tft.drawString(buf, pad + 8, gpsY + 24);
-  if (fix) {
-    snprintf(buf, sizeof(buf), "%.4f %.4f", navLat, navLon);
-    tft.drawString(buf, pad + 8, gpsY + 36);
-    if (!isnan(navAltM)) {
-      snprintf(buf, sizeof(buf), "Alt %.0fm", (double)navAltM);
-      tft.drawString(buf, pad + 132, gpsY + 24);
-    }
+  if (!isnan(navAltM) && fix) {
+    snprintf(buf, sizeof(buf), "Sats %u  HDOP %.1f  Alt %.0fm", (unsigned)satsUsedGga,
+             (double)hdopLive, (double)navAltM);
   } else {
-    tft.drawString("No fix yet", pad + 8, gpsY + 36);
+    snprintf(buf, sizeof(buf), "Sats %u  HDOP %.1f", (unsigned)satsUsedGga,
+             hdopLive >= 0.f ? (double)hdopLive : -1.0);
+  }
+  tft.drawString(wardFitTextWidth(buf, maxTextW), textX, rowY[1]);
+  if (fix) {
+    snprintf(buf, sizeof(buf), "%.4f  %.4f", navLat, navLon);
+    tft.drawString(wardFitTextWidth(buf, maxTextW), textX, rowY[2]);
+  } else {
+    tft.drawString("No fix yet", textX, rowY[2]);
   }
   }
 
   if (radioDirty) {
-  tft.fillRoundRect(pad, radioY, cardW, 34, 8, UI_FG);
-  tft.drawRoundRect(pad, radioY, cardW, 34, 8, UI_LINE);
-  const int radioIconX = pad + 10;
-  const int radioTextX = pad + 62;
-  int ix = radioIconX;
+  const int radioTextX = pad + 58;
+  const int maxTextW = cardW - (radioTextX - pad) - kWardInnerPad;
+  const int row1Y = layout.radioY + kWardInnerPad;
+  const int row2Y = layout.radioY + layout.radioH - kWardInnerPad - 8;
+  tft.fillRoundRect(pad, layout.radioY, cardW, layout.radioH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, layout.radioY, cardW, layout.radioH, kWardUiRadius, UI_LINE);
+  const int radioIconY = layout.radioY + (layout.radioH - 16) / 2;
+  int ix = pad + kWardInnerPad;
   if (rm == WardRadioMode::WiFi || rm == WardRadioMode::Both) {
-    tft.drawBitmap(ix, radioY + 9, bitmap_icon_wifi, 16, 16, rm == WardRadioMode::WiFi ? ORANGE : UI_DIM_TEXT);
-    ix += 22;
+    tft.drawBitmap(ix, radioIconY, bitmap_icon_wifi, 16, 16, rm == WardRadioMode::WiFi ? ORANGE : UI_DIM_TEXT);
+    ix += 20;
   }
   if (rm == WardRadioMode::Ble || rm == WardRadioMode::Both) {
-    tft.drawBitmap(ix, radioY + 9, bitmap_icon_ble, 16, 16, rm == WardRadioMode::Ble ? ORANGE : UI_DIM_TEXT);
-    ix += 22;
+    tft.drawBitmap(ix, radioIconY, bitmap_icon_ble, 16, 16, rm == WardRadioMode::Ble ? ORANGE : UI_DIM_TEXT);
   }
   tft.setTextFont(1);
   tft.setTextColor(UI_TEXT, UI_FG);
-  tft.drawString(wardRadioModeShort(rm), radioTextX, radioY + 8);
-  snprintf(buf, sizeof(buf), "%ums  cap %d", (unsigned)s_cfgScanMs, (int)s_cfgMaxAps);
+  tft.drawString(wardRadioModeShort(rm), radioTextX, row1Y);
+  snprintf(buf, sizeof(buf), "%ums cap %d", (unsigned)s_cfgScanMs, (int)s_cfgMaxAps);
   tft.setTextColor(UI_DIM_TEXT, UI_FG);
-  tft.drawString(buf, radioTextX, radioY + 21);
+  tft.drawString(wardFitTextWidth(buf, maxTextW), radioTextX, row2Y);
   }
 
   const bool logPanelDirty = fullPaint || s_wardLogDirty;
-  if (logPanelDirty && hintH >= 20) {
+  if (logPanelDirty && layout.hintH >= 20) {
     char snap[kWardLogLines][kWardLogCols + 1];
+    bool snapGreen[kWardLogLines];
     uint32_t genSnap = 0;
     taskENTER_CRITICAL(&s_wardLogMux);
     memcpy(snap, s_wardLog, sizeof(snap));
+    memcpy(snapGreen, s_wardLogGreen, sizeof(snapGreen));
     genSnap = s_wardLogGen;
     taskEXIT_CRITICAL(&s_wardLogMux);
 
-    tft.fillRoundRect(pad, hintY, cardW, hintH, 8, UI_FG);
-    tft.drawRoundRect(pad, hintY, cardW, hintH, 8, UI_LINE);
+    tft.fillRoundRect(pad, layout.hintY, cardW, layout.hintH, kWardUiRadius, UI_FG);
+    tft.drawRoundRect(pad, layout.hintY, cardW, layout.hintH, kWardUiRadius, UI_LINE);
     tft.setTextFont(1);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(UI_DIM_TEXT, UI_FG);
-    const int lx = pad + 4;
-    const int lineH = 10;
-    int ty = hintY + 3;
-    for (int i = 0; i < kWardLogLines && ty + lineH <= hintY + hintH - 2; ++i, ty += lineH) {
-      tft.drawString(snap[i], lx, ty);
+    const int lx = pad + kWardInnerPad;
+    const int innerTop = layout.hintY + kWardInnerPad;
+    const int innerBot = layout.hintY + layout.hintH - kWardInnerPad;
+    const int innerH = innerBot - innerTop;
+    int linesToDraw = innerH / kWardLogLineH;
+    if (linesToDraw > kWardLogLines) {
+      linesToDraw = kWardLogLines;
+    }
+    if (linesToDraw < 1) {
+      linesToDraw = 1;
+    }
+    const int skip = kWardLogLines - linesToDraw;
+    const int blockH = linesToDraw * kWardLogLineH;
+    int ty = innerBot - blockH;
+    if (ty < innerTop) {
+      ty = innerTop;
+    }
+    for (int i = 0; i < linesToDraw; ++i, ty += kWardLogLineH) {
+      const int src = skip + i;
+      if (snap[src][0] == '\0') {
+        continue;
+      }
+      tft.setTextColor(snapGreen[src] ? UI_OK : UI_DIM_TEXT, UI_FG);
+      tft.drawString(snap[src], lx, ty);
     }
     taskENTER_CRITICAL(&s_wardLogMux);
     if (s_wardLogGen == genSnap) {
@@ -1920,75 +2315,89 @@ static void wardDrawBody(uint32_t linesWr, uint32_t scans, const char* path, boo
 
 static void wardLayoutSettingsButtons() {
   using BS = FeatureUI::ButtonStyle;
+  const WardSetLayout L = wardComputeSetLayout();
   const int16_t W = tft.width();
   const int16_t bw3 = (int16_t)((W - 2 * kWSetPad - 2 * kWSetGap) / 3);
   const int16_t bw2 = (int16_t)((W - 2 * kWSetPad - kWSetGap) / 2);
-  const int16_t yR = (int16_t)kWSetYRadio;
+  const int16_t halfW = (int16_t)((W - 2 * kWSetPad - kWSetGap) / 2);
+
   s_wardSetBtns[0] = {(int16_t)kWSetPad,
-                      yR,
+                      (int16_t)L.modeBtnY,
                       bw3,
                       (int16_t)kWSetBtnH,
                       "WiFi",
                       (s_editRadioMode == WardRadioMode::WiFi) ? BS::Primary : BS::Secondary,
                       false};
   s_wardSetBtns[1] = {(int16_t)(kWSetPad + bw3 + kWSetGap),
-                      yR,
+                      (int16_t)L.modeBtnY,
                       bw3,
                       (int16_t)kWSetBtnH,
                       "BLE",
                       (s_editRadioMode == WardRadioMode::Ble) ? BS::Primary : BS::Secondary,
                       false};
   s_wardSetBtns[2] = {(int16_t)(kWSetPad + 2 * (bw3 + kWSetGap)),
-                      yR,
+                      (int16_t)L.modeBtnY,
                       bw3,
                       (int16_t)kWSetBtnH,
                       "Both",
                       (s_editRadioMode == WardRadioMode::Both) ? BS::Primary : BS::Secondary,
                       false};
 
-  const int16_t yI = (int16_t)kWSetYIntBtns;
-  s_wardSetBtns[3] = {(int16_t)kWSetPad, yI, bw2, (int16_t)kWSetBtnH, "-500ms", BS::Secondary, false};
+  s_wardSetBtns[3] = {(int16_t)kWSetPad,
+                      (int16_t)L.intervalBtnY,
+                      bw2,
+                      (int16_t)kWSetBtnH,
+                      "-500ms",
+                      BS::Secondary,
+                      false};
   s_wardSetBtns[4] = {(int16_t)(kWSetPad + bw2 + kWSetGap),
-                      yI,
+                      (int16_t)L.intervalBtnY,
                       bw2,
                       (int16_t)kWSetBtnH,
                       "+500ms",
                       BS::Secondary,
                       false};
 
-  const int16_t yM = (int16_t)kWSetYMaxBtns;
-  s_wardSetBtns[5] = {(int16_t)kWSetPad, yM, bw2, (int16_t)kWSetBtnH, "Rows -", BS::Secondary, false};
+  s_wardSetBtns[5] = {(int16_t)kWSetPad,
+                      (int16_t)L.capBtnY,
+                      bw2,
+                      (int16_t)kWSetBtnH,
+                      "Rows -",
+                      BS::Secondary,
+                      false};
   s_wardSetBtns[6] = {(int16_t)(kWSetPad + bw2 + kWSetGap),
-                      yM,
+                      (int16_t)L.capBtnY,
                       bw2,
                       (int16_t)kWSetBtnH,
                       "Rows +",
                       BS::Secondary,
                       false};
 
-  const int16_t yW = (int16_t)kWSetWigleRowY;
-  const int16_t halfW = (int16_t)((W - 2 * kWSetPad - kWSetGap) / 2);
-  s_wardSetBtns[7] = {(int16_t)kWSetPad,
-                      yW,
-                      halfW,
-                      (int16_t)kWSetBtnH,
-                      "Upload",
-                      BS::Primary,
-                      false};
-  s_wardSetBtns[8] = {(int16_t)(kWSetPad + halfW + kWSetGap),
-                      yW,
-                      halfW,
-                      (int16_t)kWSetBtnH,
-                      "WiGLE cfg",
-                      BS::Secondary,
-                      false};
+  if (!featureHasTouchNavBar()) {
+    const int16_t wigleY = (int16_t)(L.capBtnY + kWSetBtnH + kWSetSectionGap);
+    s_wardSetBtns[7] = {(int16_t)kWSetPad,
+                        wigleY,
+                        halfW,
+                        (int16_t)kWSetBtnH,
+                        "Upload",
+                        BS::Primary,
+                        false};
+    s_wardSetBtns[8] = {(int16_t)(kWSetPad + halfW + kWSetGap),
+                        wigleY,
+                        halfW,
+                        (int16_t)kWSetBtnH,
+                        "WiGLE cfg",
+                        BS::Secondary,
+                        false};
+  }
 }
 
 static void wardDrawSettingsPage() {
   const int scrW = tft.width();
-  const int scrH = tft.height();
-  const int pad = 8;
+  const int contentBottom = wardContentBottom();
+  const int pad = kWSetPad;
   const int cardW = scrW - 2 * pad;
+  const WardSetLayout layout = wardComputeSetLayout();
   char buf[96];
   const bool fullPaint = !s_wardSetSnap.valid;
   const bool radioDirty = fullPaint || s_editRadioMode != s_wardSetSnap.radio;
@@ -1996,64 +2405,40 @@ static void wardDrawSettingsPage() {
   const bool maxDirty = fullPaint || s_editMaxAps != s_wardSetSnap.maxAps;
 
   if (fullPaint) {
-    tft.fillRect(0, kWardBodyY, scrW, scrH - kWardBodyY, FEATURE_BG);
+    tft.fillRect(0, kWardBodyY, scrW, contentBottom - kWardBodyY, FEATURE_BG);
   }
   tft.setTextDatum(TL_DATUM);
 
   wardLayoutSettingsButtons();
 
   if (fullPaint) {
-    const int topY = kWSetHeaderY;
-    tft.fillRoundRect(pad, topY, cardW, kWSetTopRowH, 5, UI_FG);
-    tft.drawRoundRect(pad, topY, cardW, kWSetTopRowH, 5, UI_LINE);
-    tft.fillRoundRect(pad + 3, topY + 4, 2, 14, 1, ORANGE);
-    tft.drawBitmap(pad + 6, topY + 3, bitmap_icon_document_gear, 16, 16, UI_ICON);
-    tft.setTextFont(1);
-    tft.setTextColor(UI_TEXT, UI_FG);
-    tft.drawString("Setup", pad + 24, topY + 6);
-
-    tft.setTextColor(UI_ICON, FEATURE_BG);
-    tft.drawString("MODE", pad, kWSetLblSrcY);
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.drawString("tap row", pad + 52, kWSetLblSrcY);
-  }
-
-  if (intervalDirty) {
-  tft.fillRoundRect(pad, kWSetLblIntY - 4, cardW, 28, 6, UI_FG);
-  tft.drawRoundRect(pad, kWSetLblIntY - 4, cardW, 28, 6, UI_LINE);
-  tft.setTextColor(UI_ICON, UI_FG);
-  tft.drawString("INTERVAL", pad + 6, kWSetLblIntY);
-  snprintf(buf, sizeof(buf), "%lu ms", (unsigned long)s_editScanMs);
-  tft.setTextColor(UI_TEXT, UI_FG);
-  tft.drawString(buf, pad + 86, kWSetLblIntY);
-  tft.setTextColor(UI_DIM_TEXT, UI_FG);
-  tft.drawString("or +/- row below", pad + 6, kWSetLblIntY + 10);
-  FeatureUI::drawButton(s_wardSetBtns[3]);
-  FeatureUI::drawButton(s_wardSetBtns[4]);
-  }
-
-  if (maxDirty) {
-  tft.fillRoundRect(pad, kWSetLblMaxY - 4, cardW, 28, 6, UI_FG);
-  tft.drawRoundRect(pad, kWSetLblMaxY - 4, cardW, 28, 6, UI_LINE);
-  tft.setTextColor(UI_ICON, UI_FG);
-  tft.drawString("ROW CAP", pad + 6, kWSetLblMaxY);
-  snprintf(buf, sizeof(buf), "%d / scan", s_editMaxAps);
-  tft.setTextColor(UI_TEXT, UI_FG);
-  tft.drawString(buf, pad + 86, kWSetLblMaxY);
-  tft.setTextColor(UI_DIM_TEXT, UI_FG);
-  tft.drawString("WiFi APs + BLE dev", pad + 6, kWSetLblMaxY + 10);
-  FeatureUI::drawButton(s_wardSetBtns[5]);
-  FeatureUI::drawButton(s_wardSetBtns[6]);
+    wardDrawSetHeader(pad, cardW, layout);
   }
 
   if (radioDirty) {
-  for (int i = 0; i < 3; ++i) {
-    FeatureUI::drawButton(s_wardSetBtns[i]);
-  }
+    for (int i = 0; i < 3; ++i) {
+      FeatureUI::drawButton(s_wardSetBtns[i]);
+    }
   }
 
-  FeatureUI::drawButton(s_wardSetBtns[7]);
-  FeatureUI::drawButton(s_wardSetBtns[8]);
+  if (intervalDirty) {
+    snprintf(buf, sizeof(buf), "%lu ms", (unsigned long)s_editScanMs);
+    wardDrawSetInlineCard(pad, cardW, layout.intervalCardY, "INTERVAL", buf);
+    FeatureUI::drawButton(s_wardSetBtns[3]);
+    FeatureUI::drawButton(s_wardSetBtns[4]);
+  }
+
+  if (maxDirty) {
+    snprintf(buf, sizeof(buf), "%d rows", s_editMaxAps);
+    wardDrawSetInlineCard(pad, cardW, layout.capCardY, "ROW CAP", buf);
+    FeatureUI::drawButton(s_wardSetBtns[5]);
+    FeatureUI::drawButton(s_wardSetBtns[6]);
+  }
+
+  if (!featureHasTouchNavBar()) {
+    FeatureUI::drawButton(s_wardSetBtns[7]);
+    FeatureUI::drawButton(s_wardSetBtns[8]);
+  }
 }
 
 #ifndef WARD_WIGLE_CFG_PATH
@@ -2074,13 +2459,6 @@ static void wardTrimEnd(char* s) {
 }
 
 // ---- WiGLE on-device editor (uses KeyboardUI; writes WARD_WIGLE_CFG_PATH) ----
-static const char* const kWardWigleKbRows[] = {
-    "1234567890",
-    "qwertyuiop",
-    "asdfghjkl_",
-    "zxcvbnm<-",
-};
-
 static char s_wigUser[96];
 static char s_wigTok[160];
 static char s_wigSsid[80];
@@ -2206,14 +2584,15 @@ static bool wardWigleSaveCfgToSd() {
   return true;
 }
 
+static void wardDrawWigleCfgPage();
+
 static void wardWigleRunFieldEditor(const char* title, char* buf, size_t cap, uint8_t maxKbLen, bool requireNonEmpty) {
   s_fgScanPaused = true;
   delay(200);
   OnScreenKeyboardConfig cfg{};
   cfg.titleLine1 = title;
-  cfg.titleLine2 = "OK saves, Back cancels";
-  cfg.rows = kWardWigleKbRows;
-  cfg.rowCount = 4;
+  cfg.titleLine2 = "^ caps, # sym";
+  osKeyboardUseStandardLayout(cfg);
   cfg.maxLen = maxKbLen;
   cfg.shuffleNames = nullptr;
   cfg.shuffleCount = 0;
@@ -2227,16 +2606,20 @@ static void wardWigleRunFieldEditor(const char* title, char* buf, size_t cap, ui
   const String init = String(buf);
   const OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, init);
   s_fgScanPaused = false;
-  wardUiInvalidateAll();
   if (r.accepted) {
     strncpy(buf, r.text.c_str(), cap - 1);
     buf[cap - 1] = '\0';
-    s_wigleCfgDirty = true;
   }
+  wardUiInvalidateAll();
+  wardDrawWigleCfgPage();
+  wardSetNavLabels(WardPage::WigleCfg);
+  wardDrawIconToolbar(WardPage::WigleCfg, s_bgTask != nullptr, false);
+  wardPumpNavChrome();
+  s_lastWardInputMs = millis();
 }
 
-static constexpr int kWigleRowH = 28;
-static constexpr int kWigleRowGap = 5;
+static constexpr int kWigleRowH = 30;
+static constexpr int kWigleRowGap = 4;
 static constexpr int kWigleFirstRowY = kWardBodyY + 34;
 
 static int wardWigleHitBodyRow(int x, int y) {
@@ -2261,28 +2644,32 @@ static int wardWigleHitBodyRow(int x, int y) {
 
 static void wardDrawWigleCfgPage() {
   const int scrW = tft.width();
-  const int scrH = tft.height();
-  const int pad = 8;
-  tft.fillRect(0, kWardBodyY, scrW, scrH - kWardBodyY, FEATURE_BG);
+  const int contentBottom = wardContentBottom();
+  const int pad = kWSetPad;
+  const int cardW = scrW - 2 * pad;
+  tft.fillRect(0, kWardBodyY, scrW, contentBottom - kWardBodyY, FEATURE_BG);
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(2);
   tft.setTextColor(UI_TEXT, FEATURE_BG);
   tft.drawString("WiGLE config", pad, kWardBodyY + 2);
   tft.setTextFont(1);
   tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.drawString("Back  Check = save to SD", pad, kWardBodyY + 18);
+  if (!featureHasTouchNavBar()) {
+    tft.drawString("Back  Check = save to SD", pad, kWardBodyY + 18);
+  }
 
   auto rowCard = [&](int idx, const char* label, const char* val, bool dim) {
     const int y = kWigleFirstRowY + idx * (kWigleRowH + kWigleRowGap);
-    tft.fillRoundRect(pad, y, scrW - 2 * pad, kWigleRowH, 6, UI_FG);
-    tft.drawRoundRect(pad, y, scrW - 2 * pad, kWigleRowH, 6, UI_LINE);
+    const int labelY = y + kWardInnerPad;
+    const int valueY = y + kWigleRowH - kWardInnerPad - 8;
+    const int valueMaxW = cardW - kWardInnerPad * 2;
+    tft.fillRoundRect(pad, y, cardW, kWigleRowH, kWardUiRadius, UI_FG);
+    tft.drawRoundRect(pad, y, cardW, kWigleRowH, kWardUiRadius, UI_LINE);
     tft.setTextColor(dim ? UI_DIM_TEXT : UI_ICON, UI_FG);
-    tft.drawString(label, pad + 6, y + 4);
+    tft.drawString(label, pad + kWardInnerPad, labelY);
     tft.setTextColor(dim ? UI_DIM_TEXT : UI_TEXT, UI_FG);
-    char el[80];
     const char* show = (val && val[0]) ? val : "(empty)";
-    snprintf(el, sizeof(el), "%.32s", show);
-    tft.drawString(el, pad + 6, y + 14);
+    tft.drawString(wardFitTextWidth(show, valueMaxW), pad + kWardInnerPad, valueY);
   };
 
   rowCard(0, "API name", s_wigUser, false);
@@ -2290,11 +2677,13 @@ static void wardDrawWigleCfgPage() {
   rowCard(2, "Wi-Fi SSID", s_wigSsid, s_wigUseSavedWifi);
   rowCard(3, "Wi-Fi password", s_wigPass, s_wigUseSavedWifi);
   const int y4 = kWigleFirstRowY + 4 * (kWigleRowH + kWigleRowGap);
-  tft.fillRoundRect(pad, y4, scrW - 2 * pad, kWigleRowH, 6, UI_FG);
-  tft.drawRoundRect(pad, y4, scrW - 2 * pad, kWigleRowH, 6, UI_LINE);
+  tft.fillRoundRect(pad, y4, cardW, kWigleRowH, kWardUiRadius, UI_FG);
+  tft.drawRoundRect(pad, y4, cardW, kWigleRowH, kWardUiRadius, UI_LINE);
   tft.setTextColor(UI_TEXT, UI_FG);
-  tft.drawString(s_wigUseSavedWifi ? "Auto Wi-Fi ON (tap to edit SSID)" : "Auto Wi-Fi OFF (tap for saved NVS)",
-                 pad + 6, y4 + 8);
+  const char* autoLine = s_wigUseSavedWifi ? "Auto Wi-Fi ON (tap to edit SSID)"
+                                           : "Auto Wi-Fi OFF (tap for saved NVS)";
+  tft.drawString(wardFitTextWidth(autoLine, cardW - kWardInnerPad * 2), pad + kWardInnerPad,
+                 y4 + (kWigleRowH - 8) / 2);
 }
 
 static int wardPollWigleCfgCombinedHit() {
@@ -2871,9 +3260,6 @@ static void wardDoWifiScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint3
   if (cap > (int)s_cfgMaxAps) {
     cap = (int)s_cfgMaxAps;
   }
-  const int best = WiFi.RSSI(0);
-  const int ch0 = WiFi.channel(0);
-  wardLogPushf("WiFi %d>%d ch%d %ddBm", n, cap, ch0, best);
   for (int i = 0; i < cap; ++i) {
     const String ss = WiFi.SSID(i);
     const char* ssidc = ss.c_str();
@@ -2885,6 +3271,7 @@ static void wardDoWifiScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint3
     } else {
       mac[0] = '\0';
     }
+    wardLogPushWifiAp(ssidc, WiFi.channel(i), WiFi.RSSI(i), mac);
     wardPrintCsvGpsPrefix(logf, now);
     logf.print("WIFI,");
     wardAppendCsvString(logf, ssidc);
@@ -2938,14 +3325,13 @@ static void wardDoBleScanLog(File& logf, uint32_t now, uint32_t* linesWr, uint32
   if (cap > (int)s_cfgMaxAps) {
     cap = (int)s_cfgMaxAps;
   }
-  const int bleBest = results.getDevice(0).getRSSI();
-  wardLogPushf("BLE %d>%d %ddBm", n, cap, bleBest);
   for (int i = 0; i < cap; ++i) {
     BLEAdvertisedDevice d = results.getDevice(i);
     char mac[24];
     snprintf(mac, sizeof(mac), "%s", d.getAddress().toString().c_str());
     const std::string bleName = d.getName();
     const char* namec = bleName.empty() ? "" : bleName.c_str();
+    wardLogPushBleDev(namec, d.getRSSI(), mac);
     wardPrintCsvGpsPrefix(logf, now);
     logf.print("BLE,");
     wardAppendCsvString(logf, namec);
@@ -3184,11 +3570,23 @@ static int wardPollSettingsCombinedHit() {
   }
 
   wardLayoutSettingsButtons();
-  const int h = FeatureUI::hit(s_wardSetBtns, kWardSetBtnCount, x, y);
+  const int btnCount = featureHasTouchNavBar() ? kWardSetBtnCount : kWardSetBtnTotal;
+  const int h = FeatureUI::hit(s_wardSetBtns, btnCount, x, y);
   if (h < 0) {
     return -1;
   }
   return 10 + h;
+}
+
+static bool wardSessionShouldExit() {
+  if (feature_exit_requested) {
+    return true;
+  }
+  if (featureHasTouchNavBar()) {
+    /* Center nav is Save or Exit by page — use wardPollNavButtons, not raw SELECT. */
+    return isPhysicalButtonPressed(BTN_SELECT);
+  }
+  return isButtonPressed(BTN_SELECT) || touchRequestsExit();
 }
 
 void session() {
@@ -3197,7 +3595,14 @@ void session() {
   const bool bgWas = (s_bgTask != nullptr);
 
   if (!bgWas && !isSDCardAvailable()) {
-    wardNotify("Wardriver", "SD card required. Insert card and try again.");
+    tft.fillScreen(FEATURE_BG);
+    drawStatusBar(readBatteryVoltage(), true, true);
+    wardLogClear();
+    wardLogPush("Wardrive");
+    wardLogPush("SD required");
+    if (wardWaitStartupFailureDismiss("Wardriver", "SD card required. Insert card and try again.")) {
+      s_wardRetrySession = true;
+    }
     return;
   }
 
@@ -3206,7 +3611,7 @@ void session() {
   drawStatusBar(readBatteryVoltage(), true, true);
   wardLogClear();
   wardLogPush("Wardrive");
-  wardLogPush("Strip: back left; gear play RSS on right");
+  wardLogPush("WiFi + BLE logging");
 
   WardPage page = WardPage::Main;
   bool fgLog = true;
@@ -3243,7 +3648,9 @@ void session() {
     snprintf(path, sizeof(path), "/wd_%lu.csv", (unsigned long)millis());
     logf = SD.open(path, FILE_WRITE);
     if (!logf) {
-      wardNotify("Wardriver", "Could not create log file on SD.");
+      if (wardWaitStartupFailureDismiss("Wardriver", "Could not create log file on SD.")) {
+        s_wardRetrySession = true;
+      }
       gpsSerial.end();
       return;
     }
@@ -3252,7 +3659,9 @@ void session() {
         "epoch_ms,utc,date,lat,lon,alt_m,fix,sats,hdop,radio,ssid,bssid,ch,rssi_dbm,auth");
     logf.flush();
     if (!wardStartForegroundScanTask(logf)) {
-      wardNotify("Wardriver", "Could not start scan worker.");
+      if (wardWaitStartupFailureDismiss("Wardriver", "Could not start scan worker.")) {
+        s_wardRetrySession = true;
+      }
       logf.close();
       gpsSerial.end();
       return;
@@ -3265,6 +3674,8 @@ void session() {
   s_editRadioMode = (WardRadioMode)s_cfgRadioMode;
 
   wardUiInvalidateAll();
+  const bool initBgOn = (s_bgTask != nullptr);
+  wardSetNavLabels(page, initBgOn, fgLog);
   uint32_t lastBarMs = millis();
   lastUiMs = lastBarMs - (uint32_t)WARDRIVE_UI_INTERVAL_MS;
 
@@ -3273,7 +3684,8 @@ void session() {
 
   while (true) {
     gWardSuppressBottomTouchExit = (page != WardPage::Main);
-    if (shouldExit()) {
+    wardPumpNavChrome();
+    if (wardSessionShouldExit()) {
       break;
     }
     if (!bgWas) {
@@ -3311,15 +3723,44 @@ void session() {
     }
 
     int hit = -1;
-    if (page == WardPage::Settings) {
-      hit = wardPollSettingsCombinedHit();
-    } else if (page == WardPage::WigleCfg) {
-      hit = wardPollWigleCfgCombinedHit();
-    } else {
-      hit = wardPollToolbarHit();
+    const WardNavEvt navEvt = wardPollNavButtons(page);
+    if (navEvt != WardNavEvt::None) {
+      lastUiMs = now - (uint32_t)WARDRIVE_UI_INTERVAL_MS;
+      s_lastWardInputMs = millis();
+      if (page == WardPage::Main) {
+        if (navEvt == WardNavEvt::Setup) {
+          hit = 0;
+        } else if (navEvt == WardNavEvt::LogToggle) {
+          hit = 1;
+        } else if (navEvt == WardNavEvt::Rss) {
+          hit = 2;
+        } else if (navEvt == WardNavEvt::Exit) {
+          hit = 3;
+        }
+      } else if (navEvt == WardNavEvt::Back) {
+        hit = 0;
+      } else if (navEvt == WardNavEvt::Save) {
+        hit = 3;
+      } else if (page == WardPage::Settings && navEvt == WardNavEvt::Upload) {
+        hit = 17;
+      } else if (page == WardPage::Settings && navEvt == WardNavEvt::WigleCfg) {
+        hit = 18;
+      }
+    }
+
+    if (hit < 0) {
+      if (page == WardPage::Settings) {
+        hit = wardPollSettingsCombinedHit();
+      } else if (page == WardPage::WigleCfg) {
+        hit = wardPollWigleCfgCombinedHit();
+      } else {
+        hit = wardPollToolbarHit();
+      }
     }
     if (hit >= 0) {
       lastUiMs = now - (uint32_t)WARDRIVE_UI_INTERVAL_MS;
+      const bool bgOn = (s_bgTask != nullptr);
+      const bool logOn = bgOn ? (bool)s_bgLog : fgLog;
       if (page == WardPage::WigleCfg) {
         if (hit >= 10) {
           const int bh = hit - 10;
@@ -3351,9 +3792,13 @@ void session() {
         } else if (hit == 0) {
           wardLogPush("WiGLE cfg: back");
           page = WardPage::Settings;
+          wardSetNavLabels(page, bgOn, logOn);
           wardUiInvalidateAll();
         } else if (hit == 3) {
           wardWigleSaveCfgToSd();
+          wardLogPush("WiGLE cfg: saved");
+          page = WardPage::Settings;
+          wardSetNavLabels(page, bgOn, logOn);
           wardUiInvalidateAll();
         }
       } else if (page == WardPage::Settings) {
@@ -3407,14 +3852,40 @@ void session() {
             } else {
               wardWigleLoadEditBuffers();
               page = WardPage::WigleCfg;
+              wardSetNavLabels(page, bgOn, logOn);
               s_wigleCfgDirty = true;
               wardUiInvalidateAll();
               wardLogPush("WiGLE editor");
             }
           }
+        } else if (hit == 17) {
+          if (s_bgTask) {
+            wardNotify("WiGLE", "Stop background wardriver first.");
+          } else if (!path[0]) {
+            wardNotify("WiGLE", "No CSV (foreground log only).");
+          } else {
+            wardLogPush("WiGLE: upload tap");
+            if (fgFile) {
+              logf.flush();
+            }
+            wardPerformWigleUpload(path, fgFile ? &logf : nullptr);
+            wardUiInvalidateAll();
+          }
+        } else if (hit == 18) {
+          if (!isSDCardAvailable()) {
+            wardNotify("WiGLE", "SD required for WiGLE config.");
+          } else {
+            wardWigleLoadEditBuffers();
+            page = WardPage::WigleCfg;
+            wardSetNavLabels(page, bgOn, logOn);
+            s_wigleCfgDirty = true;
+            wardUiInvalidateAll();
+            wardLogPush("WiGLE editor");
+          }
         } else if (hit == 0) {
           wardLogPush("Setup: back");
           page = WardPage::Main;
+          wardSetNavLabels(page, bgOn, logOn);
           wardUiInvalidateAll();
         } else if (hit == 3) {
           wardLogPush("Setup: saved");
@@ -3424,7 +3895,9 @@ void session() {
           wardLogPushf("Cfg %lums %s cap%d", (unsigned long)s_cfgScanMs,
                         wardRadioModeShort((WardRadioMode)s_cfgRadioMode), (int)s_cfgMaxAps);
           page = WardPage::Main;
+          wardSetNavLabels(page, bgOn, logOn);
           wardUiInvalidateAll();
+          drainButtons();
         }
       } else {
         if (hit == 0) {
@@ -3433,6 +3906,7 @@ void session() {
           s_editMaxAps = s_cfgMaxAps;
           s_editRadioMode = (WardRadioMode)s_cfgRadioMode;
           page = WardPage::Settings;
+          wardSetNavLabels(page, bgOn, logOn);
           wardUiInvalidateAll();
         } else if (hit == 1) {
           if (s_bgTask) {
@@ -3443,6 +3917,7 @@ void session() {
             s_fgScanPaused = !fgLog;
             wardLogPush(fgLog ? "Log ON" : "Log OFF");
           }
+          wardSetNavLabels(page, bgOn, s_bgTask ? (bool)s_bgLog : fgLog);
         } else if (hit == 2) {
           if (s_bgTask) {
             wardLogPush("Stop background");
@@ -3451,6 +3926,7 @@ void session() {
               delay(15);
             }
             s_bgStop = false;
+            wardSetNavLabels(page, false, fgLog);
           } else {
             if (!fgLog) {
               wardNotify("Wardriver", "Turn logging on (play), then tap RSS for Auto.");
@@ -3488,6 +3964,7 @@ void session() {
       bool wardRepaintedBody = false;
       if (wardTbDirty(page, bgOn, logOn)) {
         wardDrawIconToolbar(page, bgOn, logOn);
+        wardSetNavLabels(page, bgOn, logOn);
         wardTbSave(page, bgOn, logOn);
       }
       if (page == WardPage::WigleCfg) {
@@ -3544,4 +4021,14 @@ void session() {
   drawStatusBar(readBatteryVoltage(), true);
 }
 
-} 
+void clearSessionRetry() { s_wardRetrySession = false; }
+
+bool consumeSessionRetry() {
+  if (!s_wardRetrySession) {
+    return false;
+  }
+  s_wardRetrySession = false;
+  return true;
+}
+
+}

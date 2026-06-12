@@ -397,6 +397,68 @@ namespace {
 #endif
 #define DARK_GRAY UI_FG
 
+static constexpr int kSubghzScreenH = 320;
+
+static int subghzContentBottom() {
+  return featureHasTouchNavBar() ? touchNavContentBottomY() : kSubghzScreenH;
+}
+
+static void subghzClearBody(uint16_t color = TFT_BLACK) {
+  if (featureHasTouchNavBar()) {
+    featureClearContent(color);
+  } else {
+    tft.fillScreen(color);
+  }
+}
+
+static constexpr unsigned long kSubghzNavDebounceMs = 200;
+
+static void subghzWaitNavRelease(int pin) {
+  while (isTouchNavButtonPressed(pin)) {
+    delay(10);
+  }
+  delay(kSubghzNavDebounceMs);
+}
+
+static void subghzRedrawNavChrome() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  invalidateTouchButtonCue();
+  redrawTouchButtonBar();
+  maintainTouchNavBar();
+}
+
+static bool subghzWaitWithNav(uint32_t ms) {
+  const uint32_t until = millis() + ms;
+  while ((int32_t)(millis() - until) < 0) {
+    if (feature_exit_requested || featureExitButtonPressed()) {
+      return false;
+    }
+    if (featureHasTouchNavBar()) {
+      maintainTouchNavBar();
+    }
+    delay(50);
+  }
+  return true;
+}
+
+static void subghzSetReplayNavLabels() {
+  setTouchNavLabels("Freq-", "Save", "Exit", "Send", "Freq+");
+}
+
+static void subghzSetJammerNavLabels() {
+  setTouchNavLabels("Freq-", "Auto", "Exit", "Toggle", "Freq+");
+}
+
+static void subghzSetProfileNavLabels() {
+  setTouchNavLabels("Delete", "Next", "Exit", "Prev", "TX");
+}
+
+namespace replayat { void replayHandleNavButtons(); }
+namespace subjammer { void subjammerHandleNavButtons(); }
+namespace SavedProfile { void profileHandleNavButtons(); }
+
 namespace replayat {
 
 #define EEPROM_SIZE 1440
@@ -415,14 +477,12 @@ namespace replayat {
 
 static bool uiDrawn = false;
 
-#define MAX_NAME_LENGTH 16
+void runUI();
+void sendSignal();
+void saveProfile();
+void updateDisplay();
 
-const char* profileKeyboardRows[] = {
-  "1234567890",
-  "QWERTYUIOP",
-  "ASDFGHJKL",
-  "ZXCVBNM<-"
-};
+#define MAX_NAME_LENGTH 16
 
 const char* randomNames[] = {
   "Signal", "Remote", "KeyFob", "GateOpener", "DoorLock",
@@ -472,9 +532,9 @@ uint16_t receivedProtocol = 0;
 const int rssi_threshold = -75;
 
 static const uint32_t subghz_frequency_list[] = {
-    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,
-    390000000, 418000000, 433075000, 433420000, 433920000, 434420000,
-    434775000, 438900000, 868350000, 915000000, 925000000
+    300000000, 303875000, 304250000, 310000000, 314000000, 315000000,
+    318000000, 390000000, 418000000, 433075000, 433420000, 433920000,
+    434420000, 434775000, 438900000, 868350000, 915000000, 925000000
 };
 
 uint16_t currentFrequencyIndex = 0;
@@ -484,13 +544,29 @@ static bool autoScanEnabled = false;
 static uint16_t scanIndex = 0;
 static uint32_t lastHopMs = 0;
 static uint32_t lockUntilMs = 0;
-static constexpr uint32_t SCAN_DWELL_MS = 110;
+static constexpr uint32_t SCAN_DWELL_MS = 220;
+static constexpr uint32_t SCAN_DWELL_LOW_MS = 360;
+static constexpr uint32_t SCAN_SETTLE_MS = 70;
+static constexpr uint32_t SCAN_SETTLE_LOW_MS = 95;
+static constexpr uint32_t SCAN_SETTLE_BAND_MS = 140;
 static constexpr uint32_t LOCK_HOLD_MS  = 2500;
 static constexpr uint32_t RSSI_LOCK_MS  = 1200;
-static constexpr int      RSSI_DETECT_THRESHOLD = -72;
-static constexpr int      RSSI_CLEAR_THRESHOLD  = -78;
+static constexpr int      RSSI_DETECT_THRESHOLD = -58;
+static constexpr int      RSSI_DETECT_THRESHOLD_LOW = -70;
+static constexpr int      RSSI_CLEAR_THRESHOLD  = -66;
+static constexpr int      RSSI_CLEAR_THRESHOLD_LOW = -76;
+static constexpr int      RSSI_DECODE_THRESHOLD = -55;
+static constexpr int      RSSI_DECODE_THRESHOLD_LOW = -66;
+static constexpr uint32_t RSSI_SAMPLE_MS = 45;
+static constexpr uint8_t  RSSI_DETECT_HITS = 3;
+static constexpr uint8_t  RSSI_DETECT_HITS_LOW = 2;
+static constexpr uint32_t DECODE_MIN_DWELL_MS = 130;
+static constexpr uint32_t DECODE_MIN_DWELL_LOW_MS = 180;
 static constexpr uint32_t UI_SCAN_UPDATE_MS = 250;
 static uint32_t lastUiScanUpdateMs = 0;
+static uint32_t scanSettledAtMs = 0;
+static uint32_t lastRssiSampleMs = 0;
+static uint8_t  rssiDetectStreak = 0;
 static bool     rssiHot = false;
 
 static uint32_t lastDetectAlertMs = 0;
@@ -543,6 +619,49 @@ static inline uint16_t freqCount() {
   return (uint16_t)(sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
 }
 
+static bool replayFreqIsLowBand(uint16_t idx) {
+  return subghz_frequency_list[idx % freqCount()] < 350000000UL;
+}
+
+static uint8_t replayFreqBandId(uint16_t idx) {
+  const uint32_t hz = subghz_frequency_list[idx % freqCount()];
+  if (hz < 350000000UL) {
+    return 0;
+  }
+  if (hz < 500000000UL) {
+    return 1;
+  }
+  return 2;
+}
+
+static bool replayFreqBandChanged(uint16_t prevIdx, uint16_t newIdx) {
+  return replayFreqBandId(prevIdx) != replayFreqBandId(newIdx);
+}
+
+static int replayRssiDetectThreshold() {
+  return replayFreqIsLowBand(currentFrequencyIndex) ? RSSI_DETECT_THRESHOLD_LOW
+                                                    : RSSI_DETECT_THRESHOLD;
+}
+
+static int replayRssiClearThreshold() {
+  return replayFreqIsLowBand(currentFrequencyIndex) ? RSSI_CLEAR_THRESHOLD_LOW
+                                                    : RSSI_CLEAR_THRESHOLD;
+}
+
+static int replayRssiDecodeThreshold() {
+  return replayFreqIsLowBand(currentFrequencyIndex) ? RSSI_DECODE_THRESHOLD_LOW
+                                                    : RSSI_DECODE_THRESHOLD;
+}
+
+static uint32_t replayScanDwellMs() {
+  return replayFreqIsLowBand(currentFrequencyIndex) ? SCAN_DWELL_LOW_MS : SCAN_DWELL_MS;
+}
+
+static uint32_t replayDecodeMinDwellMs() {
+  return replayFreqIsLowBand(currentFrequencyIndex) ? DECODE_MIN_DWELL_LOW_MS
+                                                    : DECODE_MIN_DWELL_MS;
+}
+
 static void tuneToIndex(uint16_t idx, bool persist = true) {
   currentFrequencyIndex = idx % freqCount();
   ELECHOUSE_cc1101.setSidle();
@@ -554,68 +673,300 @@ static void tuneToIndex(uint16_t idx, bool persist = true) {
   }
 }
 
+static void replayClearScanLock() {
+  lockUntilMs = 0;
+  rssiHot = false;
+  rssiDetectStreak = 0;
+}
+
+static bool replayLooksLikeRealDecode(uint32_t value, uint16_t bits, uint16_t proto) {
+  if (value == 0) {
+    return false;
+  }
+  if (bits < 8 || bits > 64) {
+    return false;
+  }
+  if (proto < 1 || proto > 12) {
+    return false;
+  }
+  return true;
+}
+
+static void replayScanHopTo(uint16_t idx, uint16_t fromIdx) {
+  tuneToIndex(idx, false);
+  mySwitch.resetAvailable();
+  mySwitch.setReceiveTolerance(replayFreqIsLowBand(idx) ? 50 : 40);
+
+  uint32_t settleMs = SCAN_SETTLE_MS;
+  if (replayFreqBandChanged(fromIdx, idx)) {
+    settleMs = SCAN_SETTLE_BAND_MS;
+  } else if (replayFreqIsLowBand(idx)) {
+    settleMs = SCAN_SETTLE_LOW_MS;
+  }
+  scanSettledAtMs = millis() + settleMs;
+  rssiDetectStreak = 0;
+  lastRssiSampleMs = 0;
+}
+
+static void replayBeginAutoScan() {
+  scanIndex = currentFrequencyIndex;
+  lastHopMs = 0;
+  scanSettledAtMs = 0;
+  lastRssiSampleMs = 0;
+  replayClearScanLock();
+  lastUiScanUpdateMs = 0;
+  mySwitch.resetAvailable();
+}
+
+static bool replayAutoScanReadyForDecode(uint32_t now) {
+  if (lastHopMs == 0 || (now - lastHopMs) < replayDecodeMinDwellMs()) {
+    return false;
+  }
+  if (now < scanSettledAtMs) {
+    return false;
+  }
+  return ELECHOUSE_cc1101.getRssi() > replayRssiDecodeThreshold();
+}
+
+static void replaySampleRssiForScan(uint32_t now) {
+  if (now < scanSettledAtMs) {
+    return;
+  }
+  if (lastRssiSampleMs != 0 && (now - lastRssiSampleMs) < RSSI_SAMPLE_MS) {
+    return;
+  }
+
+  const int rssi = ELECHOUSE_cc1101.getRssi();
+  const int detectThreshold = replayRssiDetectThreshold();
+  const uint8_t detectHits = replayFreqIsLowBand(currentFrequencyIndex) ? RSSI_DETECT_HITS_LOW
+                                                                        : RSSI_DETECT_HITS;
+  if (rssi > detectThreshold) {
+    if (rssiDetectStreak < 255) {
+      rssiDetectStreak++;
+    }
+    if (!rssiHot && rssiDetectStreak >= detectHits) {
+      rssiHot = true;
+      lockUntilMs = now + RSSI_LOCK_MS;
+      EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+      EEPROM.commit();
+      replayShowDetectNotice("RSSI", rssi);
+    }
+  } else {
+    rssiDetectStreak = 0;
+    if (rssiHot && rssi < replayRssiClearThreshold()) {
+      rssiHot = false;
+    }
+  }
+  lastRssiSampleMs = now;
+}
+
+static void replayFreqNext() {
+  autoScanEnabled = false;
+  replayClearScanLock();
+  tuneToIndex((uint16_t)((currentFrequencyIndex + 1) % freqCount()), true);
+  updateDisplay();
+}
+
+static void replayFreqPrev() {
+  autoScanEnabled = false;
+  replayClearScanLock();
+  tuneToIndex((uint16_t)((currentFrequencyIndex + freqCount() - 1) % freqCount()), true);
+  updateDisplay();
+}
+
+static void replayToggleAuto() {
+  autoScanEnabled = !autoScanEnabled;
+  if (autoScanEnabled) {
+    replayBeginAutoScan();
+  } else {
+    replayClearScanLock();
+  }
+  updateDisplay();
+}
+
+static void replayTrySave() {
+  if (receivedValue == 0) {
+    return;
+  }
+  autoScanEnabled = false;
+  replayClearScanLock();
+  saveProfile();
+}
+
+static bool s_replayStaticDrawn = false;
+
+struct ReplayDisplayCache {
+  uint16_t freqIndex = 0xFFFF;
+  uint8_t modeState = 0xFF;
+  uint16_t bitLength = 0xFFFF;
+  int16_t rssi = -9999;
+  uint16_t protocol = 0xFFFF;
+  uint32_t value = 0xFFFFFFFF;
+  bool valid = false;
+};
+
+static ReplayDisplayCache s_replayDisp;
+
+static void replayInvalidateDisplay() {
+  s_replayStaticDrawn = false;
+  s_replayDisp = ReplayDisplayCache{};
+}
+
+static void replayRestoreStatusPanel() {
+  replayInvalidateDisplay();
+  updateDisplay();
+}
+
+static uint8_t replayModeState() {
+  const bool locked = (autoScanEnabled && lockUntilMs != 0 &&
+                       (int32_t)(millis() - lockUntilMs) < 0);
+  if (locked) {
+    return 2;
+  }
+  return autoScanEnabled ? 1 : 0;
+}
+
+static constexpr int kReplayStatusLineY = 80;
+static constexpr int kReplayValueLineH = 11;
+
+static void replayDrawStatusSeparator() {
+  tft.drawFastHLine(0, kReplayStatusLineY, 240, UI_LINE);
+}
+
+static void replayDrawValueCell(int x, int y, int w, int h, const String& text, uint16_t color) {
+  const int maxH = kReplayStatusLineY - y;
+  if (maxH <= 0) {
+    return;
+  }
+  const int clipH = min(h, maxH);
+  tft.fillRect(x, y, w, clipH, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(x, y);
+  tft.print(text);
+}
+
+static void replayDrawStaticChrome() {
+  if (s_replayStaticDrawn) {
+    return;
+  }
+
+  const int bodyBottom = subghzContentBottom();
+  const int infoH = min(kReplayStatusLineY - 40, bodyBottom - 40);
+  if (infoH > 0) {
+    tft.fillRect(0, 40, 240, infoH, TFT_BLACK);
+  }
+  replayDrawStatusSeparator();
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  tft.setCursor(5, 20 + yshift);
+  tft.print("Freq:");
+  tft.setCursor(5, 35 + yshift);
+  tft.print("Bit:");
+  tft.setCursor(130, 35 + yshift);
+  tft.print("RSSI:");
+  tft.setCursor(130, 20 + yshift);
+  tft.print("Ptc:");
+  tft.setCursor(5, 50 + yshift);
+  tft.print("Val:");
+
+  s_replayStaticDrawn = true;
+}
+
+void replayHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    replayFreqPrev();
+    subghzWaitNavRelease(BTN_LEFT);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    replayFreqNext();
+    subghzWaitNavRelease(BTN_RIGHT);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+    if (receivedValue != 0) {
+      autoScanEnabled = false;
+      replayClearScanLock();
+      sendSignal();
+    }
+    subghzWaitNavRelease(BTN_UP);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    replayTrySave();
+    subghzWaitNavRelease(BTN_DOWN);
+  }
+}
+
 void updateDisplay() {
-    uiDrawn = false;
+    replayDrawStaticChrome();
 
-    tft.fillRect(0, 40, 240, 40, TFT_BLACK);
-    tft.drawLine(0, 80, 240, 80, ORANGE);
+    const uint8_t modeState = replayModeState();
+    const int16_t rssi = ELECHOUSE_cc1101.getRssi();
+    char freqBuf[16];
+    char modeBuf[8];
+    char bitBuf[8];
+    char rssiBuf[8];
+    char ptcBuf[8];
+    char valBuf[16];
 
-    tft.setCursor(5, 20 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Freq:");
-    tft.setTextColor(ORANGE);
-    tft.setCursor(50, 20 + yshift);
-    tft.print(subghz_frequency_list[currentFrequencyIndex] / 1000000.0, 2);
-    tft.print(" MHz");
-
-    tft.setCursor(175, 20 + yshift);
-    bool locked = (autoScanEnabled && lockUntilMs != 0 && (int32_t)(millis() - lockUntilMs) < 0);
-    tft.setTextColor(autoScanEnabled ? ORANGE : ORANGE);
-    if (locked) {
-      tft.print("LOCK");
+    snprintf(freqBuf, sizeof(freqBuf), "%.2f MHz",
+             subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
+    if (modeState == 2) {
+      snprintf(modeBuf, sizeof(modeBuf), "LOCK");
     } else {
-      tft.print(autoScanEnabled ? "AUTO" : "MAN ");
+      snprintf(modeBuf, sizeof(modeBuf), "%s", modeState == 1 ? "AUTO" : "MAN ");
+    }
+    snprintf(bitBuf, sizeof(bitBuf), "%d", receivedBitLength);
+    snprintf(rssiBuf, sizeof(rssiBuf), "%d", rssi);
+    snprintf(ptcBuf, sizeof(ptcBuf), "%d", receivedProtocol);
+    snprintf(valBuf, sizeof(valBuf), "%lu", (unsigned long)receivedValue);
+
+    const bool fullRedraw = !s_replayDisp.valid;
+    if (fullRedraw || s_replayDisp.freqIndex != currentFrequencyIndex) {
+      replayDrawValueCell(50, 20 + yshift, 72, kReplayValueLineH, freqBuf, UI_WARN);
+      s_replayDisp.freqIndex = currentFrequencyIndex;
+    }
+    if (fullRedraw || s_replayDisp.modeState != modeState) {
+      replayDrawValueCell(175, 20 + yshift, 40, kReplayValueLineH, modeBuf, UI_WARN);
+      s_replayDisp.modeState = modeState;
+    }
+    if (fullRedraw || s_replayDisp.bitLength != receivedBitLength) {
+      replayDrawValueCell(50, 35 + yshift, 40, kReplayValueLineH, bitBuf, UI_WARN);
+      s_replayDisp.bitLength = receivedBitLength;
+    }
+    if (fullRedraw || s_replayDisp.rssi != rssi) {
+      replayDrawValueCell(170, 35 + yshift, 48, kReplayValueLineH, rssiBuf, UI_WARN);
+      s_replayDisp.rssi = rssi;
+    }
+    if (fullRedraw || s_replayDisp.protocol != receivedProtocol) {
+      replayDrawValueCell(170, 20 + yshift, 40, kReplayValueLineH, ptcBuf, UI_WARN);
+      s_replayDisp.protocol = receivedProtocol;
+    }
+    if (fullRedraw || s_replayDisp.value != receivedValue) {
+      replayDrawValueCell(50, 50 + yshift, 180, kReplayValueLineH, valBuf, UI_WARN);
+      s_replayDisp.value = receivedValue;
     }
 
-    tft.setCursor(5, 35 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Bit:");
-    tft.setTextColor(ORANGE);
-    tft.setCursor(50, 35 + yshift);
-    tft.printf("%d", receivedBitLength);
+    replayDrawStatusSeparator();
 
-    tft.setCursor(130, 35 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("RSSI:");
-    tft.setTextColor(ORANGE);
-    tft.setCursor(170, 35 + yshift);
-    tft.printf("%d", ELECHOUSE_cc1101.getRssi());
+    s_replayDisp.valid = true;
 
-    tft.setCursor(130, 20 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Ptc:");
-    tft.setTextColor(ORANGE);
-    tft.setCursor(170, 20 + yshift);
-    tft.printf("%d", receivedProtocol);
-
-    tft.setCursor(5, 50 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Val:");
-    tft.setTextColor(ORANGE);
-    tft.setCursor(50, 50 + yshift);
-    tft.print(receivedValue);
-
-    ELECHOUSE_cc1101.setSidle();
-    ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
-    ELECHOUSE_cc1101.SetRx();
+    if (!autoScanEnabled) {
+      ELECHOUSE_cc1101.setSidle();
+      ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
+      ELECHOUSE_cc1101.SetRx();
+    }
 }
 
 String getUserInputName() {
   OnScreenKeyboardConfig cfg;
   cfg.titleLine1     = "[!] Set a name for the saved profile.";
-  cfg.titleLine2     = "(max 15 chars)";
-  cfg.rows           = profileKeyboardRows;
-  cfg.rowCount       = 4;
+  cfg.titleLine2     = "(max 15 chars, ^ caps, # sym)";
+  osKeyboardUseStandardLayout(cfg);
   cfg.maxLen         = MAX_NAME_LENGTH - 1;
   cfg.shuffleNames   = randomNames;
   cfg.shuffleCount   = numRandomNames;
@@ -631,8 +982,11 @@ String getUserInputName() {
 
   if (!r.accepted) {
 
-    tft.fillScreen(TFT_BLACK);
-    updateDisplay();
+    subghzClearBody(TFT_BLACK);
+    uiDrawn = false;
+    replayRestoreStatusPanel();
+    runUI();
+    subghzRedrawNavChrome();
   }
   return r.text;
 }
@@ -644,7 +998,7 @@ void sendSignal() {
     mySwitch.enableTransmit(REPLAY_TX_PIN);
     ELECHOUSE_cc1101.SetTx();
 
-    tft.fillRect(0,40,240,37, TFT_BLACK);
+    tft.fillRect(0, 40, 240, kReplayStatusLineY - 40, TFT_BLACK);
 
     tft.setCursor(10, 30 + yshift);
     tft.print("Sending...");
@@ -655,7 +1009,7 @@ void sendSignal() {
     mySwitch.send(receivedValue, receivedBitLength);
 
     delay(500);
-    tft.fillRect(0,40,240,37, TFT_BLACK);
+    tft.fillRect(0, 40, 240, kReplayStatusLineY - 40, TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.print("Done!");
 
@@ -665,10 +1019,15 @@ void sendSignal() {
     mySwitch.enableReceive(REPLAY_RX_PIN);
 
     delay(500);
-    updateDisplay();
+    replayRestoreStatusPanel();
 }
 
 void do_sampling() {
+  constexpr unsigned int kGraphYOffset = 81;
+  const int plotY = (int)epochSUB + (int)kGraphYOffset;
+  if (plotY >= subghzContentBottom()) {
+    return;
+  }
 
   micro_s = micros();
 
@@ -703,7 +1062,7 @@ for (int i = 0; i < samplesSUB; i++) {
   FFTSUB.ComplexToMagnitude(vRealSUB, vImagSUB, samplesSUB);
 
 unsigned int left_x = 120;
-unsigned int graph_y_offset = 81;
+unsigned int graph_y_offset = kGraphYOffset;
 int max_k = 0;
 
 for (int j = 0; j < samplesSUB >> 1; j++) {
@@ -754,19 +1113,28 @@ void saveProfile() {
 
             syncCurrentProfilesToSD(nullptr);
         } else {
-            tft.fillScreen(TFT_BLACK);
+            subghzClearBody(TFT_BLACK);
+            tft.setTextSize(1);
             tft.setCursor(10, 30 + yshift);
-            tft.setTextColor(UI_WARN);
+            tft.setTextColor(UI_WARN, TFT_BLACK);
             tft.print("Storage full!");
             tft.setCursor(10, 45 + yshift);
-            tft.setTextColor(TFT_WHITE);
+            tft.setTextColor(UI_TEXT, TFT_BLACK);
             tft.print("Insert SD / export fail");
             tft.setCursor(10, 60 + yshift);
             tft.print(err);
-            delay(2000);
-            updateDisplay();
+            uiDrawn = false;
+            runUI();
+            subghzRedrawNavChrome();
+            if (!subghzWaitWithNav(2000)) {
+              return;
+            }
+            replayRestoreStatusPanel();
             float currentBatteryVoltage = readBatteryVoltage();
             drawStatusBar(currentBatteryVoltage, true);
+            uiDrawn = false;
+            runUI();
+            subghzRedrawNavChrome();
             return;
         }
     }
@@ -796,7 +1164,7 @@ void saveProfile() {
 
         syncCurrentProfilesToSD(nullptr);
 
-        tft.fillScreen(TFT_BLACK);
+        subghzClearBody(TFT_BLACK);
         tft.setCursor(10, 30 + yshift);
         tft.print("Profile saved!");
         tft.setCursor(10, 40 + yshift);
@@ -807,15 +1175,25 @@ void saveProfile() {
         tft.println(profileCount);
 
     } else {
-        tft.fillScreen(TFT_BLACK);
+        subghzClearBody(TFT_BLACK);
+        tft.setTextSize(1);
         tft.setCursor(10, 30 + yshift);
+        tft.setTextColor(UI_TEXT, TFT_BLACK);
         tft.print("Profile storage full!");
     }
 
-    delay(2000);
-    updateDisplay();
+    uiDrawn = false;
+    runUI();
+    subghzRedrawNavChrome();
+    if (!subghzWaitWithNav(2000)) {
+      return;
+    }
+    replayRestoreStatusPanel();
     float currentBatteryVoltage = readBatteryVoltage();
     drawStatusBar(currentBatteryVoltage, true);
+    uiDrawn = false;
+    runUI();
+    subghzRedrawNavChrome();
 }
 
 void loadProfileCount() {
@@ -843,15 +1221,15 @@ void runUI() {
     };
 
     if (!uiDrawn) {
-        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
 
         for (int i = 0; i < ICON_NUM; i++) {
             if (icons[i] != NULL) {
-                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, UI_ICON);
             }
         }
-        tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
+        tft.drawFastHLine(0, 19, 240, UI_LINE);
+        tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, 240, UI_LINE);
         uiDrawn = true;
     }
 
@@ -861,7 +1239,7 @@ void runUI() {
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
         if (animationState == 1) {
-            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, UI_ICON);
             animationState = 2;
 
             switch (activeIcon) {
@@ -885,11 +1263,11 @@ void runUI() {
                     break;
                 case 4:
                     autoScanEnabled = !autoScanEnabled;
-                    scanIndex = currentFrequencyIndex;
-                    lastHopMs = 0;
-                    lockUntilMs = 0;
-                    lastUiScanUpdateMs = 0;
-                    rssiHot = false;
+                    if (autoScanEnabled) {
+                      replayBeginAutoScan();
+                    } else {
+                      replayClearScanLock();
+                    }
                     updateDisplay();
                     break;
             }
@@ -932,10 +1310,14 @@ void runUI() {
 
 void ReplayAttackSetup() {
   Serial.begin(115200);
+  setTouchButtonInputEnabled(true);
+  subghzSetReplayNavLabels();
 
   ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 
   ELECHOUSE_cc1101.Init();
+  ELECHOUSE_cc1101.setModulation(2);
+  ELECHOUSE_cc1101.setRxBW(500.0);
 
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
 
@@ -957,15 +1339,21 @@ void ReplayAttackSetup() {
   if (currentFrequencyIndex >= freqCount) currentFrequencyIndex = 0;
 
   tuneToIndex(currentFrequencyIndex, false);
+  mySwitch.setReceiveTolerance(replayFreqIsLowBand(currentFrequencyIndex) ? 50 : 40);
 
-    tft.fillScreen(TFT_BLACK);
-  tft.setRotation(2);
+  subghzClearBody(TFT_BLACK);
+  tft.setRotation(TFT_ROTATION);
 
+  drawStatusBar(readBatteryVoltage(), true);
+  subghzRedrawNavChrome();
+
+#if HAS_PCF8574_BUTTONS
   pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
   pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
   pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
+#endif
 
   sampling_period = round(1000000*(1.0/FrequencySUB));
 
@@ -990,30 +1378,39 @@ void ReplayAttackSetup() {
     blue[i] = i - 96;
   }
 
-   float currentBatteryVoltage = readBatteryVoltage();
-   drawStatusBar(currentBatteryVoltage, true);
+   replayInvalidateDisplay();
    updateDisplay();
    uiDrawn = false;
+   subghzRedrawNavChrome();
 
 }
 
 void ReplayAttackLoop() {
 
-    if (feature_active && isButtonPressed(BTN_SELECT)) {
+    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
         feature_exit_requested = true;
         return;
     }
 
+    maintainTouchNavBar();
     runUI();
+    if (uiDrawn) {
+      tft.drawFastHLine(0, 19, 240, UI_LINE);
+      tft.drawFastHLine(0, 36, 240, UI_LINE);
+      if (s_replayDisp.valid) {
+        replayDrawStatusSeparator();
+      }
+    }
+    replayHandleNavButtons();
 
     static unsigned long lastDebounceTime = 0;
     const unsigned long debounceDelay = 200;
 
     static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
-    const bool leftPressed  = isButtonPressed(BTN_LEFT);
-    const bool rightPressed = isButtonPressed(BTN_RIGHT);
-    const bool upPressed    = isButtonPressed(BTN_UP);
-    const bool downPressed  = isButtonPressed(BTN_DOWN);
+    const bool leftPressed  = isPhysicalButtonPressed(BTN_LEFT);
+    const bool rightPressed = isPhysicalButtonPressed(BTN_RIGHT);
+    const bool upPressed    = isPhysicalButtonPressed(BTN_UP);
+    const bool downPressed  = isPhysicalButtonPressed(BTN_DOWN);
 
     replayBeepPoll();
 
@@ -1024,22 +1421,26 @@ void ReplayAttackLoop() {
         if (act == NotificationAction::Save) {
           notifActive = false;
 
-          tft.fillScreen(TFT_BLACK);
+          subghzClearBody(TFT_BLACK);
           uiDrawn = false;
+          replayInvalidateDisplay();
           float v = readBatteryVoltage();
           drawStatusBar(v, true);
           runUI();
           updateDisplay();
+          subghzRedrawNavChrome();
 
           autoScanEnabled = false;
           saveProfile();
 
-          tft.fillScreen(TFT_BLACK);
+          subghzClearBody(TFT_BLACK);
           uiDrawn = false;
+          replayInvalidateDisplay();
           v = readBatteryVoltage();
           drawStatusBar(v, true);
           runUI();
           updateDisplay();
+          subghzRedrawNavChrome();
         } else if (act == NotificationAction::Ok || act == NotificationAction::Close) {
           notifActive = false;
 
@@ -1048,12 +1449,14 @@ void ReplayAttackLoop() {
           lockUntilMs = millis() + 1500;
           rssiHot = true;
 
-          tft.fillScreen(TFT_BLACK);
+          subghzClearBody(TFT_BLACK);
           uiDrawn = false;
+          replayInvalidateDisplay();
           float v = readBatteryVoltage();
           drawStatusBar(v, true);
           runUI();
           updateDisplay();
+          subghzRedrawNavChrome();
         }
       }
 
@@ -1061,47 +1464,32 @@ void ReplayAttackLoop() {
     } else if (notifActive && !isNotificationVisible()) {
 
       notifActive = false;
-      tft.fillScreen(TFT_BLACK);
+      subghzClearBody(TFT_BLACK);
       uiDrawn = false;
+      replayInvalidateDisplay();
       float v = readBatteryVoltage();
       drawStatusBar(v, true);
       runUI();
       updateDisplay();
+      subghzRedrawNavChrome();
     }
 
     if (rightPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
-        autoScanEnabled = false;
-        lockUntilMs = 0;
-        rssiHot = false;
-        tuneToIndex((uint16_t)((currentFrequencyIndex + 1) % freqCount()), true);
-        updateDisplay();
+        replayFreqNext();
         lastDebounceTime = millis();
     }
     if (leftPressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
-        autoScanEnabled = false;
-        lockUntilMs = 0;
-        rssiHot = false;
-        tuneToIndex((uint16_t)((currentFrequencyIndex + freqCount() - 1) % freqCount()), true);
-        updateDisplay();
+        replayFreqPrev();
         lastDebounceTime = millis();
     }
     if (upPressed && !prevUp && receivedValue != 0 && millis() - lastDebounceTime > debounceDelay) {
-
         autoScanEnabled = false;
-        lockUntilMs = 0;
-        rssiHot = false;
+        replayClearScanLock();
         sendSignal();
         lastDebounceTime = millis();
     }
     if (downPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
-
-        autoScanEnabled = !autoScanEnabled;
-        scanIndex = currentFrequencyIndex;
-        lastHopMs = 0;
-        lockUntilMs = 0;
-        lastUiScanUpdateMs = 0;
-        rssiHot = false;
-        updateDisplay();
+        replayTrySave();
         lastDebounceTime = millis();
     }
 
@@ -1111,38 +1499,29 @@ void ReplayAttackLoop() {
     prevDown = downPressed;
 
     if (autoScanEnabled) {
-      uint32_t now = millis();
-      if (lockUntilMs != 0 && (int32_t)(now - lockUntilMs) < 0) {
+      const uint32_t now = millis();
+      const bool scanLocked = (lockUntilMs != 0 && (int32_t)(now - lockUntilMs) < 0);
 
-      } else {
+      if (!scanLocked &&
+          (lastHopMs == 0 || (now - lastHopMs) >= replayScanDwellMs())) {
+        const uint16_t fromIdx = currentFrequencyIndex;
+        scanIndex = (uint16_t)((scanIndex + 1) % freqCount());
+        replayScanHopTo(scanIndex, fromIdx);
+        lastHopMs = now;
+        rssiHot = false;
+      }
 
-        if (lastHopMs == 0 || (now - lastHopMs) >= SCAN_DWELL_MS) {
-          scanIndex = (uint16_t)((scanIndex + 1) % freqCount());
+      replaySampleRssiForScan(now);
 
-          tuneToIndex(scanIndex, false);
-          lastHopMs = now;
-
-          int rssi = ELECHOUSE_cc1101.getRssi();
-          if (!rssiHot && rssi > RSSI_DETECT_THRESHOLD) {
-            rssiHot = true;
-            lockUntilMs = now + RSSI_LOCK_MS;
-
-            EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
-            EEPROM.commit();
-            replayShowDetectNotice("RSSI", rssi);
-          } else if (rssiHot && rssi < RSSI_CLEAR_THRESHOLD) {
-            rssiHot = false;
-          }
-
-          if (lastUiScanUpdateMs == 0 || (now - lastUiScanUpdateMs) >= UI_SCAN_UPDATE_MS) {
-            updateDisplay();
-            lastUiScanUpdateMs = now;
-          }
-        }
+      if (lastUiScanUpdateMs == 0 || (now - lastUiScanUpdateMs) >= UI_SCAN_UPDATE_MS) {
+        updateDisplay();
+        lastUiScanUpdateMs = now;
       }
     }
 
-    do_sampling();
+    if (!autoScanEnabled) {
+      do_sampling();
+    }
     delay(10);
     epochSUB++;
 
@@ -1150,33 +1529,49 @@ void ReplayAttackLoop() {
       epochSUB = 0;
 
     if (mySwitch.available()) {
-        receivedValue = mySwitch.getReceivedValue();
-        receivedBitLength = mySwitch.getReceivedBitlength();
-        receivedProtocol = mySwitch.getReceivedProtocol();
-
-        EEPROM.put(ADDR_VALUE, receivedValue);
-        EEPROM.put(ADDR_BITLEN, receivedBitLength);
-        EEPROM.put(ADDR_PROTO, receivedProtocol);
-        EEPROM.commit();
-
-        updateDisplay();
-
-        if (autoScanEnabled) {
-          lockUntilMs = millis() + LOCK_HOLD_MS;
-          scanIndex = currentFrequencyIndex;
-          rssiHot = false;
-
-          EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
-          EEPROM.commit();
-          replayShowDetectNotice("DECODE", ELECHOUSE_cc1101.getRssi());
-        }
+        const uint32_t val = mySwitch.getReceivedValue();
+        const uint16_t bits = mySwitch.getReceivedBitlength();
+        const uint16_t proto = mySwitch.getReceivedProtocol();
         mySwitch.resetAvailable();
+
+        const uint32_t now = millis();
+        const bool validDecode = replayLooksLikeRealDecode(val, bits, proto) &&
+            (!autoScanEnabled || replayAutoScanReadyForDecode(now));
+
+        if (validDecode) {
+          receivedValue = val;
+          receivedBitLength = bits;
+          receivedProtocol = proto;
+
+          EEPROM.put(ADDR_VALUE, receivedValue);
+          EEPROM.put(ADDR_BITLEN, receivedBitLength);
+          EEPROM.put(ADDR_PROTO, receivedProtocol);
+          EEPROM.commit();
+
+          updateDisplay();
+
+          if (autoScanEnabled) {
+            lockUntilMs = now + LOCK_HOLD_MS;
+            scanIndex = currentFrequencyIndex;
+            rssiHot = false;
+            rssiDetectStreak = 0;
+
+            EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+            EEPROM.commit();
+            replayShowDetectNotice("DECODE", ELECHOUSE_cc1101.getRssi());
+          }
+        }
     }
 
   }
 }
 
 namespace SavedProfile {
+
+void updateDisplay();
+void runUI();
+void transmitProfile(int index);
+void deleteProfile(int index);
 
 static bool uiDrawn = false;
 
@@ -1215,23 +1610,62 @@ static Profile selectedProfile{};
 static bool selectedValid = false;
 
 static constexpr uint8_t ITEMS_PER_PAGE = 7;
-static constexpr int LIST_X = 6;
-static constexpr int LIST_W = 228;
+static constexpr int PROFILE_PAD_X = 10;
+static constexpr int LIST_X = PROFILE_PAD_X;
+static constexpr int LIST_W = 220;
 
-static constexpr int LIST_Y = 64;
+static constexpr int PROFILE_HEADER_Y = 50;
+static constexpr int PROFILE_HEADER_H = 14;
+static constexpr int LIST_Y = PROFILE_HEADER_Y + PROFILE_HEADER_H + 2;
 static constexpr int ROW_H  = 18;
-static constexpr int BOT_H = 32;
-static constexpr int BOT_Y = 320 - BOT_H;
+static constexpr int PROFILE_LINE_H = 14;
+static constexpr int PROFILE_LINE_GAP = 3;
+static constexpr int PROFILE_LINE_STEP = PROFILE_LINE_H + PROFILE_LINE_GAP;
+static constexpr int PROFILE_INFO_LINES = 4;
+static constexpr int PROFILE_INFO_CONTENT_H =
+    PROFILE_LINE_STEP * (PROFILE_INFO_LINES - 1) + PROFILE_LINE_H;
+static constexpr int PROFILE_LABEL_X = PROFILE_PAD_X;
+static constexpr int PROFILE_VALUE_X = 50;
+static constexpr int PROFILE_COL2_LABEL_X = 130;
+static constexpr int PROFILE_COL2_VALUE_X = 165;
 
 static constexpr int UI_GAP_Y = 6;
-static constexpr int DETAILS_H = (BOT_Y - (LIST_Y + (ITEMS_PER_PAGE * ROW_H)) - (2 * UI_GAP_Y));
-static constexpr int DETAILS_Y = BOT_Y - UI_GAP_Y - DETAILS_H;
-static constexpr int BOT_GAP = 8;
-static constexpr int BOT_BTN_W = (240 - 10 - 10 - BOT_GAP) / 2;
-static constexpr int BOT_BTN_H = 24;
-static constexpr int BOT_BTN_Y = BOT_Y + 4;
-static constexpr int BOT_TX_X  = 10;
-static constexpr int BOT_DEL_X = BOT_TX_X + BOT_BTN_W + BOT_GAP;
+
+static int profileBottomY() {
+  return subghzContentBottom();
+}
+
+static int profileListBottom() {
+  return LIST_Y + (ITEMS_PER_PAGE * ROW_H);
+}
+
+static int profileDetailsY() {
+  const int areaTop = profileListBottom();
+  const int areaBottom = profileBottomY();
+  const int areaH = areaBottom - areaTop;
+  if (areaH <= PROFILE_INFO_CONTENT_H) {
+    return areaTop + UI_GAP_Y;
+  }
+  return areaTop + (areaH - PROFILE_INFO_CONTENT_H) / 2;
+}
+
+static void profileClearContentArea(uint16_t color = TFT_BLACK) {
+  const int top = 40;
+  const int h = subghzContentBottom() - top;
+  if (h > 0) {
+    tft.fillRect(0, top, 240, h, color);
+  }
+}
+
+static void profileRestoreChrome() {
+  drawStatusBar(readBatteryVoltage(), true);
+  uiDrawn = false;
+  updateDisplay();
+  runUI();
+  subghzRedrawNavChrome();
+}
+
+static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw = false);
 
 static uint16_t cachedPageStart = 0xFFFF;
 static SubGhzProfile cachedPage[ITEMS_PER_PAGE]{};
@@ -1240,19 +1674,6 @@ static bool cacheDirty = true;
 
 static bool deleteArmed = false;
 static uint32_t deleteArmUntilMs = 0;
-
-static void drawBottomButtons() {
-
-  tft.fillRect(0, BOT_Y, 240, BOT_H, TFT_BLACK);
-
-  FeatureUI::drawButtonRect(BOT_TX_X, BOT_BTN_Y, BOT_BTN_W, BOT_BTN_H,
-                            "Transmit", FeatureUI::ButtonStyle::Primary);
-
-  const bool armed = deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0;
-  const char* delLabel = armed ? "Delete?" : "Delete";
-  FeatureUI::drawButtonRect(BOT_DEL_X, BOT_BTN_Y, BOT_BTN_W, BOT_BTN_H,
-                            delLabel, FeatureUI::ButtonStyle::Danger);
-}
 
 static void refreshSdIndex(bool keepSelection = true) {
     uint16_t oldIdx = currentProfileIndex;
@@ -1324,12 +1745,70 @@ static void ensurePageCache() {
 }
 
 static void drawHeaderLine() {
-
-  int hy = 30 + yshift;
-  tft.fillRect(0, hy, 240, 14, TFT_BLACK);
-  tft.setCursor(10, hy);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  const int hy = PROFILE_HEADER_Y;
+  tft.fillRect(LIST_X, hy, LIST_W, PROFILE_HEADER_H, TFT_BLACK);
+  tft.setTextColor(UI_WARN, TFT_BLACK);
+  tft.setCursor(LIST_X, hy);
   tft.printf("Profile %d/%d", (int)currentProfileIndex + 1, (int)sdTotalProfiles);
+}
+
+static void profileSelectNext() {
+  if (sdTotalProfiles == 0) {
+    return;
+  }
+  uint16_t oldIdx = currentProfileIndex;
+  currentProfileIndex = (uint16_t)((currentProfileIndex + 1) % sdTotalProfiles);
+  selectedValid = false;
+  updateSelectionUI(oldIdx, false);
+}
+
+static void profileSelectPrev() {
+  if (sdTotalProfiles == 0) {
+    return;
+  }
+  uint16_t oldIdx = currentProfileIndex;
+  currentProfileIndex = (uint16_t)((currentProfileIndex + sdTotalProfiles - 1) % sdTotalProfiles);
+  selectedValid = false;
+  updateSelectionUI(oldIdx, false);
+}
+
+static void profileRefreshSd() {
+  refreshSdIndex(true);
+  selectedValid = false;
+  cacheDirty = true;
+  deleteArmed = false;
+  updateDisplay();
+}
+
+void profileHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+
+  if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+    profileSelectPrev();
+    subghzWaitNavRelease(BTN_UP);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    profileSelectNext();
+    subghzWaitNavRelease(BTN_DOWN);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    if (sdTotalProfiles > 0) {
+      transmitProfile(currentProfileIndex);
+    }
+    subghzWaitNavRelease(BTN_RIGHT);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (sdTotalProfiles > 0) {
+      deleteProfile(currentProfileIndex);
+    }
+    subghzWaitNavRelease(BTN_LEFT);
+  }
 }
 
 static void drawRow(uint16_t pageStart, uint8_t row) {
@@ -1340,7 +1819,7 @@ static void drawRow(uint16_t pageStart, uint8_t row) {
   int y = LIST_Y + (row * ROW_H);
 
   uint16_t bg = isSel ? DARK_GRAY : TFT_BLACK;
-  uint16_t fg = isSel ? TFT_WHITE : TFT_LIGHTGREY;
+  uint16_t fg = isSel ? UI_WARN : UI_DIM_TEXT;
   tft.fillRect(LIST_X, y, LIST_W, ROW_H - 1, bg);
   tft.setTextColor(fg, bg);
   tft.setCursor(LIST_X + 2, y + 4);
@@ -1377,48 +1856,75 @@ static void drawListPage(uint16_t pageStart) {
 }
 
 static void drawDetails() {
-
-  tft.fillRect(0, DETAILS_Y, 240, (DETAILS_H + UI_GAP_Y), TFT_BLACK);
+  const int detailsY = profileDetailsY();
+  const int gapTop = profileListBottom();
+  const int gapH = profileBottomY() - gapTop;
+  if (gapH > 0) {
+    tft.fillRect(LIST_X, gapTop, LIST_W, gapH, TFT_BLACK);
+  }
+  tft.drawFastHLine(LIST_X, profileListBottom(), LIST_W, UI_LINE);
 
   String err;
-  if (!selectedValid) loadSelectedFromSd(&err);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, DETAILS_Y);
   if (!selectedValid) {
-    tft.print("Read failed: ");
+    loadSelectedFromSd(&err);
+  }
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  if (!selectedValid) {
+    tft.setCursor(PROFILE_LABEL_X, detailsY);
+    tft.print("Read failed:");
+    tft.setCursor(PROFILE_VALUE_X, detailsY);
     tft.print(err);
     return;
   }
 
-  tft.print("Name: "); tft.print(selectedProfile.name);
-  tft.setCursor(10, DETAILS_Y + 14);
-  tft.printf("Freq: %.2f MHz  P:%d", selectedProfile.frequency / 1000000.0, selectedProfile.protocol);
-  tft.setCursor(10, DETAILS_Y + 28);
-  tft.printf("Val: %lu  Bit:%d", selectedProfile.value, selectedProfile.bitLength);
+  tft.setCursor(PROFILE_LABEL_X, detailsY);
+  tft.print("Name:");
+  tft.setCursor(PROFILE_VALUE_X, detailsY);
+  tft.print(selectedProfile.name);
 
-  tft.setCursor(10, DETAILS_Y + 42);
+  tft.setCursor(PROFILE_LABEL_X, detailsY + PROFILE_LINE_STEP);
+  tft.print("Freq:");
+  tft.setCursor(PROFILE_VALUE_X, detailsY + PROFILE_LINE_STEP);
+  tft.printf("%.2f MHz", selectedProfile.frequency / 1000000.0);
+  tft.setCursor(PROFILE_COL2_LABEL_X, detailsY + PROFILE_LINE_STEP);
+  tft.print("Ptc:");
+  tft.setCursor(PROFILE_COL2_VALUE_X, detailsY + PROFILE_LINE_STEP);
+  tft.print(selectedProfile.protocol);
+
+  tft.setCursor(PROFILE_LABEL_X, detailsY + (PROFILE_LINE_STEP * 2));
+  tft.print("Val:");
+  tft.setCursor(PROFILE_VALUE_X, detailsY + (PROFILE_LINE_STEP * 2));
+  tft.print((unsigned long)selectedProfile.value);
+  tft.setCursor(PROFILE_COL2_LABEL_X, detailsY + (PROFILE_LINE_STEP * 2));
+  tft.print("Bit:");
+  tft.setCursor(PROFILE_COL2_VALUE_X, detailsY + (PROFILE_LINE_STEP * 2));
+  tft.print(selectedProfile.bitLength);
+
   tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.setCursor(PROFILE_LABEL_X, detailsY + (PROFILE_LINE_STEP * 3));
+  tft.print("SRC:");
+  tft.setCursor(PROFILE_VALUE_X, detailsY + (PROFILE_LINE_STEP * 3));
   if (selectedPath.endsWith("profiles_current.bin")) {
-    tft.print("SRC: current");
+    tft.print("current");
   } else {
-    tft.print("SRC: ");
-    int slash = selectedPath.lastIndexOf('/');
+    const int slash = selectedPath.lastIndexOf('/');
     tft.print(slash >= 0 ? selectedPath.substring(slash + 1) : selectedPath);
   }
 
   if (deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0) {
-
-    int hintY = DETAILS_Y + 56;
-    if (hintY >= BOT_Y) hintY = BOT_Y - 12;
-    tft.setCursor(10, hintY);
+    int hintY = detailsY + (PROFILE_LINE_STEP * 4);
+    if (hintY >= profileBottomY() - 12) {
+      hintY = profileBottomY() - 12;
+    }
+    tft.setCursor(PROFILE_LABEL_X, hintY);
     tft.setTextColor(UI_WARN, TFT_BLACK);
-    tft.print("Press delete again to confirm");
+    tft.print("Press Delete again to confirm");
   }
-
-  drawBottomButtons();
 }
 
-static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw = false) {
+static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw) {
   if (sdTotalProfiles == 0) return;
   uint16_t oldPage = pageStartForIndex(oldIndex);
   uint16_t newPage = pageStartForIndex(currentProfileIndex);
@@ -1445,17 +1951,26 @@ static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw = false) {
 void updateDisplay() {
 
     tft.startWrite();
-    tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+    const int bodyH = subghzContentBottom() - 40;
+    if (bodyH > 0) {
+      tft.fillRect(0, 40, 240, bodyH, TFT_BLACK);
+    }
 
     if (sdTotalProfiles == 0) {
-        tft.setCursor(10, 35 + yshift);
-        tft.setTextColor(TFT_WHITE);
-        tft.print("No profiles on SD.");
+        tft.setTextSize(1);
+        tft.setCursor(PROFILE_LABEL_X, PROFILE_HEADER_Y + PROFILE_LINE_H);
+        tft.setTextColor(UI_TEXT, TFT_BLACK);
+        if (sdLastErr.indexOf("SD not mounted") >= 0) {
+          tft.print("SD card not inserted.");
+        } else {
+          tft.print("No profiles on SD.");
+        }
         if (sdLastErr.length()) {
-          tft.setCursor(10, 48 + yshift);
-          tft.setTextColor(UI_DIM_TEXT);
+          tft.setCursor(PROFILE_LABEL_X, PROFILE_HEADER_Y + (PROFILE_LINE_H * 2));
+          tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
           tft.print(sdLastErr);
         }
+        tft.endWrite();
         return;
     }
 
@@ -1480,7 +1995,7 @@ void transmitProfile(int index) {
     mySwitch.enableTransmit(SUBGHZ_TX_PIN);
     ELECHOUSE_cc1101.SetTx();
 
-    tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+    profileClearContentArea(TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.setTextColor(TFT_WHITE);
     tft.print("Sending ");
@@ -1494,7 +2009,7 @@ void transmitProfile(int index) {
     mySwitch.send(profileToSend.value, profileToSend.bitLength);
 
     delay(500);
-    tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+    profileClearContentArea(TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.print("Done!");
 
@@ -1504,7 +2019,7 @@ void transmitProfile(int index) {
     mySwitch.enableReceive(SUBGHZ_RX_PIN);
 
     delay(500);
-    updateDisplay();
+    profileRestoreChrome();
 }
 
 void loadProfileCount() {
@@ -1549,7 +2064,7 @@ void deleteProfile(int index) {
     deleteArmed = false;
 
     if (!deleteProfileFromFile(path, local, &err)) {
-      tft.fillRect(0, 40, 240, 280, TFT_BLACK);
+      profileClearContentArea(TFT_BLACK);
       tft.setCursor(10, 30 + yshift);
       tft.setTextColor(UI_WARN);
       tft.print("Delete FAILED");
@@ -1557,7 +2072,7 @@ void deleteProfile(int index) {
       tft.setTextColor(TFT_WHITE);
       tft.print(err);
       delay(1200);
-      updateDisplay();
+      profileRestoreChrome();
       return;
     }
 
@@ -1573,30 +2088,28 @@ void runUI() {
     #define STATUS_BAR_Y_OFFSET 20
     #define STATUS_BAR_HEIGHT 16
     #define ICON_SIZE 16
-    #define ICON_NUM 6
+    #define ICON_NUM 4
 
-    static int iconX[ICON_NUM] = {90, 130, 170, 210, 50, 10};
+    static int iconX[ICON_NUM] = {130, 170, 210, 10};
     static int iconY = STATUS_BAR_Y_OFFSET;
 
     static const unsigned char* icons[ICON_NUM] = {
-        bitmap_icon_sort_down_minus,
-        bitmap_icon_sort_up_plus,
         bitmap_icon_antenna,
         bitmap_icon_recycle,
-        bitmap_icon_sdcard,
+        bitmap_icon_undo,
         bitmap_icon_go_back
     };
 
     if (!uiDrawn) {
-        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
 
         for (int i = 0; i < ICON_NUM; i++) {
             if (icons[i] != NULL) {
-                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, UI_ICON);
             }
         }
-        tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
+        tft.drawFastHLine(0, 19, 240, UI_LINE);
+        tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, 240, UI_LINE);
         uiDrawn = true;
     }
 
@@ -1606,42 +2119,21 @@ void runUI() {
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
         if (animationState == 1) {
-            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, UI_ICON);
             animationState = 2;
 
             switch (activeIcon) {
                 case 0:
                     if (sdTotalProfiles > 0) {
-                        uint16_t oldIdx = currentProfileIndex;
-                        currentProfileIndex = (uint16_t)((currentProfileIndex + 1) % sdTotalProfiles);
-                        selectedValid = false;
-                        cacheDirty = true;
-                        deleteArmed = false;
-
-                        updateSelectionUI(oldIdx, false);
+                        transmitProfile(currentProfileIndex);
                     }
                     break;
                 case 1:
                     if (sdTotalProfiles > 0) {
-                        uint16_t oldIdx = currentProfileIndex;
-                        currentProfileIndex = (uint16_t)((currentProfileIndex + sdTotalProfiles - 1) % sdTotalProfiles);
-                        selectedValid = false;
-                        cacheDirty = true;
-                        deleteArmed = false;
-                        updateSelectionUI(oldIdx, false);
-                    }
-                    break;
-                case 2:
-                    if (sdTotalProfiles > 0) {
-                        transmitProfile(currentProfileIndex);
-                    }
-                    break;
-                case 3:
-                    if (sdTotalProfiles > 0) {
                         deleteProfile(currentProfileIndex);
                     }
                     break;
-                case 4: {
+                case 2: {
                     refreshSdIndex(true);
                     selectedValid = false;
                     cacheDirty = true;
@@ -1663,17 +2155,6 @@ void runUI() {
     if (millis() - lastTouchCheck >= touchCheckInterval) {
         int x, y;
         if (feature_active && readTouchXY(x, y)) {
-
-            if (y >= BOT_Y && y < (BOT_Y + BOT_H)) {
-              if (x >= BOT_TX_X && x < (BOT_TX_X + BOT_BTN_W)) {
-                if (sdTotalProfiles > 0) transmitProfile(currentProfileIndex);
-              } else if (x >= BOT_DEL_X && x < (BOT_DEL_X + BOT_BTN_W)) {
-                if (sdTotalProfiles > 0) deleteProfile(currentProfileIndex);
-              }
-              lastTouchCheck = millis();
-              return;
-            }
-
             if (y >= LIST_Y && y < (LIST_Y + (ITEMS_PER_PAGE * ROW_H)) && x >= LIST_X && x < (LIST_X + LIST_W)) {
               uint8_t row = (uint8_t)((y - LIST_Y) / ROW_H);
               uint16_t oldIdx = currentProfileIndex;
@@ -1692,7 +2173,7 @@ void runUI() {
                     if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
                         if (icons[i] != NULL && animationState == 0) {
 
-                            if (i == 5) {
+                            if (i == 3) {
                                 feature_exit_requested = true;
                             } else {
 
@@ -1713,6 +2194,8 @@ void runUI() {
 
 void saveSetup() {
     Serial.begin(115200);
+    setTouchButtonInputEnabled(true);
+    subghzSetProfileNavLabels();
 
     ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 
@@ -1720,19 +2203,22 @@ void saveSetup() {
     loadProfileCount();
     printProfiles();
 
+#if HAS_PCF8574_BUTTONS
     pcf.pinMode(BTN_UP, INPUT_PULLUP);
     pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
     pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
     pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
     pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
+#endif
 
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_WHITE);
+    subghzClearBody(TFT_BLACK);
+    tft.setTextColor(UI_TEXT);
 
     setupTouchscreen();
 
     float currentBatteryVoltage = readBatteryVoltage();
     drawStatusBar(currentBatteryVoltage, true);
+    subghzRedrawNavChrome();
     uiDrawn = false;
 
     ELECHOUSE_cc1101.Init();
@@ -1747,67 +2233,68 @@ void saveSetup() {
     cacheDirty = true;
     deleteArmed = false;
     updateDisplay();
+    uiDrawn = false;
+    runUI();
+    subghzRedrawNavChrome();
 }
 
 void saveLoop() {
 
-    if (feature_active && isButtonPressed(BTN_SELECT)) {
+    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
         feature_exit_requested = true;
         return;
     }
 
+    maintainTouchNavBar();
     runUI();
+    profileHandleNavButtons();
 
     static unsigned long lastDebounceTime = 0;
     const unsigned long debounceDelay = 200;
 
-    bool prevPressed    = isButtonPressed(BTN_UP);
-    bool nextPressed    = isButtonPressed(BTN_DOWN);
-    bool txPressed      = isButtonPressed(BTN_RIGHT);
-    bool refreshPressed = isButtonPressed(BTN_LEFT);
+    static bool prevUp = false;
+    static bool prevDown = false;
+    static bool prevRight = false;
+    static bool prevLeft = false;
+    const bool prevPressed    = isPhysicalButtonPressed(BTN_UP);
+    const bool nextPressed    = isPhysicalButtonPressed(BTN_DOWN);
+    const bool txPressed      = isPhysicalButtonPressed(BTN_RIGHT);
+    const bool deletePressed = isPhysicalButtonPressed(BTN_LEFT);
 
     if (sdTotalProfiles > 0) {
 
-        if (nextPressed && millis() - lastDebounceTime > debounceDelay) {
-            uint16_t oldIdx = currentProfileIndex;
-            currentProfileIndex = (uint16_t)((currentProfileIndex + 1) % sdTotalProfiles);
-            selectedValid = false;
-            updateSelectionUI(oldIdx, false);
+        if (nextPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
+            profileSelectNext();
             lastDebounceTime = millis();
         }
 
-        if (prevPressed && millis() - lastDebounceTime > debounceDelay) {
-            uint16_t oldIdx = currentProfileIndex;
-            currentProfileIndex = (uint16_t)((currentProfileIndex + sdTotalProfiles - 1) % sdTotalProfiles);
-            selectedValid = false;
-            updateSelectionUI(oldIdx, false);
+        if (prevPressed && !prevUp && millis() - lastDebounceTime > debounceDelay) {
+            profileSelectPrev();
             lastDebounceTime = millis();
         }
 
-        if (txPressed && millis() - lastDebounceTime > debounceDelay) {
+        if (txPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
             transmitProfile(currentProfileIndex);
             lastDebounceTime = millis();
         }
 
-        if (refreshPressed && millis() - lastDebounceTime > debounceDelay) {
-            refreshSdIndex(true);
-            selectedValid = false;
-            cacheDirty = true;
-            deleteArmed = false;
-            updateDisplay();
+        if (deletePressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
+            deleteProfile(currentProfileIndex);
             lastDebounceTime = millis();
         }
-    } else {
-
-        tft.setCursor(10, 50 + yshift);
-        tft.setTextColor(TFT_WHITE);
-        tft.print("No profiles on SD.");
     }
+
+    prevUp = prevPressed;
+    prevDown = nextPressed;
+    prevRight = txPressed;
+    prevLeft = deletePressed;
 }
 
 }
 
 namespace subjammer {
+
+void updateDisplay();
 
 static bool uiDrawn = false;
 
@@ -1829,64 +2316,260 @@ unsigned long lastSweepTime = 0;
 const unsigned long sweepInterval = 1000;
 
 static const uint32_t subghz_frequency_list[] = {
-    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,
-    390000000, 418000000, 433075000, 433420000, 433920000, 434420000,
-    434775000, 438900000, 868350000, 915000000, 925000000
+    300000000, 303875000, 304250000, 310000000, 314000000, 315000000,
+    318000000, 390000000, 418000000, 433075000, 433420000, 433920000,
+    434420000, 434775000, 438900000, 868350000, 915000000, 925000000
 };
 const int numFrequencies = sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]);
-int currentFrequencyIndex = 4;
+int currentFrequencyIndex = 5;
 float targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
 
+static constexpr int kJammerStatusLineY = 79;
+static constexpr int kJammerYSHIFT = 20;
+static constexpr int kJammerValueLineH = 11;
+static constexpr int kJammerProgressY = 60 + kJammerYSHIFT;
+
+static bool s_jammerStaticDrawn = false;
+
+struct JammerDisplayCache {
+  bool valid = false;
+  int freqMHz100 = -1;
+  bool autoMode = false;
+  bool continuousMode = false;
+  bool jammingRunning = false;
+  int progress = -1;
+  bool blinkOn = false;
+};
+
+static JammerDisplayCache s_jammerDisp;
+
+static void jammerInvalidateDisplay() {
+  s_jammerStaticDrawn = false;
+  s_jammerDisp = JammerDisplayCache{};
+}
+
+static void subjammerToggleJam() {
+  jammingRunning = !jammingRunning;
+  if (jammingRunning) {
+    Serial.println("Jamming started");
+    ELECHOUSE_cc1101.setMHZ(targetFrequency);
+    ELECHOUSE_cc1101.SetTx();
+  } else {
+    Serial.println("Jamming stopped");
+    ELECHOUSE_cc1101.setSidle();
+    digitalWrite(TX_PIN, LOW);
+  }
+  updateDisplay();
+  lastDebounceTime = millis();
+}
+
+static void subjammerFreqNext() {
+  if (autoMode) {
+    return;
+  }
+  currentFrequencyIndex = (currentFrequencyIndex + 1) % numFrequencies;
+  targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
+  ELECHOUSE_cc1101.setMHZ(targetFrequency);
+  updateDisplay();
+  lastDebounceTime = millis();
+}
+
+static void subjammerFreqPrev() {
+  if (autoMode) {
+    return;
+  }
+  currentFrequencyIndex = (currentFrequencyIndex - 1 + numFrequencies) % numFrequencies;
+  targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
+  ELECHOUSE_cc1101.setMHZ(targetFrequency);
+  updateDisplay();
+  lastDebounceTime = millis();
+}
+
+static void subjammerApplyFrequency() {
+  ELECHOUSE_cc1101.setMHZ(targetFrequency);
+  if (jammingRunning) {
+    ELECHOUSE_cc1101.SetTx();
+  } else {
+    ELECHOUSE_cc1101.setSidle();
+    digitalWrite(TX_PIN, LOW);
+  }
+}
+
+static void subjammerAutoSweepIfDue() {
+  if (!autoMode || millis() - lastSweepTime < sweepInterval) {
+    return;
+  }
+
+  currentFrequencyIndex = (currentFrequencyIndex + 1) % numFrequencies;
+  targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
+  subjammerApplyFrequency();
+  updateDisplay();
+  lastSweepTime = millis();
+}
+
+static void subjammerToggleAuto() {
+  autoMode = !autoMode;
+  Serial.print("Frequency mode: ");
+  Serial.println(autoMode ? "Automatic" : "Manual");
+  if (autoMode) {
+    currentFrequencyIndex = 0;
+    targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
+    lastSweepTime = millis();
+    subjammerApplyFrequency();
+    s_jammerDisp.freqMHz100 = -1;
+  }
+  updateDisplay();
+  lastDebounceTime = millis();
+}
+
+void subjammerHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+
+  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+    subjammerToggleJam();
+    subghzWaitNavRelease(BTN_UP);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    subjammerFreqPrev();
+    subghzWaitNavRelease(BTN_LEFT);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    subjammerFreqNext();
+    subghzWaitNavRelease(BTN_RIGHT);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    subjammerToggleAuto();
+    subghzWaitNavRelease(BTN_DOWN);
+  }
+}
+
+static void jammerDrawStatusSeparator() {
+  tft.drawFastHLine(0, kJammerStatusLineY, 240, UI_LINE);
+}
+
+static void jammerDrawValueCell(int x, int y, int w, int h, const String& text, uint16_t color) {
+  const int maxH = kJammerStatusLineY - y;
+  if (maxH <= 0) {
+    return;
+  }
+  const int clipH = min(h, maxH);
+  tft.fillRect(x, y, w, clipH, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(x, y);
+  tft.print(text);
+}
+
+static void jammerDrawStaticChrome() {
+  if (s_jammerStaticDrawn) {
+    return;
+  }
+
+  const int bodyBottom = subghzContentBottom();
+  const int bodyH = min(kJammerStatusLineY - 40, bodyBottom - 40);
+  if (bodyH > 0) {
+    tft.fillRect(0, 40, 240, bodyH, TFT_BLACK);
+  }
+  jammerDrawStatusSeparator();
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  tft.setCursor(5, 22 + kJammerYSHIFT);
+  tft.print("Freq:");
+  tft.setCursor(130, 22 + kJammerYSHIFT);
+  tft.print("Mode:");
+  tft.setCursor(5, 42 + kJammerYSHIFT);
+  tft.print("Status:");
+
+  s_jammerStaticDrawn = true;
+}
+
+static void jammerDrawProgressBar(int progress) {
+  tft.fillRect(0, kJammerProgressY, 240, 4, TFT_BLACK);
+  if (progress > 0) {
+    tft.fillRect(0, kJammerProgressY, progress, 4, UI_WARN);
+  }
+}
+
+static void jammerDrawBlinkDot(bool on) {
+  const int cx = 220;
+  const int cy = 22 + kJammerYSHIFT;
+  const int r = 2;
+  if (on) {
+    tft.fillCircle(cx, cy, r, UI_WARN);
+  } else {
+    tft.fillRect(cx - r, cy - r, r * 2 + 1, r * 2 + 1, TFT_BLACK);
+  }
+}
+
+static void jammerPollBlinkIndicator() {
+  const bool wantBlink = autoMode && jammingRunning;
+  const bool blinkOn = wantBlink && ((millis() % 1000) < 500);
+  if (!s_jammerDisp.valid) {
+    return;
+  }
+  if (blinkOn != s_jammerDisp.blinkOn) {
+    jammerDrawBlinkDot(blinkOn);
+    s_jammerDisp.blinkOn = blinkOn;
+  }
+}
+
 void updateDisplay() {
+    jammerDrawStaticChrome();
 
-    int yshift = 20;
+    char freqBuf[20];
+    char modeBuf[8];
+    char statusBuf[8];
 
-    tft.fillRect(0, 40, 240, 80, TFT_BLACK);
-    tft.drawLine(0, 79, 235, 79, TFT_WHITE);
-
-    tft.setTextSize(1);
-    tft.setCursor(5, 22 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Freq:");
-    tft.setCursor(40, 22 + yshift);
     if (autoMode) {
-        tft.setTextColor(ORANGE);
-        tft.print("Auto: ");
-        tft.setTextColor(TFT_WHITE);
-        tft.print(targetFrequency, 1);
-
-        int progress = ::map(currentFrequencyIndex, 0, numFrequencies - 1, 0, 240);
-        tft.fillRect(0, 60 + yshift, 240, 4, TFT_BLACK);
-        tft.fillRect(0, 60 + yshift, progress, 4, ORANGE);
-
-        if (jammingRunning && millis() % 1000 < 500) {
-            tft.fillCircle(220, 22 + yshift, 2, TFT_GREEN);
-        }
+      snprintf(freqBuf, sizeof(freqBuf), "Auto:%.1f", targetFrequency);
     } else {
-        tft.setTextColor(TFT_WHITE);
-        tft.print(targetFrequency, 2);
-        tft.print(" MHz");
+      snprintf(freqBuf, sizeof(freqBuf), "%.2f MHz", targetFrequency);
+    }
+    snprintf(modeBuf, sizeof(modeBuf), "%s", continuousMode ? "Cont" : "Noise");
+    snprintf(statusBuf, sizeof(statusBuf), "%s", jammingRunning ? "Jamming" : "Idle   ");
+
+    const int freqKey = (int)(targetFrequency * 100.0f + 0.5f);
+    const bool fullRedraw = !s_jammerDisp.valid;
+    if (fullRedraw || s_jammerDisp.freqMHz100 != freqKey ||
+        s_jammerDisp.autoMode != autoMode) {
+      jammerDrawValueCell(40, 22 + kJammerYSHIFT, 96, kJammerValueLineH, freqBuf,
+                          autoMode ? UI_WARN : UI_TEXT);
+      s_jammerDisp.freqMHz100 = freqKey;
+      s_jammerDisp.autoMode = autoMode;
     }
 
-    tft.setCursor(130, 22 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Mode:");
-    tft.setCursor(165, 22 + yshift);
-    tft.setTextColor(continuousMode ? TFT_GREEN : TFT_YELLOW);
-    tft.print(continuousMode ? "Cont" : "Noise");
-
-    tft.setCursor(5, 42 + yshift);
-    tft.setTextColor(WHITE);
-    tft.print("Status:");
-    tft.setCursor(50, 42 + yshift);
-    if (jammingRunning) {
-        tft.setTextColor(UI_WARN);
-        tft.print("Jamming");
-
-    } else {
-        tft.setTextColor(TFT_GREEN);
-        tft.print("Idle   ");
+    if (fullRedraw || s_jammerDisp.continuousMode != continuousMode) {
+      jammerDrawValueCell(165, 22 + kJammerYSHIFT, 40, kJammerValueLineH, modeBuf,
+                          continuousMode ? UI_WARN : UI_TEXT);
+      s_jammerDisp.continuousMode = continuousMode;
     }
+
+    if (fullRedraw || s_jammerDisp.jammingRunning != jammingRunning) {
+      jammerDrawValueCell(50, 42 + kJammerYSHIFT, 72, kJammerValueLineH, statusBuf,
+                          jammingRunning ? UI_WARN : UI_TEXT);
+      s_jammerDisp.jammingRunning = jammingRunning;
+    }
+
+    if (autoMode) {
+      const int progress = ::map(currentFrequencyIndex, 0, numFrequencies - 1, 0, 240);
+      if (fullRedraw || s_jammerDisp.progress != progress) {
+        jammerDrawProgressBar(progress);
+        s_jammerDisp.progress = progress;
+      }
+    } else if (s_jammerDisp.progress != -1) {
+      jammerDrawProgressBar(0);
+      s_jammerDisp.progress = -1;
+      if (s_jammerDisp.blinkOn) {
+        jammerDrawBlinkDot(false);
+        s_jammerDisp.blinkOn = false;
+      }
+    }
+
+    jammerDrawStatusSeparator();
+    s_jammerDisp.valid = true;
 }
 
 void runUI() {
@@ -1910,15 +2593,15 @@ void runUI() {
     };
 
     if (!uiDrawn) {
-        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
         tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
 
         for (int i = 0; i < ICON_NUM; i++) {
             if (icons[i] != NULL) {
-                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, UI_ICON);
             }
         }
-        tft.drawLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, ORANGE);
+        tft.drawFastHLine(0, 19, 240, UI_LINE);
+        tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, 240, UI_LINE);
         uiDrawn = true;
     }
 
@@ -1928,7 +2611,7 @@ void runUI() {
 
     if (animationState > 0 && millis() - lastAnimationTime >= 150) {
         if (animationState == 1) {
-            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+            tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, UI_ICON);
             animationState = 2;
 
             switch (activeIcon) {
@@ -1960,7 +2643,9 @@ void runUI() {
                   if (autoMode) {
                       currentFrequencyIndex = 0;
                       targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
-                      ELECHOUSE_cc1101.setMHZ(targetFrequency);
+                      lastSweepTime = millis();
+                      subjammerApplyFrequency();
+                      s_jammerDisp.freqMHz100 = -1;
                   }
                   updateDisplay();
                   lastDebounceTime = millis();
@@ -2028,6 +2713,11 @@ void runUI() {
 
 void subjammerSetup() {
     Serial.begin(115200);
+    setTouchButtonInputEnabled(true);
+    subghzSetJammerNavLabels();
+    subghzClearBody(TFT_BLACK);
+    drawStatusBar(readBatteryVoltage(), true);
+    subghzRedrawNavChrome();
 
     ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 
@@ -2040,97 +2730,75 @@ void subjammerSetup() {
 
     randomSeed(analogRead(0));
 
+#if HAS_PCF8574_BUTTONS
     pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
     pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
     pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
     pcf.pinMode(BTN_UP, INPUT_PULLUP);
+#endif
     delay(100);
 
-    tft.fillScreen(TFT_BLACK);
+    subghzClearBody(TFT_BLACK);
+    drawStatusBar(readBatteryVoltage(), true);
 
     setupTouchscreen();
 
-   float currentBatteryVoltage = readBatteryVoltage();
-   drawStatusBar(currentBatteryVoltage, true);
+   jammerInvalidateDisplay();
    updateDisplay();
    uiDrawn = false;
+   subghzRedrawNavChrome();
 }
 
 void subjammerLoop() {
 
-    if (feature_active && isButtonPressed(BTN_SELECT)) {
+    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
         feature_exit_requested = true;
         return;
     }
 
+    maintainTouchNavBar();
     runUI();
+    if (uiDrawn) {
+      tft.drawFastHLine(0, 19, 240, UI_LINE);
+      tft.drawFastHLine(0, 36, 240, UI_LINE);
+      if (s_jammerDisp.valid) {
+        jammerDrawStatusSeparator();
+      }
+    }
+    jammerPollBlinkIndicator();
+    subjammerHandleNavButtons();
 
+#if HAS_PCF8574_BUTTONS
     int btnLeftState = pcf.digitalRead(JAM_BTN_LEFT);
     int btnRightState = pcf.digitalRead(JAM_BTN_RIGHT);
     int btnUpState = pcf.digitalRead(JAM_BTN_UP);
     int btnDownState = pcf.digitalRead(JAM_BTN_DOWN);
+#else
+    int btnLeftState = isPhysicalButtonPressed(BTN_LEFT) ? LOW : HIGH;
+    int btnRightState = isPhysicalButtonPressed(BTN_RIGHT) ? LOW : HIGH;
+    int btnUpState = isPhysicalButtonPressed(BTN_UP) ? LOW : HIGH;
+    int btnDownState = isPhysicalButtonPressed(BTN_DOWN) ? LOW : HIGH;
+#endif
 
     if (btnUpState == LOW && millis() - lastDebounceTime > debounceDelay) {
-        jammingRunning = !jammingRunning;
-        if (jammingRunning) {
-            Serial.println("Jamming started");
-            ELECHOUSE_cc1101.setMHZ(targetFrequency);
-            ELECHOUSE_cc1101.SetTx();
-        } else {
-            Serial.println("Jamming stopped");
-            ELECHOUSE_cc1101.setSidle();
-            digitalWrite(TX_PIN, LOW);
-        }
-        updateDisplay();
-        lastDebounceTime = millis();
+        subjammerToggleJam();
     }
 
     if (btnRightState == LOW && !autoMode && millis() - lastDebounceTime > debounceDelay) {
-        currentFrequencyIndex = (currentFrequencyIndex + 1) % numFrequencies;
-        targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
-        ELECHOUSE_cc1101.setMHZ(targetFrequency);
-        Serial.print("Switched to: ");
-        Serial.print(targetFrequency);
-        Serial.println(" MHz");
-        updateDisplay();
-        lastDebounceTime = millis();
+        subjammerFreqNext();
     }
 
     if (btnLeftState == LOW && !autoMode && millis() - lastDebounceTime > debounceDelay) {
-        continuousMode = !continuousMode;
-        Serial.print("Jamming mode: ");
-        Serial.println(continuousMode ? "Continuous Carrier" : "Noise");
-        updateDisplay();
-        lastDebounceTime = millis();
+        subjammerFreqPrev();
     }
 
     if (btnDownState == LOW && millis() - lastDebounceTime > debounceDelay) {
-        autoMode = !autoMode;
-        Serial.print("Frequency mode: ");
-        Serial.println(autoMode ? "Automatic" : "Manual");
-        if (autoMode) {
-            currentFrequencyIndex = 0;
-            targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
-            ELECHOUSE_cc1101.setMHZ(targetFrequency);
-        }
-        updateDisplay();
-        lastDebounceTime = millis();
+        subjammerToggleAuto();
     }
 
-    if (jammingRunning) {
-        if (autoMode) {
-            if (millis() - lastSweepTime >= sweepInterval) {
-                currentFrequencyIndex = (currentFrequencyIndex + 1) % numFrequencies;
-                targetFrequency = subghz_frequency_list[currentFrequencyIndex] / 1000000.0;
-                ELECHOUSE_cc1101.setMHZ(targetFrequency);
-                Serial.print("Sweeping: ");
-                Serial.print(targetFrequency);
-                Serial.println(" MHz");
-                updateDisplay();
-                lastSweepTime = millis();
-            }
-        }
+    subjammerAutoSweepIfDue();
 
+    if (jammingRunning) {
         ELECHOUSE_cc1101.SetTx();
 
         if (continuousMode) {

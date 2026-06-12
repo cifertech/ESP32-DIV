@@ -3,11 +3,16 @@
 
 #include <Arduino.h>
 
+/** Rows in the standard on-screen layout (set cfg.rows = nullptr to use it). */
+#define OS_KEYBOARD_ROW_COUNT 4
+
 struct OnScreenKeyboardConfig {
 
   const char* titleLine1;
   const char* titleLine2;
 
+  /** When null, the built-in standard layout (lower / upper / symbols) is used.
+   *  ^ toggles uppercase; # toggles the symbol layer. */
   const char* const* rows;
   uint8_t rowCount;
 
@@ -32,6 +37,9 @@ struct OnScreenKeyboardResult {
   bool accepted;
   bool cancelled;
 };
+
+/** Use the shared standard keyboard; sets rows=nullptr and rowCount. */
+void osKeyboardUseStandardLayout(OnScreenKeyboardConfig& cfg);
 
 OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
                                             const String& initial);

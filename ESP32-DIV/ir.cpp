@@ -13,6 +13,48 @@
 #include "shared.h"
 #include "utils.h"
 
+static constexpr int kIrScreenH = 320;
+
+static int irContentBottom() {
+  return featureHasTouchNavBar() ? touchNavContentBottomY() : kIrScreenH;
+}
+
+static void irClearBody(uint16_t color = FEATURE_BG) {
+  if (featureHasTouchNavBar()) {
+    featureClearContent(color);
+  } else {
+    tft.fillScreen(color);
+  }
+}
+
+static void irClearContentFrom(int topY, uint16_t color = FEATURE_BG) {
+  const int bottom = irContentBottom();
+  if (bottom > topY) {
+    tft.fillRect(0, topY, 240, bottom - topY, color);
+  }
+}
+
+static void irRedrawNavChrome() {
+  redrawTouchButtonBar();
+  maintainTouchNavBar();
+}
+
+static void irSetCaptureNavLabels() {
+  setTouchNavLabels("Rep-", "Save", "Exit", "Send", "Rep+");
+}
+
+static void irSetSavedNavLabels() {
+  setTouchNavLabels("Delete", "Next", "Exit", "Prev", "TX");
+}
+
+static void irSetUniversalRemoteNavLabels() {
+  setTouchNavLabels("Prev", "Browse", "Exit", "Reload", "Next");
+}
+
+static void irSetUniversalBrowseNavLabels() {
+  setTouchNavLabels("Back", "Next", "Exit", "Prev", "Select");
+}
+
 
 namespace IRRemoteFeature {
 
@@ -24,10 +66,47 @@ static constexpr int16_t kToolbarY = 20;
 static constexpr int16_t kToolbarH = 16;
 static constexpr int16_t kIconSize = 16;
 
-static constexpr int16_t kGraphYOffset = 168;
-static constexpr int16_t kCardRadius = 6;
-static constexpr int16_t kCardPad = 8;
-static constexpr uint16_t kCardBg = 0x2104;   /* card background on black */
+static constexpr int kIrToolbarBottom = 36;
+static constexpr int kIrToolbarGap = 8;
+static constexpr int kIrBoxHeaderH = 15;
+static constexpr int kIrStatusY = kIrToolbarBottom + kIrToolbarGap;
+static constexpr int kIrStatusBoxH = 91;
+static constexpr int kIrLogGap = 4;
+static constexpr int kIrLogBoxH = 49;
+static constexpr int kIrLogBoxTop = kIrStatusY + kIrStatusBoxH + kIrLogGap;
+static constexpr int kIrLogStartY = kIrLogBoxTop + kIrBoxHeaderH;
+static constexpr int kIrLogEndY = kIrLogBoxTop + kIrLogBoxH - 2;
+static constexpr int kIrGraphTop = kIrLogBoxTop + kIrLogBoxH + 4;
+static constexpr int kIrGraphMarginX = 6;
+static constexpr int kIrLineHeight = 12;
+static constexpr int kIrStatusLineCount = 6;
+static constexpr int kIrStatusTextY = kIrStatusY + kIrBoxHeaderH;
+static constexpr int kIrMaxLogLines = 48;
+static constexpr uint16_t kIrPlotBg = 0x0842;
+static constexpr uint16_t kIrGridColor = 0x2945;
+static constexpr int kIrGridDivisions = 4;
+
+struct IrPlotLayout {
+  int graphTop = 0;
+  int axisX = 0;
+  int plotRight = 0;
+  int plotTop = 0;
+  int plotBottom = 0;
+  int plotHeight = 0;
+  int plotWidth = 0;
+  bool valid = false;
+};
+
+static IrPlotLayout s_irPlot;
+static bool s_irBoxesDrawn = false;
+static bool s_irGraphChromeDrawn = false;
+static String s_irLogBuffer[kIrMaxLogLines];
+static uint16_t s_irLogColor[kIrMaxLogLines];
+static int s_irLogIndex = 0;
+static String s_irStatusLineText[kIrStatusLineCount];
+static uint16_t s_irStatusLineColor[kIrStatusLineCount];
+static bool s_irStatusStaticDrawn = false;
+static uint32_t s_irLastStatusDrawMs = 0;
 
 static constexpr uint16_t kMaxRawLen = 512;
 
@@ -63,7 +142,9 @@ static uint64_t s_keyCmd  = 0;
 static String s_keyText   = "";
 
 static uint8_t s_waveZoomIdx = 0;
-static constexpr uint32_t kWaveZoomUs[] = {0, 50000, 20000, 10000};
+static uint32_t s_wavePanUs = 0;
+static constexpr uint32_t kWaveZoomUs[] = {0, 100000, 50000, 20000, 10000};
+static constexpr uint8_t kWaveZoomCount = 5;
 
 static uint8_t  s_scope[240]{};
 static uint16_t s_scopePos = 0;
@@ -71,67 +152,417 @@ static uint32_t s_lastScopeSampleUs = 0;
 static uint32_t s_lastScopeDrawMs = 0;
 
 static uint32_t waveformWindowUs(uint32_t totalUs) {
-  const uint32_t w = kWaveZoomUs[s_waveZoomIdx % (sizeof(kWaveZoomUs)/sizeof(kWaveZoomUs[0]))];
+  const uint32_t w = kWaveZoomUs[s_waveZoomIdx % kWaveZoomCount];
   if (w == 0) return totalUs;
   return (totalUs < w) ? totalUs : w;
 }
 
 static const char* zoomLabel() {
-  switch (s_waveZoomIdx % 4) {
+  switch (s_waveZoomIdx % kWaveZoomCount) {
     case 0: return "FIT";
-    case 1: return "50ms";
-    case 2: return "20ms";
+    case 1: return "100ms";
+    case 2: return "50ms";
+    case 3: return "20ms";
     default: return "10ms";
   }
 }
 
-static void redrawGraphTitleOnly(bool captured) {
-  const int y0 = kToolbarY + kToolbarH + 4;
-  const int gx = 6;
-  const int gy = y0 + kGraphYOffset;
-  const int gw = 228;
+static uint32_t irWaveTotalUs() {
+  uint32_t total = 0;
+  for (uint16_t i = 0; i < s_rawLen; i++) {
+    total += s_raw[i];
+  }
+  return total;
+}
 
-  tft.fillRect(gx, gy - 12, gw, 12, FEATURE_BG);
-  tft.setTextFont(1);
-  tft.setTextColor(UI_ICON, FEATURE_BG);
-  tft.setCursor(gx, gy - 10);
-  if (captured) {
-    tft.print("IR waveform (");
-    tft.print(zoomLabel());
-    tft.print(")");
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.setCursor(gx + 140, gy - 10);
-    tft.print("tap to zoom");
+static void irWaveClampPan() {
+  const uint32_t total = irWaveTotalUs();
+  const uint32_t window = waveformWindowUs(total);
+  if (window == 0 || window >= total) {
+    s_wavePanUs = 0;
+    return;
+  }
+  const uint32_t maxPan = total - window;
+  if (s_wavePanUs > maxPan) {
+    s_wavePanUs = maxPan;
+  }
+}
+
+static String irGraphTitle() {
+  if (!s_hasCapture) {
+    return "Live IR Scope";
+  }
+  String title = "Waveform " + String(zoomLabel());
+  if (s_waveZoomIdx != 0 && s_wavePanUs > 0) {
+    title += " @+" + String(s_wavePanUs / 1000) + "ms";
+  }
+  return title;
+}
+
+static void irDrawGraphChrome();
+static void redrawWaveformPlotOnly();
+static void irPrint(const String& text, uint16_t color, bool extraSpace);
+static void irEnsurePlotLayout();
+static void redrawGraphTitleOnly(bool captured);
+
+static void irGraphRefreshWaveform() {
+  if (!s_irPlot.valid) {
+    irEnsurePlotLayout();
+  }
+  redrawGraphTitleOnly(true);
+  redrawWaveformPlotOnly();
+}
+
+static void irWaveZoomIn() {
+  if (!s_hasCapture) {
+    return;
+  }
+  if (s_waveZoomIdx + 1 < kWaveZoomCount) {
+    s_waveZoomIdx++;
+  }
+  irWaveClampPan();
+  irGraphRefreshWaveform();
+}
+
+static void irWaveZoomOut() {
+  if (!s_hasCapture) {
+    return;
+  }
+  if (s_waveZoomIdx > 0) {
+    s_waveZoomIdx--;
+  }
+  if (s_waveZoomIdx == 0) {
+    s_wavePanUs = 0;
+  }
+  irWaveClampPan();
+  irGraphRefreshWaveform();
+}
+
+static void irWaveCycleZoom() {
+  if (!s_hasCapture) {
+    return;
+  }
+  s_waveZoomIdx = (uint8_t)((s_waveZoomIdx + 1) % kWaveZoomCount);
+  if (s_waveZoomIdx == 0) {
+    s_wavePanUs = 0;
+  }
+  irWaveClampPan();
+  irGraphRefreshWaveform();
+}
+
+static void irWavePanBy(int32_t deltaUs) {
+  if (!s_hasCapture || s_waveZoomIdx == 0) {
+    return;
+  }
+  const uint32_t total = irWaveTotalUs();
+  const uint32_t window = waveformWindowUs(total);
+  if (window == 0 || window >= total) {
+    return;
+  }
+  const uint32_t maxPan = total - window;
+  const int64_t next = (int64_t)s_wavePanUs + deltaUs;
+  if (next <= 0) {
+    s_wavePanUs = 0;
+  } else if ((uint32_t)next >= maxPan) {
+    s_wavePanUs = maxPan;
   } else {
-    tft.print("IR scope (live)");
+    s_wavePanUs = (uint32_t)next;
+  }
+  irGraphRefreshWaveform();
+}
+
+static void irHandleGraphTouch(int x, int y) {
+  if (!s_hasCapture || !s_irPlot.valid) {
+    return;
+  }
+  if (x < s_irPlot.axisX || x > s_irPlot.plotRight ||
+      y < s_irPlot.plotTop || y > s_irPlot.plotBottom) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - s_lastActionMs < 220) {
+    return;
+  }
+
+  const int plotW = s_irPlot.plotRight - s_irPlot.axisX;
+  const int relX = x - s_irPlot.axisX;
+  const uint32_t total = irWaveTotalUs();
+  const uint32_t window = waveformWindowUs(total);
+  const uint32_t panStep = (window / 4 > 1000U) ? (window / 4) : 1000U;
+
+  if (relX < plotW / 3) {
+    irWavePanBy(-(int32_t)panStep);
+    irPrint("[*] Graph pan -", UI_DIM_TEXT, false);
+  } else if (relX > (plotW * 2) / 3) {
+    irWavePanBy((int32_t)panStep);
+    irPrint("[*] Graph pan +", UI_DIM_TEXT, false);
+  } else {
+    irWaveCycleZoom();
+    irPrint(String("[*] Zoom ") + zoomLabel(), UI_DIM_TEXT, false);
+  }
+  s_lastActionMs = now;
+}
+
+static void irEnsurePlotLayout() {
+  const int screenW = tft.width();
+  s_irPlot.graphTop = kIrGraphTop;
+  s_irPlot.axisX = kIrGraphMarginX;
+  s_irPlot.plotRight = screenW - kIrGraphMarginX;
+  s_irPlot.plotTop = s_irPlot.graphTop + 12;
+  s_irPlot.plotBottom = irContentBottom() - 13;
+  s_irPlot.plotHeight = s_irPlot.plotBottom - s_irPlot.plotTop;
+  s_irPlot.plotWidth = s_irPlot.plotRight - s_irPlot.axisX;
+  s_irPlot.valid = s_irPlot.plotWidth >= 32 && s_irPlot.plotHeight >= 10;
+}
+
+static String irFitStatusText(const String& text) {
+  const int maxWidth = tft.width() - 16;
+  tft.setTextSize(1);
+  if (tft.textWidth(text) <= maxWidth) {
+    return text;
+  }
+  String out = text;
+  while (out.length() > 1 && tft.textWidth(out + "...") > maxWidth) {
+    out.remove(out.length() - 1);
+  }
+  if (out.length() > 0) {
+    out += "...";
+  }
+  return out;
+}
+
+static void irScrollLog() {
+  for (int i = 0; i < kIrMaxLogLines - 1; i++) {
+    s_irLogBuffer[i] = s_irLogBuffer[i + 1];
+    s_irLogColor[i] = s_irLogColor[i + 1];
+  }
+}
+
+static int irLogVisibleLines() {
+  const int h = kIrLogEndY - kIrLogStartY;
+  if (h <= 0 || kIrLineHeight <= 0) {
+    return 1;
+  }
+  return h / kIrLineHeight;
+}
+
+static void irRedrawActivityLog() {
+  const int visible = irLogVisibleLines();
+  tft.fillRect(8, kIrLogStartY, tft.width() - 16, kIrLogEndY - kIrLogStartY, TFT_BLACK);
+  if (visible <= 0 || s_irLogIndex <= 0) {
+    return;
+  }
+
+  const int start = (s_irLogIndex > visible) ? (s_irLogIndex - visible) : 0;
+  for (int row = 0; row < visible; row++) {
+    const int bufIndex = start + row;
+    if (bufIndex >= s_irLogIndex) {
+      break;
+    }
+    if (s_irLogBuffer[bufIndex].length() == 0) {
+      continue;
+    }
+    const int yPos = kIrLogStartY + row * kIrLineHeight;
+    tft.setTextSize(1);
+    tft.setTextColor(s_irLogColor[bufIndex], TFT_BLACK);
+    tft.setCursor(8, yPos);
+    tft.print(s_irLogBuffer[bufIndex]);
+  }
+}
+
+static void irPrint(const String& text, uint16_t color, bool extraSpace = false) {
+  if (s_irLogIndex >= kIrMaxLogLines) {
+    irScrollLog();
+    s_irLogIndex = kIrMaxLogLines - 1;
+  }
+
+  s_irLogBuffer[s_irLogIndex] = text;
+  s_irLogColor[s_irLogIndex] = color;
+  s_irLogIndex++;
+
+  if (extraSpace && s_irLogIndex < kIrMaxLogLines) {
+    s_irLogBuffer[s_irLogIndex] = "";
+    s_irLogColor[s_irLogIndex] = TFT_WHITE;
+    s_irLogIndex++;
+  }
+
+  irRedrawActivityLog();
+}
+
+static void irDrawStatusLine(int line, const String& text, uint16_t color) {
+  const int y = kIrStatusTextY + line * kIrLineHeight;
+  const String fitted = irFitStatusText(text);
+  tft.fillRect(8, y, tft.width() - 16, kIrLineHeight, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(8, y);
+  tft.print(fitted);
+}
+
+static void irDrawStatusLineIfChanged(int line, const String& text, uint16_t color) {
+  if (line < 0 || line >= kIrStatusLineCount) {
+    return;
+  }
+  if (s_irStatusLineText[line] == text && s_irStatusLineColor[line] == color) {
+    return;
+  }
+  s_irStatusLineText[line] = text;
+  s_irStatusLineColor[line] = color;
+  irDrawStatusLine(line, text, color);
+}
+
+static void irDrawTextBoxes() {
+  tft.fillRect(0, kIrStatusY - 2, tft.width(), kIrGraphTop - kIrStatusY + 2, TFT_BLACK);
+  tft.drawFastHLine(0, 19, tft.width(), UI_LINE);
+  tft.drawRoundRect(4, kIrStatusY, tft.width() - 8, kIrStatusBoxH, 3, UI_LINE);
+  tft.drawRoundRect(4, kIrLogBoxTop, tft.width() - 8, kIrLogBoxH, 3, UI_LINE);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("Signal Status", 8, kIrStatusY + 3);
+  tft.drawString("Activity", 8, kIrLogBoxTop + 3);
+  s_irBoxesDrawn = true;
+}
+
+static void irDrawStaticStatusLines() {
+  if (s_irStatusStaticDrawn) {
+    return;
+  }
+  irDrawStatusLineIfChanged(5, "Carrier: " + String(kKhz) + " kHz IR", UI_DIM_TEXT);
+  s_irStatusStaticDrawn = true;
+}
+
+static void irUpdateGraphHintLine() {
+  if (s_hasCapture) {
+    irDrawStatusLineIfChanged(5, "Graph: +/- zoom  tap L/R pan", UI_DIM_TEXT);
+  } else {
+    s_irStatusLineText[5] = "";
+    s_irStatusLineColor[5] = 0;
+    irDrawStatusLineIfChanged(5, "Carrier: " + String(kKhz) + " kHz IR", UI_DIM_TEXT);
+  }
+}
+
+static void irUpdateStatusPanel(bool force = false) {
+  const uint32_t now = millis();
+  if (!force && now - s_irLastStatusDrawMs < 120) {
+    return;
+  }
+  s_irLastStatusDrawMs = now;
+
+  irDrawStaticStatusLines();
+  irDrawStatusLineIfChanged(4, "Repeat: " + String((unsigned)s_repeat) +
+                            "   Auto: " + String(s_autoTx ? "ON" : "OFF"),
+                            s_autoTx ? UI_WARN : UI_DIM_TEXT);
+
+  if (!s_hasCapture) {
+    irDrawStatusLineIfChanged(0, "State: Listening", UI_WARN);
+    irDrawStatusLineIfChanged(1, "Type: --", UI_DIM_TEXT);
+    irDrawStatusLineIfChanged(2, "Key: --", UI_DIM_TEXT);
+    irDrawStatusLineIfChanged(3, "Raw: --", UI_DIM_TEXT);
+    irUpdateGraphHintLine();
+    return;
+  }
+
+  irDrawStatusLineIfChanged(0, "State: Captured", UI_OK);
+  irDrawStatusLineIfChanged(1, "Type: " + String(typeToString(s_decodeType)), UI_TEXT);
+  String keyLine = s_keyText;
+  if (keyLine.length() > 28) {
+    keyLine = keyLine.substring(0, 28);
+  }
+  irDrawStatusLineIfChanged(2, "Key: " + keyLine, UI_TEXT);
+  irDrawStatusLineIfChanged(3, "Raw: " + String((unsigned)s_rawLen) +
+                            " pulses  Bits: " + String((unsigned)s_bits), UI_TEXT);
+  irUpdateGraphHintLine();
+}
+
+static void irDrawGraphGrid() {
+  for (int g = 1; g < kIrGridDivisions; g++) {
+    const int gy = s_irPlot.plotTop + ((s_irPlot.plotHeight * g) + (kIrGridDivisions / 2)) / kIrGridDivisions;
+    tft.drawFastHLine(s_irPlot.axisX + 1, gy, s_irPlot.plotWidth - 2, kIrGridColor);
+  }
+  for (int v = 1; v < kIrGridDivisions; v++) {
+    const int vx = s_irPlot.axisX + ((s_irPlot.plotWidth * v) + (kIrGridDivisions / 2)) / kIrGridDivisions;
+    tft.drawFastVLine(vx, s_irPlot.plotTop + 1, s_irPlot.plotHeight - 2, kIrGridColor);
+  }
+}
+
+static void irDrawGraphChrome() {
+  irEnsurePlotLayout();
+  if (!s_irPlot.valid) {
+    return;
+  }
+
+  const int screenW = tft.width();
+  const int graphBottom = irContentBottom() - 2;
+  tft.fillRect(0, kIrGraphTop, screenW, graphBottom - kIrGraphTop + 2, TFT_BLACK);
+  tft.fillRect(s_irPlot.axisX, s_irPlot.plotTop, s_irPlot.plotWidth, s_irPlot.plotHeight, kIrPlotBg);
+  irDrawGraphGrid();
+  tft.drawRect(s_irPlot.axisX, s_irPlot.plotTop, s_irPlot.plotWidth, s_irPlot.plotHeight, UI_LINE);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  if (s_hasCapture) {
+    const String title = irGraphTitle();
+    tft.drawString(title, (screenW - tft.textWidth(title)) / 2, s_irPlot.graphTop + 2);
+  } else {
+    tft.drawString("Live IR Scope", (screenW - 66) / 2, s_irPlot.graphTop + 2);
+  }
+
+  s_irGraphChromeDrawn = true;
+}
+
+static void irResetUiState() {
+  s_irBoxesDrawn = false;
+  s_irGraphChromeDrawn = false;
+  s_irPlot.valid = false;
+  s_irStatusStaticDrawn = false;
+  s_irLastStatusDrawMs = 0;
+  s_waveZoomIdx = 0;
+  s_wavePanUs = 0;
+  s_irLogIndex = 0;
+  for (int i = 0; i < kIrMaxLogLines; i++) {
+    s_irLogBuffer[i] = "";
+    s_irLogColor[i] = 0;
+  }
+  for (int i = 0; i < kIrStatusLineCount; i++) {
+    s_irStatusLineText[i] = "";
+    s_irStatusLineColor[i] = 0;
+  }
+}
+
+static void redrawGraphTitleOnly(bool captured) {
+  (void)captured;
+  if (s_irGraphChromeDrawn) {
+    const int screenW = tft.width();
+    tft.fillRect(0, s_irPlot.graphTop, screenW, 12, TFT_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    if (s_hasCapture) {
+      const String title = irGraphTitle();
+      tft.drawString(title, (screenW - tft.textWidth(title)) / 2, s_irPlot.graphTop + 2);
+    } else {
+      tft.drawString("Live IR Scope", (screenW - 66) / 2, s_irPlot.graphTop + 2);
+    }
   }
 }
 
 static void redrawScopePlotOnly() {
+  if (!s_irGraphChromeDrawn) {
+    return;
+  }
+  if (!s_irPlot.valid) {
+    irEnsurePlotLayout();
+  }
+  if (!s_irPlot.valid) {
+    return;
+  }
 
-  const int y0 = kToolbarY + kToolbarH + 4;
-  const int gx = 6;
-  const int gy = y0 + kGraphYOffset;
-  const int gw = 228;
-  const int gh = 86;
-
-  const int px0 = gx + 1;
-  const int py0 = gy + 1;
-  const int pw  = gw - 2;
-  const int ph  = gh - 2;
-
-  const uint16_t colGrid  = UI_LABLE;
-  const uint16_t colMark  = UI_OK;
-  const uint16_t colSpace = UI_WARN;
+  const int px0 = s_irPlot.axisX + 1;
+  const int py0 = s_irPlot.plotTop + 1;
+  const int pw  = s_irPlot.plotWidth - 2;
+  const int ph  = s_irPlot.plotHeight - 2;
 
   tft.startWrite();
-
-  tft.fillRect(px0, py0, pw, ph, FEATURE_BG);
-
-  for (int i = 1; i <= 3; i++) {
-    int yy = py0 + (ph * i) / 4;
-    tft.drawFastHLine(px0, yy, pw, colGrid);
-  }
+  tft.fillRect(px0, py0, pw, ph, kIrPlotBg);
 
   const int highY = py0 + 8;
   const int lowY  = py0 + ph - 9;
@@ -140,54 +571,62 @@ static void redrawScopePlotOnly() {
     uint16_t idx = (uint16_t)((s_scopePos + x) % 240);
     bool levelHigh = (s_scope[idx] != 0);
     int y = levelHigh ? highY : lowY;
-    tft.drawPixel(px0 + x, y, levelHigh ? colSpace : colMark);
+    tft.drawPixel(px0 + x, y, levelHigh ? UI_WARN : UI_OK);
     if (x > 0) {
       uint16_t pidx = (uint16_t)((s_scopePos + x - 1) % 240);
       bool prevHigh = (s_scope[pidx] != 0);
       int py = prevHigh ? highY : lowY;
-      if (py != y) tft.drawFastVLine(px0 + x, highY, (lowY - highY + 1), colGrid);
+      if (py != y) {
+        tft.drawFastVLine(px0 + x, highY, (lowY - highY + 1), kIrGridColor);
+      }
     }
   }
   tft.endWrite();
 }
 
 static void redrawWaveformPlotOnly() {
+  if (!s_irGraphChromeDrawn) {
+    return;
+  }
+  if (!s_irPlot.valid) {
+    irEnsurePlotLayout();
+  }
+  if (!s_irPlot.valid) {
+    return;
+  }
 
-  const int y0 = kToolbarY + kToolbarH + 4;
-  const int gx = 6;
-  const int gy = y0 + kGraphYOffset;
-  const int gw = 228;
-  const int gh = 86;
-
-  const int px0 = gx + 1;
-  const int py0 = gy + 1;
-  const int pw  = gw - 2;
-  const int ph  = gh - 2;
+  const int px0 = s_irPlot.axisX + 1;
+  const int py0 = s_irPlot.plotTop + 1;
+  const int pw  = s_irPlot.plotWidth - 2;
+  const int ph  = s_irPlot.plotHeight - 2;
 
   const uint16_t colGridMajor = UI_LINE;
-  const uint16_t colGridMinor = UI_LABLE;
+  const uint16_t colGridMinor = kIrGridColor;
   const uint16_t colMark      = UI_OK;
   const uint16_t colSpace     = UI_WARN;
   const uint16_t colText      = UI_DIM_TEXT;
 
-  tft.fillRect(px0, py0, pw, ph, FEATURE_BG);
+  tft.startWrite();
+  tft.fillRect(px0, py0, pw, ph, kIrPlotBg);
 
   const int labelY = py0 + ph - 10;
-
-  for (int i = 1; i <= 3; i++) {
-    int yy = py0 + (ph * i) / 4;
-    tft.drawFastHLine(px0, yy, pw, colGridMinor);
-  }
-
   const int highY = py0 + 10;
   const int lowY  = py0 + ph - 18;
 
-  uint32_t totalUs = 0;
-  for (uint16_t i = 0; i < s_rawLen; i++) totalUs += s_raw[i];
-  if (totalUs == 0 || s_rawLen == 0) return;
+  const uint32_t totalUs = irWaveTotalUs();
+  if (totalUs == 0 || s_rawLen == 0) {
+    tft.endWrite();
+    return;
+  }
 
   const uint32_t windowUs = waveformWindowUs(totalUs);
-  if (windowUs == 0) return;
+  if (windowUs == 0) {
+    tft.endWrite();
+    return;
+  }
+
+  const uint32_t panUs = s_wavePanUs;
+  const uint32_t viewEnd = panUs + windowUs;
 
   auto tickPxFor = [&](uint32_t tickUs) -> int {
     if (tickUs == 0) return 9999;
@@ -205,7 +644,7 @@ static void redrawWaveformPlotOnly() {
   while (tickPxFor((uint32_t)(tickUs * majorEvery)) < 36 && majorEvery < 16) majorEvery *= 2;
 
   tft.setTextFont(1);
-  tft.setTextColor(colText, FEATURE_BG);
+  tft.setTextColor(colText, kIrPlotBg);
   int lastLabelRight = -10000;
 
   for (uint32_t t = 0, n = 0; t <= windowUs; t += tickUs, n++) {
@@ -217,7 +656,7 @@ static void redrawWaveformPlotOnly() {
 
     if (!isMajor) continue;
 
-    uint32_t ms = t / 1000;
+    uint32_t ms = (t + panUs) / 1000;
     char buf[10];
     snprintf(buf, sizeof(buf), "%lums", (unsigned long)ms);
     int tw = tft.textWidth(buf, 1);
@@ -233,17 +672,25 @@ static void redrawWaveformPlotOnly() {
 
   bool isMark = true;
   uint32_t tUs = 0;
-  int prevX = px0;
 
   for (uint16_t i = 0; i < s_rawLen; i++) {
-    if (tUs >= windowUs) break;
-    uint32_t dur = s_raw[i];
-    uint32_t durClip = dur;
-    if (tUs + durClip > windowUs) durClip = windowUs - tUs;
+    const uint32_t segStart = tUs;
+    const uint32_t segEnd = tUs + s_raw[i];
+    tUs = segEnd;
 
-    uint32_t t2 = tUs + durClip;
-    int x1 = px0 + (int)((tUs * (uint32_t)pw) / windowUs);
-    int x2 = px0 + (int)((t2 * (uint32_t)pw) / windowUs);
+    if (segEnd <= panUs) {
+      isMark = !isMark;
+      continue;
+    }
+    if (segStart >= viewEnd) {
+      break;
+    }
+
+    const uint32_t clipStart = (segStart < panUs) ? panUs : segStart;
+    const uint32_t clipEnd = (segEnd > viewEnd) ? viewEnd : segEnd;
+
+    int x1 = px0 + (int)(((clipStart - panUs) * (uint32_t)pw) / windowUs);
+    int x2 = px0 + (int)(((clipEnd - panUs) * (uint32_t)pw) / windowUs);
     if (x1 < px0) x1 = px0;
     if (x2 > px0 + pw) x2 = px0 + pw;
 
@@ -254,71 +701,23 @@ static void redrawWaveformPlotOnly() {
       tft.drawFastHLine(x1, y, x2 - x1, c);
       tft.drawFastHLine(x1, y + (isMark ? 1 : -1), x2 - x1, c);
     } else {
-
       tft.drawPixel(x1, y, c);
     }
 
-    if (x2 != prevX) {
+    if (x2 != x1) {
       tft.drawFastVLine(x2, highY, (lowY - highY + 1), colGridMinor);
     }
 
-    prevX = x2;
-    tUs = t2;
     isMark = !isMark;
   }
-}
-
-static void redrawCapturedDetailsOnly() {
-  const int y0 = kToolbarY + kToolbarH + 4;
-  const int cardY = y0 + 52;
-  const int cardW = 224;
-  const int cardH = 90;
-
-  tft.startWrite();
-  tft.fillRect(kCardPad, cardY, cardW, cardH, kCardBg);
-  tft.drawRoundRect(kCardPad, cardY, cardW, cardH, kCardRadius, UI_LINE);
-
-  tft.setTextFont(1);
-  tft.setTextColor(UI_ICON, kCardBg);
-  tft.setCursor(kCardPad + 12, cardY + 8);
-  tft.print("Type:");
-  tft.setTextColor(UI_TEXT, kCardBg);
-  tft.setCursor(kCardPad + 48, cardY + 8);
-  tft.println(typeToString(s_decodeType));
-  tft.setTextColor(UI_ICON, kCardBg);
-  tft.setCursor(kCardPad + 12, cardY + 22);
-  tft.print("Bits:");
-  tft.setTextColor(UI_TEXT, kCardBg);
-  tft.setCursor(kCardPad + 48, cardY + 22);
-  tft.printf("%u", (unsigned)s_bits);
-  tft.setTextColor(UI_ICON, kCardBg);
-  tft.setCursor(kCardPad + 12, cardY + 36);
-  tft.print("Key:");
-  tft.setTextColor(UI_TEXT, kCardBg);
-  tft.setCursor(kCardPad + 48, cardY + 36);
-  if (s_keyText.length() > 26) tft.println(s_keyText.substring(0, 26));
-  else tft.println(s_keyText);
-  tft.setTextColor(UI_ICON, kCardBg);
-  tft.setCursor(kCardPad + 12, cardY + 50);
-  tft.print("Raw:");
-  tft.setTextColor(UI_TEXT, kCardBg);
-  tft.setCursor(kCardPad + 48, cardY + 50);
-  tft.printf("%u", (unsigned)s_rawLen);
-  tft.setTextColor(UI_DIM_TEXT, kCardBg);
-  tft.setCursor(kCardPad + 12, cardY + 66);
-  tft.print("Up:Send  Dn:Auto  L/R:Repeat");
-
-  redrawGraphTitleOnly(true);
-  redrawWaveformPlotOnly();
   tft.endWrite();
 }
 
-static const char* kKeyboardRows[] = {
-  "QWERTYUIOP",
-  "ASDFGHJKL",
-  "ZXCVBNM<-",
-  " 0123456789"
-};
+static void redrawCapturedDetailsOnly() {
+  irUpdateStatusPanel(true);
+  redrawGraphTitleOnly(true);
+  redrawWaveformPlotOnly();
+}
 
 static const char* kRandomNames[] = {
   "TV", "AC", "Lamp", "Fan", "Receiver", "Projector", "Power", "Mute", "VolUp", "VolDn"
@@ -341,12 +740,48 @@ static uint32_t hashWaveform() {
   return h;
 }
 
+static void tryReplay();
+static void saveCapture();
+static void runUI();
+static void irRestoreChrome();
+
+static void irRestoreChrome() {
+  currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+
+  s_uiDrawn = false;
+  s_irBoxesDrawn = false;
+  s_irGraphChromeDrawn = false;
+  s_irStatusStaticDrawn = false;
+  for (int i = 0; i < kIrStatusLineCount; i++) {
+    s_irStatusLineText[i] = "";
+    s_irStatusLineColor[i] = 0;
+  }
+
+  runUI();
+  irDrawTextBoxes();
+  irEnsurePlotLayout();
+  irDrawGraphChrome();
+  irUpdateStatusPanel(true);
+
+  irRedrawActivityLog();
+
+  if (s_hasCapture) {
+    redrawWaveformPlotOnly();
+  } else {
+    redrawScopePlotOnly();
+  }
+
+  irRedrawNavChrome();
+  tft.drawFastHLine(0, kToolbarY, 240, UI_LINE);
+  tft.drawFastHLine(0, kToolbarY + kToolbarH, 240, UI_LINE);
+}
+
 static String getUserInputName() {
   OnScreenKeyboardConfig cfg;
-  cfg.titleLine1      = "Name IR capture";
-  cfg.titleLine2      = "15 chars max";
-  cfg.rows            = kKeyboardRows;
-  cfg.rowCount        = 4;
+  cfg.titleLine1      = "[!] Name this IR capture";
+  cfg.titleLine2      = "(max 15 chars, ^ caps, # sym)";
+  osKeyboardUseStandardLayout(cfg);
   cfg.maxLen          = 15;
   cfg.shuffleNames    = kRandomNames;
   cfg.shuffleCount    = (uint8_t)(sizeof(kRandomNames) / sizeof(kRandomNames[0]));
@@ -359,8 +794,9 @@ static String getUserInputName() {
   cfg.emptyErrorMsg   = "Name cannot be empty!";
 
   OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "");
+  irRestoreChrome();
   if (!r.accepted) {
-    tft.fillScreen(FEATURE_BG);
+    return "";
   }
   return r.text;
 }
@@ -400,201 +836,72 @@ namespace {
 }
 
 static void updateDisplay() {
-  const int y0 = kToolbarY + kToolbarH + 4;
-  tft.fillRect(0, y0, 240, 320 - y0, FEATURE_BG);
-
-  /* Top row: Repeat, Auto, and AUTO badge when on */
-  tft.setTextFont(1);
-  tft.setCursor(10, y0 + 8);
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.print("Repeat ");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.printf("%u", (unsigned)s_repeat);
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.print("   Auto ");
-  tft.setTextColor(s_autoTx ? UI_WARN : UI_TEXT, FEATURE_BG);
-  tft.print(s_autoTx ? "ON" : "OFF");
-  if (s_autoTx) {
-    tft.setTextColor(UI_WARN, FEATURE_BG);
-    tft.setCursor(190, y0 + 8);
-    tft.print("AUTO");
+  if (!s_irBoxesDrawn) {
+    irDrawTextBoxes();
+    irRedrawActivityLog();
   }
+  irUpdateStatusPanel(true);
 
-  /* Status pill: REC Listening (orange) or Captured (green) */
-  const int pillY = y0 + 28;
-  const int pillH = 16;
-  if (!s_hasCapture) {
-    tft.fillRoundRect(8, pillY, 72, pillH, pillH / 2, UI_WARN);
-    tft.drawRoundRect(8, pillY, 72, pillH, pillH / 2, UI_ICON);
-    tft.setTextColor(FEATURE_BG, UI_WARN);
-    tft.setTextFont(1);
-    tft.setCursor(16, pillY + 4);
-    tft.print("REC");
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.setCursor(86, pillY + 4);
-    tft.print("Listening...");
-  } else {
-    tft.fillRoundRect(8, pillY, 70, pillH, pillH / 2, UI_OK);
-    tft.drawRoundRect(8, pillY, 70, pillH, pillH / 2, UI_LINE);
-    tft.setTextColor(FEATURE_BG, UI_OK);
-    tft.setTextFont(1);
-    tft.setCursor(18, pillY + 4);
-    tft.print("OK");
-    tft.setTextColor(UI_OK, FEATURE_BG);
-    tft.setCursor(84, pillY + 4);
-    tft.print("Captured");
-  }
-
-  /* Content card */
-  const int cardY = y0 + 52;
-  const int cardW = 224;
-  const int cardH = 90;
-  tft.fillRoundRect(kCardPad, cardY, cardW, cardH, kCardRadius, kCardBg);
-  tft.drawRoundRect(kCardPad, cardY, cardW, cardH, kCardRadius, UI_LINE);
-
-  if (!s_hasCapture) {
-    /* Waiting: instruction in card */
-    tft.setTextFont(2);
-    tft.setTextColor(UI_ICON, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 12);
-    tft.print("Point remote at device");
-    tft.setTextFont(1);
-    tft.setTextColor(UI_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 34);
-    tft.print("Press any button to capture IR");
-    tft.setTextColor(UI_DIM_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 50);
-    tft.print("Live scope below shows activity");
-    tft.setCursor(kCardPad + 12, cardY + 64);
-    tft.print("Back: SELECT or toolbar");
-  } else {
-    /* Captured: signal details in card */
-    tft.setTextFont(1);
-    tft.setTextColor(UI_ICON, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 8);
-    tft.print("Type:");
-    tft.setTextColor(UI_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 48, cardY + 8);
-    tft.println(typeToString(s_decodeType));
-    tft.setTextColor(UI_ICON, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 22);
-    tft.print("Bits:");
-    tft.setTextColor(UI_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 48, cardY + 22);
-    tft.printf("%u", (unsigned)s_bits);
-    tft.setTextColor(UI_ICON, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 36);
-    tft.print("Key:");
-    tft.setTextColor(UI_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 48, cardY + 36);
-    if (s_keyText.length() > 26) tft.println(s_keyText.substring(0, 26));
-    else tft.println(s_keyText);
-    tft.setTextColor(UI_ICON, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 50);
-    tft.print("Raw:");
-    tft.setTextColor(UI_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 48, cardY + 50);
-    tft.printf("%u", (unsigned)s_rawLen);
-    tft.setTextColor(UI_DIM_TEXT, kCardBg);
-    tft.setCursor(kCardPad + 12, cardY + 66);
-    tft.print("Up:Send  Dn:Auto  L/R:Repeat");
-  }
-
-  const int gx = 6;
-  const int gy = y0 + kGraphYOffset;
-  const int gw = 228;
-  const int gh = 86;
-
-  const int px0 = gx + 1;
-  const int py0 = gy + 1;
-  const int pw  = gw - 2;
-  const int ph  = gh - 2;
-
-  const uint16_t colFrame = UI_LINE;
-  const uint16_t colGrid  = UI_LABLE;
-  const uint16_t colMark  = UI_OK;
-  const uint16_t colSpace = UI_WARN;
-  const uint16_t colText  = UI_ICON;
-
-  tft.setTextFont(1);
-  tft.setTextColor(colText, FEATURE_BG);
-  tft.setCursor(gx, gy - 10);
-  if (s_hasCapture) {
-    tft.print("IR waveform (");
-    tft.print(zoomLabel());
-    tft.print(")");
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.setCursor(gx + 140, gy - 10);
-    tft.print("tap to zoom");
-  } else {
-    tft.print("IR scope (live)");
-  }
-
-  tft.drawRect(gx, gy, gw, gh, colFrame);
-  tft.fillRect(px0, py0, pw, ph, FEATURE_BG);
-
-  for (int i = 1; i <= 3; i++) {
-    int yy = py0 + (ph * i) / 4;
-    tft.drawFastHLine(px0, yy, pw, colGrid);
-  }
-
-  if (!s_hasCapture) {
-
-    const int highY = py0 + 8;
-    const int lowY  = py0 + ph - 9;
-
-    for (int x = 0; x < pw && x < 240; x++) {
-      uint16_t idx = (uint16_t)((s_scopePos + x) % 240);
-      bool levelHigh = (s_scope[idx] != 0);
-      int y = levelHigh ? highY : lowY;
-
-      tft.drawPixel(px0 + x, y, levelHigh ? colSpace : colMark);
-
-      if (x > 0) {
-        uint16_t pidx = (uint16_t)((s_scopePos + x - 1) % 240);
-        bool prevHigh = (s_scope[pidx] != 0);
-        int py = prevHigh ? highY : lowY;
-        if (py != y) {
-          tft.drawFastVLine(px0 + x, highY, (lowY - highY + 1), colGrid);
-        }
-      }
+  if (!s_irGraphChromeDrawn) {
+    irDrawGraphChrome();
+    if (!s_hasCapture) {
+      redrawScopePlotOnly();
+    } else {
+      redrawWaveformPlotOnly();
     }
+  }
+}
 
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.setCursor(gx + 118, gy - 10);
-    tft.print("press remote to see bursts");
+static void handleTouchNavButtons() {
+  if (!featureHasTouchNavBar()) {
     return;
   }
 
-  redrawWaveformPlotOnly();
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    s_autoTx = false;
+    if (s_repeat > 1) s_repeat--;
+    s_contentDirty = true;
+    irUpdateStatusPanel(true);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    s_autoTx = false;
+    if (s_repeat < 10) s_repeat++;
+    s_contentDirty = true;
+    irUpdateStatusPanel(true);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+    s_autoTx = false;
+    if (s_hasCapture) tryReplay();
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    if (s_hasCapture) saveCapture();
+  }
 }
 
-static void tryReplay();
-static void saveCapture();
-
 static void runUI() {
-
-  static const int ICON_NUM = 6;
-  static int iconX[ICON_NUM] = {90, 130, 170, 210, 50, 10};
+  static constexpr int kIconBackX = 10;
+  static constexpr int kIconZoomOutX = 130;
+  static constexpr int kIconZoomInX = 170;
+  static constexpr int kIconAutoX = 210;
   static int iconY = kToolbarY;
 
-  static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_sort_up_plus,
-    bitmap_icon_sort_down_minus,
-    bitmap_icon_antenna,
-    bitmap_icon_floppy,
-    bitmap_icon_random,
-    bitmap_icon_go_back
-  };
-
   if (!s_uiDrawn) {
+    tft.fillRect(0, kToolbarY, 160, kToolbarH, DARK_GRAY);
+    tft.setTextColor(UI_TEXT, DARK_GRAY);
+    tft.setCursor(35, kToolbarY + 4);
+    tft.print("IR Record");
 
-    tft.fillRect(0, kToolbarY, 240, kToolbarH, UI_FG);
-    tft.drawLine(0, kToolbarY, 240, kToolbarY, UI_LINE);
-    for (int i = 0; i < ICON_NUM; i++) {
-      if (icons[i]) tft.drawBitmap(iconX[i], iconY, icons[i], kIconSize, kIconSize, UI_ICON);
+    tft.drawFastHLine(0, 19, 240, UI_LINE);
+    tft.fillRect(160, kToolbarY, 80, kToolbarH, DARK_GRAY);
+
+    tft.drawBitmap(kIconBackX, iconY, bitmap_icon_go_back, kIconSize, kIconSize, UI_ICON);
+    if (s_hasCapture) {
+      tft.drawBitmap(kIconZoomOutX, iconY, bitmap_icon_sort_down_minus, kIconSize, kIconSize, UI_ICON);
+      tft.drawBitmap(kIconZoomInX, iconY, bitmap_icon_sort_up_plus, kIconSize, kIconSize, UI_ICON);
     }
-    tft.drawLine(0, kToolbarY + kToolbarH, 240, kToolbarY + kToolbarH, UI_LINE);
+    tft.drawBitmap(kIconAutoX, iconY, bitmap_icon_random, kIconSize, kIconSize, UI_ICON);
+
+    tft.drawFastHLine(0, kToolbarY + kToolbarH, 240, UI_LINE);
     s_uiDrawn = true;
   }
 
@@ -604,39 +911,36 @@ static void runUI() {
 
   if (animationState > 0 && millis() - lastAnimationTime >= 150) {
     if (animationState == 1) {
-      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], kIconSize, kIconSize, UI_ICON);
-      animationState = 2;
-
       switch (activeIcon) {
         case 0:
-          s_autoTx = false;
-          if (s_repeat < 10) s_repeat++;
-          s_contentDirty = true;
+          irWaveZoomOut();
+          irPrint("[*] Zoom " + String(zoomLabel()), UI_DIM_TEXT, false);
           break;
         case 1:
-          s_autoTx = false;
-          if (s_repeat > 1) s_repeat--;
-          s_contentDirty = true;
+          irWaveZoomIn();
+          irPrint("[*] Zoom " + String(zoomLabel()), UI_DIM_TEXT, false);
           break;
         case 2:
-          s_autoTx = false;
-          if (s_hasCapture) tryReplay();
-          break;
-        case 3:
-          saveCapture();
-          break;
-        case 4:
           if (s_hasCapture) {
             s_autoTx = !s_autoTx;
             s_lastAutoMs = 0;
             s_contentDirty = true;
+            irPrint(String("[*] Auto ") + (s_autoTx ? "ON" : "OFF"), s_autoTx ? UI_WARN : UI_DIM_TEXT, false);
+            irUpdateStatusPanel(true);
+          } else {
+            irPrint("[!] No capture for auto", UI_DIM_TEXT, false);
           }
           break;
-        case 5:
-          feature_exit_requested = true;
+        default:
           break;
       }
-    } else if (animationState == 2) {
+      if (activeIcon == 0) {
+        tft.drawBitmap(kIconZoomOutX, iconY, bitmap_icon_sort_down_minus, kIconSize, kIconSize, UI_ICON);
+      } else if (activeIcon == 1) {
+        tft.drawBitmap(kIconZoomInX, iconY, bitmap_icon_sort_up_plus, kIconSize, kIconSize, UI_ICON);
+      } else if (activeIcon == 2) {
+        tft.drawBitmap(kIconAutoX, iconY, bitmap_icon_random, kIconSize, kIconSize, UI_ICON);
+      }
       animationState = 0;
       activeIcon = -1;
     }
@@ -650,22 +954,23 @@ static void runUI() {
     int x, y;
     if (feature_active && readTouchXY(x, y)) {
       if (y > kToolbarY && y < (kToolbarY + kToolbarH)) {
-        for (int i = 0; i < ICON_NUM; i++) {
-          if (x > iconX[i] && x < (iconX[i] + kIconSize)) {
-            if (icons[i] && animationState == 0) {
-
-              if (i == 5) {
-                feature_exit_requested = true;
-              } else {
-
-                tft.drawBitmap(iconX[i], iconY, icons[i], kIconSize, kIconSize, FEATURE_BG);
-                animationState = 1;
-                activeIcon = i;
-                lastAnimationTime = millis();
-              }
-            }
-            break;
-          }
+        if (x > kIconBackX && x < (kIconBackX + kIconSize)) {
+          feature_exit_requested = true;
+        } else if (s_hasCapture && x > kIconZoomOutX && x < (kIconZoomOutX + kIconSize) && animationState == 0) {
+          tft.drawBitmap(kIconZoomOutX, iconY, bitmap_icon_sort_down_minus, kIconSize, kIconSize, TFT_BLACK);
+          animationState = 1;
+          activeIcon = 0;
+          lastAnimationTime = millis();
+        } else if (s_hasCapture && x > kIconZoomInX && x < (kIconZoomInX + kIconSize) && animationState == 0) {
+          tft.drawBitmap(kIconZoomInX, iconY, bitmap_icon_sort_up_plus, kIconSize, kIconSize, TFT_BLACK);
+          animationState = 1;
+          activeIcon = 1;
+          lastAnimationTime = millis();
+        } else if (x > kIconAutoX && x < (kIconAutoX + kIconSize) && animationState == 0) {
+          tft.drawBitmap(kIconAutoX, iconY, bitmap_icon_random, kIconSize, kIconSize, TFT_BLACK);
+          animationState = 1;
+          activeIcon = 2;
+          lastAnimationTime = millis();
         }
       }
     }
@@ -677,15 +982,22 @@ static void tryReplay() {
   if (!s_hasCapture || s_rawLen == 0) return;
 
   s_recv.disableIRIn();
+  irPrint("[!] Sending...", UI_TEXT, false);
+  irDrawStatusLineIfChanged(0, "State: Sending", UI_WARN);
 
   for (uint8_t i = 0; i < s_repeat; i++) {
     s_send.sendRaw(s_raw, s_rawLen, kKhz);
     delay(35);
   }
 
+  if (!s_autoTx) {
+    irPrint("[+] Send done", UI_WARN, false);
+  }
+
   delay(50);
   s_recv.enableIRIn();
   s_lastActionMs = millis();
+  irUpdateStatusPanel(true);
 }
 
 static void saveCapture() {
@@ -704,11 +1016,10 @@ static void saveCapture() {
 
   String name = getUserInputName();
   if (name.length() == 0) {
-
-    s_uiDrawn = false;
-    s_contentDirty = true;
     return;
   }
+
+  irPrint("[!] Saving...", UI_TEXT, false);
 
   String path;
   if (!makeNextIrPath(path)) {
@@ -743,18 +1054,7 @@ static void saveCapture() {
     return;
   }
 
-  tft.fillRect(0, 40, 240, 60, FEATURE_BG);
-  tft.setTextFont(2);
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(10, 44);
-  tft.println("Saved!");
-  tft.setTextFont(1);
-  tft.setCursor(10, 62);
-  tft.println(name);
-  delay(800);
-
-  s_uiDrawn = false;
-  s_contentDirty = true;
+  irPrint("[+] Saved " + name, UI_OK, false);
 }
 
 static bool extractHexAfterLabel(const String& s, const char* label, uint64_t& out) {
@@ -857,6 +1157,11 @@ static void pollCapture() {
 
     if (!hadCapture) {
       s_contentDirty = true;
+      s_irGraphChromeDrawn = false;
+      s_uiDrawn = false;
+      s_waveZoomIdx = 0;
+      s_wavePanUs = 0;
+      irPrint("[+] Signal captured", UI_OK, false);
       s_lastWaveHash = newHash;
       s_lastStableHash = newHash;
     } else {
@@ -875,6 +1180,8 @@ static void pollCapture() {
 }
 
 void setup() {
+  setTouchButtonInputEnabled(true);
+  irSetCaptureNavLabels();
   s_repeat = 1;
   s_autoTx = false;
   s_lastAutoMs = 0;
@@ -893,42 +1200,45 @@ void setup() {
   s_value = 0;
   s_bits = 0;
 
-  tft.fillScreen(FEATURE_BG);
+  irResetUiState();
+  irClearBody(TFT_BLACK);
   currentBatteryVoltage = readBatteryVoltage();
   drawStatusBar(currentBatteryVoltage, true);
   runUI();
-  updateDisplay();
+  irDrawTextBoxes();
+  irEnsurePlotLayout();
+  irDrawGraphChrome();
+  irUpdateStatusPanel(true);
+  irPrint("[+] IR Record ready", UI_WARN, false);
+  irPrint("[*] Point remote and press", UI_DIM_TEXT, false);
+  irRedrawNavChrome();
   s_contentDirty = false;
 }
 
 void loop() {
 
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
+  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
     feature_exit_requested = true;
     return;
   }
 
+  maintainTouchNavBar();
   runUI();
+  if (s_uiDrawn) {
+    tft.drawFastHLine(0, kToolbarY, 240, UI_LINE);
+    tft.drawFastHLine(0, kToolbarY + kToolbarH, 240, UI_LINE);
+  }
+  handleTouchNavButtons();
 
   pollCapture();
 
-  if (s_hasCapture && ts.touched()) {
+  if (s_hasCapture) {
     int x, y;
     if (readTouchXY(x, y)) {
-      const uint32_t now = millis();
-      if (now - s_lastActionMs > 220) {
-        const int y0 = kToolbarY + kToolbarH + 4;
-        const int gx = 6;
-        const int gy = y0 + kGraphYOffset;
-        const int gw = 228;
-        const int gh = 86;
-        if (x >= gx && x <= (gx + gw) && y >= (gy - 12) && y <= (gy + gh)) {
-          s_waveZoomIdx = (uint8_t)((s_waveZoomIdx + 1) % 4);
-          redrawGraphTitleOnly(true);
-          redrawWaveformPlotOnly();
-          s_lastActionMs = now;
-        }
+      if (!s_irPlot.valid) {
+        irEnsurePlotLayout();
       }
+      irHandleGraphTouch(x, y);
     }
   }
 
@@ -962,21 +1272,23 @@ void loop() {
   static unsigned long lastDebounceTime = 0;
   const unsigned long debounceDelay = 200;
   static bool prevLeft=false, prevRight=false, prevUp=false, prevDown=false;
-  const bool leftPressed  = isButtonPressed(BTN_LEFT);
-  const bool rightPressed = isButtonPressed(BTN_RIGHT);
-  const bool upPressed    = isButtonPressed(BTN_UP);
-  const bool downPressed  = isButtonPressed(BTN_DOWN);
+  const bool leftPressed  = isPhysicalButtonPressed(BTN_LEFT);
+  const bool rightPressed = isPhysicalButtonPressed(BTN_RIGHT);
+  const bool upPressed    = isPhysicalButtonPressed(BTN_UP);
+  const bool downPressed  = isPhysicalButtonPressed(BTN_DOWN);
 
   if (rightPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
     s_autoTx = false;
     if (s_repeat < 10) s_repeat++;
     s_contentDirty = true;
+    irUpdateStatusPanel(true);
     lastDebounceTime = millis();
   }
   if (leftPressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
     s_autoTx = false;
     if (s_repeat > 1) s_repeat--;
     s_contentDirty = true;
+    irUpdateStatusPanel(true);
     lastDebounceTime = millis();
   }
   if (upPressed && !prevUp && s_hasCapture && millis() - lastDebounceTime > debounceDelay) {
@@ -985,9 +1297,7 @@ void loop() {
     lastDebounceTime = millis();
   }
   if (downPressed && !prevDown && s_hasCapture && millis() - lastDebounceTime > debounceDelay) {
-    s_autoTx = !s_autoTx;
-    s_lastAutoMs = 0;
-    s_contentDirty = true;
+    saveCapture();
     lastDebounceTime = millis();
   }
 
@@ -1038,23 +1348,40 @@ static bool uiDrawn = false;
 static int yshift = 16;
 
 static constexpr uint8_t ITEMS_PER_PAGE = 7;
-static constexpr int LIST_X = 6;
-static constexpr int LIST_W = 228;
-static constexpr int LIST_Y = 64;
+static constexpr int LIST_X = 10;
+static constexpr int LIST_W = 220;
+static constexpr int HEADER_Y = 50;
+static constexpr int HEADER_H = 14;
+static constexpr int LIST_Y = HEADER_Y + HEADER_H + 2;
 static constexpr int ROW_H  = 18;
-
-static constexpr int BOT_H = 32;
-static constexpr int BOT_Y = 320 - BOT_H;
 static constexpr int UI_GAP_Y = 6;
-static constexpr int DETAILS_H = (BOT_Y - (LIST_Y + (ITEMS_PER_PAGE * ROW_H)) - (2 * UI_GAP_Y));
-static constexpr int DETAILS_Y = BOT_Y - UI_GAP_Y - DETAILS_H;
+static constexpr int DETAIL_LINE_H = 14;
+static constexpr int DETAIL_LINE_GAP = 3;
+static constexpr int DETAIL_LINE_STEP = DETAIL_LINE_H + DETAIL_LINE_GAP;
+static constexpr int DETAIL_LINES = 4;
+static constexpr int DETAIL_CONTENT_H = DETAIL_LINE_STEP * (DETAIL_LINES - 1) + DETAIL_LINE_H;
+static constexpr int DETAIL_LABEL_X = LIST_X;
+static constexpr int DETAIL_VALUE_X = 50;
+static constexpr int DETAIL_COL2_LABEL_X = 130;
+static constexpr int DETAIL_COL2_VALUE_X = 165;
 
-static constexpr int BOT_GAP = 8;
-static constexpr int BOT_BTN_W = (240 - 10 - 10 - BOT_GAP) / 2;
-static constexpr int BOT_BTN_H = 24;
-static constexpr int BOT_BTN_Y = BOT_Y + 4;
-static constexpr int BOT_TX_X  = 10;
-static constexpr int BOT_DEL_X = BOT_TX_X + BOT_BTN_W + BOT_GAP;
+static int profileBottomY() {
+  return irContentBottom();
+}
+
+static int listBottomY() {
+  return LIST_Y + (ITEMS_PER_PAGE * ROW_H);
+}
+
+static int detailsY() {
+  const int areaTop = listBottomY();
+  const int areaBottom = profileBottomY();
+  const int areaH = areaBottom - areaTop;
+  if (areaH <= DETAIL_CONTENT_H) {
+    return areaTop + UI_GAP_Y;
+  }
+  return areaTop + (areaH - DETAIL_CONTENT_H) / 2;
+}
 
 static std::vector<String> irFiles;
 static uint16_t irTotal = 0;
@@ -1077,6 +1404,8 @@ static constexpr uint16_t kMaxRawLen2 = 512;
 static uint16_t txRaw[kMaxRawLen2]{};
 
 static IRsend irsend(IR_TX_PIN);
+static void transmitProfile(uint16_t idx);
+static void deleteProfile(uint16_t idx);
 
 static bool endsWith(const String& s, const char* suf) {
   int sl = s.length();
@@ -1111,17 +1440,6 @@ static bool readRaw(const String& path, const IrCaptureHeader& h, uint16_t* outR
   if (f.read((uint8_t*)outRaw, want) != (int)want) { f.close(); if (errOut) *errOut="Read raw failed"; return false; }
   f.close();
   return true;
-}
-
-static void drawBottomButtons() {
-  tft.fillRect(0, BOT_Y, 240, BOT_H, FEATURE_BG);
-  FeatureUI::drawButtonRect(BOT_TX_X, BOT_BTN_Y, BOT_BTN_W, BOT_BTN_H,
-                            "Transmit", FeatureUI::ButtonStyle::Primary);
-
-  const bool armed = deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0;
-  const char* delLabel = armed ? "Delete?" : "Delete";
-  FeatureUI::drawButtonRect(BOT_DEL_X, BOT_BTN_Y, BOT_BTN_W, BOT_BTN_H,
-                            delLabel, FeatureUI::ButtonStyle::Danger);
 }
 
 static uint16_t pageStartForIndex(uint16_t idx) {
@@ -1226,9 +1544,8 @@ static void ensurePageCache() {
 }
 
 static void drawHeaderLine() {
-  int hy = 30 + yshift;
-  tft.fillRect(0, hy, 240, 14, FEATURE_BG);
-  tft.setCursor(10, hy);
+  tft.fillRect(LIST_X, HEADER_Y, LIST_W, HEADER_H, FEATURE_BG);
+  tft.setCursor(LIST_X, HEADER_Y);
   tft.setTextColor(UI_ICON, FEATURE_BG);
   tft.printf("Profile %d/%d", (int)currentIndex + 1, (int)irTotal);
 }
@@ -1243,9 +1560,8 @@ static void drawRow(uint16_t pageStart, uint8_t row) {
   uint16_t fg = isSel ? UI_ICON : UI_TEXT;
   tft.fillRect(LIST_X, y, LIST_W, ROW_H - 1, bg);
   tft.setTextColor(fg, bg);
-  tft.setCursor(LIST_X + 2, y + 4);
-  tft.printf("%2d.", (int)idx + 1);
-  tft.setCursor(LIST_X + 34, y + 4);
+  tft.setCursor(LIST_X, y + 4);
+  tft.printf("%2d. ", (int)idx + 1);
 
   if (cachedOk[row]) {
     char nameBuf[17];
@@ -1277,50 +1593,63 @@ static void drawListPage(uint16_t pageStart) {
 }
 
 static void drawDetails() {
-  tft.fillRect(0, DETAILS_Y, 240, (DETAILS_H + UI_GAP_Y), FEATURE_BG);
+  const int dy = detailsY();
+  const int gapTop = listBottomY();
+  const int gapH = profileBottomY() - gapTop;
+  if (gapH > 0) {
+    tft.fillRect(LIST_X, gapTop, LIST_W, gapH, FEATURE_BG);
+  }
+  tft.drawFastHLine(LIST_X, listBottomY(), LIST_W, UI_LINE);
 
   String err;
   if (!selectedValid) loadSelected(&err);
   tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(10, DETAILS_Y);
   if (!selectedValid) {
-    tft.print("Read failed: ");
+    tft.setCursor(DETAIL_LABEL_X, dy);
+    tft.print("Read failed:");
+    tft.setCursor(DETAIL_VALUE_X, dy);
     tft.print(err);
-    drawBottomButtons();
     return;
   }
 
-  tft.print("Name: ");
-  tft.print(selectedHeader.name);
-
   decode_type_t dt = (decode_type_t)selectedHeader.decodeType;
-  tft.setCursor(10, DETAILS_Y + 14);
-  tft.print("Type: ");
+  tft.setCursor(DETAIL_LABEL_X, dy);
+  tft.print("Type:");
+  tft.setCursor(DETAIL_VALUE_X, dy);
   tft.print(String(typeToString(dt)));
-  tft.print("  ");
+  tft.setCursor(DETAIL_COL2_LABEL_X, dy);
+  tft.print("kHz:");
+  tft.setCursor(DETAIL_COL2_VALUE_X, dy);
   tft.printf("%ukHz", (unsigned)selectedHeader.khz);
 
-  tft.setCursor(10, DETAILS_Y + 28);
-  tft.printf("Bits:%u  Raw:%u", (unsigned)selectedHeader.bits, (unsigned)selectedHeader.rawLen);
+  tft.setCursor(DETAIL_LABEL_X, dy + DETAIL_LINE_STEP);
+  tft.print("Bits:");
+  tft.setCursor(DETAIL_VALUE_X, dy + DETAIL_LINE_STEP);
+  tft.print((unsigned)selectedHeader.bits);
+  tft.setCursor(DETAIL_COL2_LABEL_X, dy + DETAIL_LINE_STEP);
+  tft.print("Raw:");
+  tft.setCursor(DETAIL_COL2_VALUE_X, dy + DETAIL_LINE_STEP);
+  tft.print((unsigned)selectedHeader.rawLen);
 
-  tft.setCursor(10, DETAILS_Y + 42);
-  tft.print("Val: 0x");
+  tft.setCursor(DETAIL_LABEL_X, dy + (DETAIL_LINE_STEP * 2));
+  tft.print("Val:");
+  tft.setCursor(DETAIL_VALUE_X, dy + (DETAIL_LINE_STEP * 2));
+  tft.print("0x");
   tft.print(uint64ToString(selectedHeader.value, 16));
 
-  tft.setCursor(10, DETAILS_Y + 56);
   tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.print("SRC: ");
+  tft.setCursor(DETAIL_LABEL_X, dy + (DETAIL_LINE_STEP * 3));
+  tft.print("SRC:");
+  tft.setCursor(DETAIL_VALUE_X, dy + (DETAIL_LINE_STEP * 3));
   tft.print(baseName(selectedPath));
 
   if (deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0) {
-    int hintY = DETAILS_Y + 70;
-    if (hintY >= BOT_Y) hintY = BOT_Y - 12;
-    tft.setCursor(10, hintY);
+    int hintY = dy + (DETAIL_LINE_STEP * 4);
+    if (hintY >= profileBottomY() - 12) hintY = profileBottomY() - 12;
+    tft.setCursor(DETAIL_LABEL_X, hintY);
     tft.setTextColor(UI_WARN, FEATURE_BG);
-    tft.print("Press delete again to confirm");
+    tft.print("Press Delete again to confirm");
   }
-
-  drawBottomButtons();
 }
 
 static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw = false) {
@@ -1345,18 +1674,56 @@ static void updateSelectionUI(uint16_t oldIndex, bool forceListRedraw = false) {
   tft.endWrite();
 }
 
+static void selectNext() {
+  if (irTotal == 0) return;
+  uint16_t oldIdx = currentIndex;
+  currentIndex = (uint16_t)((currentIndex + 1) % irTotal);
+  selectedValid = false;
+  cacheDirty = true;
+  deleteArmed = false;
+  updateSelectionUI(oldIdx, false);
+}
+
+static void selectPrev() {
+  if (irTotal == 0) return;
+  uint16_t oldIdx = currentIndex;
+  currentIndex = (uint16_t)((currentIndex + irTotal - 1) % irTotal);
+  selectedValid = false;
+  cacheDirty = true;
+  deleteArmed = false;
+  updateSelectionUI(oldIdx, false);
+}
+
+static void handleTouchNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (irTotal > 0) deleteProfile(currentIndex);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    selectNext();
+  }
+  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+    selectPrev();
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    if (irTotal > 0) transmitProfile(currentIndex);
+  }
+}
+
 static void updateDisplay() {
-  tft.fillScreen(FEATURE_BG);
+  irClearBody(FEATURE_BG);
   float v = readBatteryVoltage();
   drawStatusBar(v, true);
   uiDrawn = false;
 
   drawHeaderLine();
   if (irTotal == 0) {
-    tft.setCursor(10, 50 + yshift);
+    tft.setCursor(LIST_X, HEADER_Y + DETAIL_LINE_H);
     tft.setTextColor(UI_TEXT, FEATURE_BG);
     tft.print(sdLastErr.length() ? sdLastErr : "No profiles on SD.");
-    drawBottomButtons();
     return;
   }
   drawListPage(pageStartForIndex(currentIndex));
@@ -1383,7 +1750,7 @@ static void transmitProfile(uint16_t idx) {
   }
 
   irsend.begin();
-  tft.fillRect(0, 40, 240, 28, FEATURE_BG);
+  irClearContentFrom(40, FEATURE_BG);
   tft.setCursor(10, 44);
   tft.setTextColor(UI_TEXT, FEATURE_BG);
   tft.print("Sending...");
@@ -1391,7 +1758,7 @@ static void transmitProfile(uint16_t idx) {
   irsend.sendRaw(txRaw, h.rawLen, h.khz);
   delay(250);
 
-  tft.fillRect(0, 40, 240, 28, FEATURE_BG);
+  irClearContentFrom(40, FEATURE_BG);
   tft.setCursor(10, 44);
   tft.print("Done!");
   delay(300);
@@ -1414,7 +1781,7 @@ static void deleteProfile(uint16_t idx) {
 
   String path = irFiles[idx];
   if (!SD.remove(path)) {
-    tft.fillRect(0, 40, 240, 280, FEATURE_BG);
+    irClearContentFrom(40, FEATURE_BG);
     tft.setCursor(10, 30 + yshift);
     tft.setTextColor(UI_WARN, FEATURE_BG);
     tft.print("Delete FAILED");
@@ -1436,16 +1803,14 @@ static void deleteProfile(uint16_t idx) {
 
 static void runUI() {
 
-  static const int ICON_NUM = 6;
-  static int iconX[ICON_NUM] = {90, 130, 170, 210, 50, 10};
+  static const int ICON_NUM = 4;
+  static int iconX[ICON_NUM] = {130, 170, 210, 10};
   static int iconY = 20;
 
   static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_sort_down_minus,
-    bitmap_icon_sort_up_plus,
     bitmap_icon_antenna,
     bitmap_icon_recycle,
-    bitmap_icon_sdcard,
+    bitmap_icon_undo,
     bitmap_icon_go_back
   };
 
@@ -1471,39 +1836,19 @@ static void runUI() {
 
       switch (activeIcon) {
         case 0:
-          if (irTotal > 0) {
-            uint16_t oldIdx = currentIndex;
-            currentIndex = (uint16_t)((currentIndex + 1) % irTotal);
-            selectedValid = false;
-            cacheDirty = true;
-            deleteArmed = false;
-            updateSelectionUI(oldIdx, false);
-          }
-          break;
-        case 1:
-          if (irTotal > 0) {
-            uint16_t oldIdx = currentIndex;
-            currentIndex = (uint16_t)((currentIndex + irTotal - 1) % irTotal);
-            selectedValid = false;
-            cacheDirty = true;
-            deleteArmed = false;
-            updateSelectionUI(oldIdx, false);
-          }
-          break;
-        case 2:
           if (irTotal > 0) transmitProfile(currentIndex);
           break;
-        case 3:
+        case 1:
           if (irTotal > 0) deleteProfile(currentIndex);
           break;
-        case 4:
+        case 2:
           refreshSdIndex(true);
           selectedValid = false;
           cacheDirty = true;
           deleteArmed = false;
           updateDisplay();
           break;
-        case 5:
+        case 3:
           feature_exit_requested = true;
           break;
       }
@@ -1520,16 +1865,6 @@ static void runUI() {
   if (millis() - lastTouchCheck >= touchCheckInterval) {
     int x, y;
     if (feature_active && readTouchXY(x, y)) {
-
-      if (y >= BOT_Y && y < (BOT_Y + BOT_H)) {
-        if (x >= BOT_TX_X && x < (BOT_TX_X + BOT_BTN_W)) {
-          if (irTotal > 0) transmitProfile(currentIndex);
-        } else if (x >= BOT_DEL_X && x < (BOT_DEL_X + BOT_BTN_W)) {
-          if (irTotal > 0) deleteProfile(currentIndex);
-        }
-        lastTouchCheck = millis();
-        return;
-      }
 
       if (y >= LIST_Y && y < (LIST_Y + (ITEMS_PER_PAGE * ROW_H)) && x >= LIST_X && x < (LIST_X + LIST_W)) {
         uint8_t row = (uint8_t)((y - LIST_Y) / ROW_H);
@@ -1549,7 +1884,7 @@ static void runUI() {
         for (int i = 0; i < ICON_NUM; i++) {
           if (x > iconX[i] && x < iconX[i] + 16) {
             if (icons[i] && animationState == 0) {
-              if (i == 5) {
+              if (i == 3) {
                 feature_exit_requested = true;
               } else {
                 tft.drawBitmap(iconX[i], iconY, icons[i], 16, 16, FEATURE_BG);
@@ -1568,8 +1903,10 @@ static void runUI() {
 }
 
 void setup() {
+  setTouchButtonInputEnabled(true);
+  irSetSavedNavLabels();
   irsend.begin();
-  tft.fillScreen(FEATURE_BG);
+  irClearBody(FEATURE_BG);
   float v = readBatteryVoltage();
   drawStatusBar(v, true);
   uiDrawn = false;
@@ -1578,53 +1915,54 @@ void setup() {
   cacheDirty = true;
   deleteArmed = false;
   updateDisplay();
+  irRedrawNavChrome();
 }
 
 void loop() {
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
+  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
     feature_exit_requested = true;
     return;
   }
 
+  maintainTouchNavBar();
   runUI();
+  if (uiDrawn) {
+    tft.drawFastHLine(0, 20, 240, UI_LINE);
+    tft.drawFastHLine(0, 36, 240, UI_LINE);
+  }
+  handleTouchNavButtons();
 
   static unsigned long lastDebounceTime = 0;
   const unsigned long debounceDelay = 200;
+  static bool prevUp = false;
+  static bool prevDown = false;
+  static bool prevRight = false;
+  static bool prevLeft = false;
 
-  bool prevPressed    = isButtonPressed(BTN_UP);
-  bool nextPressed    = isButtonPressed(BTN_DOWN);
-  bool txPressed      = isButtonPressed(BTN_RIGHT);
-  bool refreshPressed = isButtonPressed(BTN_LEFT);
+  bool prevPressed    = isPhysicalButtonPressed(BTN_UP);
+  bool nextPressed    = isPhysicalButtonPressed(BTN_DOWN);
+  bool txPressed      = isPhysicalButtonPressed(BTN_RIGHT);
+  bool deletePressed  = isPhysicalButtonPressed(BTN_LEFT);
 
   if (irTotal > 0) {
 
-    if (nextPressed && millis() - lastDebounceTime > debounceDelay) {
-      uint16_t oldIdx = currentIndex;
-      currentIndex = (uint16_t)((currentIndex + 1) % irTotal);
-      selectedValid = false;
-      updateSelectionUI(oldIdx, false);
+    if (nextPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
+      selectNext();
       lastDebounceTime = millis();
     }
 
-    if (prevPressed && millis() - lastDebounceTime > debounceDelay) {
-      uint16_t oldIdx = currentIndex;
-      currentIndex = (uint16_t)((currentIndex + irTotal - 1) % irTotal);
-      selectedValid = false;
-      updateSelectionUI(oldIdx, false);
+    if (prevPressed && !prevUp && millis() - lastDebounceTime > debounceDelay) {
+      selectPrev();
       lastDebounceTime = millis();
     }
 
-    if (txPressed && millis() - lastDebounceTime > debounceDelay) {
+    if (txPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
       transmitProfile(currentIndex);
       lastDebounceTime = millis();
     }
 
-    if (refreshPressed && millis() - lastDebounceTime > debounceDelay) {
-      refreshSdIndex(true);
-      selectedValid = false;
-      cacheDirty = true;
-      deleteArmed = false;
-      updateDisplay();
+    if (deletePressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
+      deleteProfile(currentIndex);
       lastDebounceTime = millis();
     }
   } else {
@@ -1632,6 +1970,11 @@ void loop() {
     tft.setTextColor(UI_TEXT, FEATURE_BG);
     tft.print(sdLastErr.length() ? sdLastErr : "No profiles on SD.");
   }
+
+  prevUp = prevPressed;
+  prevDown = nextPressed;
+  prevRight = txPressed;
+  prevLeft = deletePressed;
 }
 
 }
@@ -1640,14 +1983,44 @@ namespace IRUniversalController {
 
 static constexpr const char* PROFILES_PATH = "/ir_profiles.json";
 static constexpr const char* PROFILES_DIR  = "/ir_profiles";
-static constexpr const char* FAV_PATH      = "/ir_favorites.json";
 
 static IRsend s_send(IR_TX_PIN);
 
 static constexpr uint16_t kMaxProfiles = 500;
 
-static constexpr int16_t kHeaderY = 20;
-static constexpr int16_t kHeaderH = 58;
+static constexpr int16_t kToolbarY = 20;
+static constexpr int16_t kToolbarH = 16;
+static constexpr int16_t kIconSize = 16;
+static constexpr int kToolbarBottom = kToolbarY + kToolbarH;
+static constexpr int kBodyTop = kToolbarBottom + 1;
+
+static constexpr int kPadX = 10;
+static constexpr int kListW = 220;
+static constexpr int kDetailLineH = 14;
+static constexpr int kDetailLineGap = 3;
+static constexpr int kDetailLineStep = kDetailLineH + kDetailLineGap;
+static constexpr int kDetailValueX = 50;
+static constexpr int kDetailCol2LabelX = 138;
+static constexpr int kDetailCol2ValueX = 173;
+
+static constexpr int kInfoBoxX = 4;
+static constexpr int kInfoBoxW = 232;
+static constexpr int kInfoBoxRight = kInfoBoxX + kInfoBoxW;
+static constexpr int kInfoBoxHeaderH = 15;
+static constexpr int kInfoLines = 3;
+static constexpr int kInfoContentH = kDetailLineStep * (kInfoLines - 1) + kDetailLineH;
+static constexpr int kInfoBoxY = kBodyTop + 6;
+static constexpr int kInfoBoxH = kInfoBoxHeaderH + kInfoContentH + 8;
+static constexpr int kInfoTextY = kInfoBoxY + kInfoBoxHeaderH + 2;
+static constexpr int kRemoteKeysTop = kInfoBoxY + kInfoBoxH + 10;
+
+static constexpr int kBrowseHeaderY = kToolbarBottom + 8;
+static constexpr int kBrowseHeaderH = 14;
+static constexpr int kListY = kBrowseHeaderY + kBrowseHeaderH + 2;
+
+static constexpr int kIconBackX = 10;
+static constexpr int kIconBrowseX = 170;
+static constexpr int kIconReloadX = 210;
 
 enum KeyId : uint8_t {
   Power = 0,
@@ -1702,7 +2075,6 @@ static bool s_uiDrawn = false;
 static String s_lastErr = "";
 static bool s_loadedFromSd = false;
 
-static FeatureUI::Button s_footerBtns[4];
 static FeatureUI::Button s_keyBtns[KeyCount];
 
 // Browser state.
@@ -1714,10 +2086,7 @@ static std::vector<int> s_filteredProfileIdx;
 static String s_selectedCategory = "";
 static String s_selectedBrand = "";
 static int s_listSel = 0;
-static bool s_browseFavoritesOnly = false;
 static uint32_t s_browseVersion = 0;
-
-static std::vector<String> s_favIds;
 
 static const unsigned char* keyIcon(KeyId k) {
   switch (k) {
@@ -1757,77 +2126,20 @@ static void drawKeyButton(KeyId k, bool pressed = false) {
   }
 }
 
-static String profileIdForIndex(int idx) {
-  if (idx < 0 || idx >= (int)s_profiles.size()) return "";
-  const Profile& p = s_profiles[idx];
-
-  String id = p.name;
-  id += "|";
-  id += String((int)p.proto);
-  id += "|";
-  id += String((int)p.bits);
-  return id;
-}
-
-static bool isFavoriteId(const String& id) {
-  for (auto& s : s_favIds) if (s == id) return true;
-  return false;
-}
-
-static bool isCurrentFavorite() {
-  return isFavoriteId(profileIdForIndex(s_profileIdx));
-}
-
-static bool loadFavorites() {
-  s_favIds.clear();
-  if (!isSDCardAvailable()) return false;
-  if (!SD.exists(FAV_PATH)) return true;
-  File f = SD.open(FAV_PATH, FILE_READ);
-  if (!f) return false;
-  DynamicJsonDocument doc(2048);
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) return false;
-  JsonArray arr = doc["favorites"].as<JsonArray>();
-  if (arr.isNull()) return true;
-  for (JsonVariant v : arr) {
-    const char* s = v.as<const char*>();
-    if (s && *s) s_favIds.push_back(String(s));
-    if ((int)s_favIds.size() >= 300) break;
-  }
-  return true;
-}
-
-static bool saveFavorites() {
-  if (!isSDCardAvailable()) return false;
-  if (SD.exists(FAV_PATH)) SD.remove(FAV_PATH);
-  DynamicJsonDocument doc(2048);
-  JsonArray arr = doc.createNestedArray("favorites");
-  for (auto& s : s_favIds) arr.add(s);
-  File f = SD.open(FAV_PATH, FILE_WRITE);
-  if (!f) return false;
-  bool ok = serializeJson(doc, f) > 0;
-  f.close();
-  return ok;
-}
-
-static void toggleFavoriteCurrent() {
-  String id = profileIdForIndex(s_profileIdx);
-  if (!id.length()) return;
-  for (int i = 0; i < (int)s_favIds.size(); i++) {
-    if (s_favIds[i] == id) {
-      s_favIds.erase(s_favIds.begin() + i);
-      saveFavorites();
-      return;
-    }
-  }
-  s_favIds.push_back(id);
-  saveFavorites();
-}
-
 static String shortStatusLine(const String& s, int maxLen = 32) {
   if ((int)s.length() <= maxLen) return s;
   return s.substring(0, maxLen);
+}
+
+static String truncateWithEllipsis(const String& s, int maxPx) {
+  if (maxPx <= 0 || s.length() == 0) return s;
+  if ((int)tft.textWidth(s, 1) <= maxPx) return s;
+  const int ellW = tft.textWidth("...", 1);
+  String out = s;
+  while (out.length() > 0 && (int)tft.textWidth(out, 1) + ellW > maxPx) {
+    out.remove(out.length() - 1);
+  }
+  return out + "...";
 }
 
 static String normalizeToken(const String& in) {
@@ -2230,44 +2542,128 @@ static void refreshProfiles() {
   if (s_profileIdx >= (int)s_profiles.size()) s_profileIdx = 0;
 }
 
-static void drawHeader() {
-  const int y0 = kHeaderY;
-  tft.fillRect(0, y0, 240, kHeaderH, FEATURE_BG);
-  tft.setTextFont(2);
+static void browseBack();
+static void openCategoryBrowser();
+static void reloadUniversalProfiles();
+
+static void drawToolbar() {
+  tft.fillRect(0, kToolbarY, 240, kToolbarH, UI_FG);
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.drawBitmap(kIconBackX, kToolbarY, bitmap_icon_go_back, kIconSize, kIconSize, UI_ICON);
+
+  if (s_screen == Screen::Remote) {
+    tft.drawBitmap(kIconBrowseX, kToolbarY, bitmap_icon_list, kIconSize, kIconSize, UI_ICON);
+    tft.drawBitmap(kIconReloadX, kToolbarY, bitmap_icon_undo, kIconSize, kIconSize, UI_ICON);
+  }
+
+  tft.drawFastHLine(0, kToolbarBottom, 240, UI_LINE);
+}
+
+static void drawInfoPanel() {
+  const int panelH = kRemoteKeysTop - kBodyTop;
+  tft.fillRect(0, kBodyTop, 240, panelH, FEATURE_BG);
+
+  tft.drawRoundRect(kInfoBoxX, kInfoBoxY, kInfoBoxW, kInfoBoxH, 3, UI_LINE);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.drawString("Profile", kInfoBoxX + 4, kInfoBoxY + 3);
+
+  if (s_profiles.empty()) {
+    tft.setTextColor(UI_WARN, FEATURE_BG);
+    tft.setCursor(kPadX, kInfoTextY);
+    tft.print(shortStatusLine(s_lastErr.length() ? s_lastErr : "No profiles", 32));
+    return;
+  }
+
+  const Profile& p = s_profiles[s_profileIdx];
+
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kPadX, kInfoTextY);
+  tft.print("Name:");
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailValueX, kInfoTextY);
+  const int nameMaxW = kDetailCol2LabelX - kDetailValueX - 4;
+  tft.print(truncateWithEllipsis(p.name, nameMaxW));
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailCol2LabelX, kInfoTextY);
+  tft.print("Idx:");
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailCol2ValueX, kInfoTextY);
+  tft.printf("%d/%d", s_profileIdx + 1, (int)s_profiles.size());
+
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kPadX, kInfoTextY + kDetailLineStep);
+  tft.print("Type:");
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailValueX, kInfoTextY + kDetailLineStep);
+  const int typeMaxW = kDetailCol2LabelX - kDetailValueX - 4;
+  tft.print(truncateWithEllipsis(String(typeToString(p.proto)), typeMaxW));
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailCol2LabelX, kInfoTextY + kDetailLineStep);
+  tft.print("Bits:");
+  tft.setTextColor(UI_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailCol2ValueX, kInfoTextY + kDetailLineStep);
+  tft.print((unsigned)p.bits);
+
+  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kPadX, kInfoTextY + (kDetailLineStep * 2));
+  tft.print("Src:");
+  tft.setTextColor(s_loadedFromSd ? UI_OK : UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kDetailValueX, kInfoTextY + (kDetailLineStep * 2));
+  tft.print(s_loadedFromSd ? "SD card" : "Built-in");
+}
+
+static void drawBrowseHeader() {
+  tft.fillRect(0, kBodyTop, 240, kListY - kBodyTop, FEATURE_BG);
+  tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setTextColor(UI_ICON, FEATURE_BG);
-  tft.setCursor(10, y0 + 4);
-  tft.print("Universal IR");
-
-  tft.setTextFont(1);
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(10, y0 + 22);
-  if (!s_profiles.empty()) {
-    const Profile& p = s_profiles[s_profileIdx];
-    tft.print("Profile: ");
+  tft.setCursor(kPadX, kBrowseHeaderY);
+  if (s_screen == Screen::Category) {
+    tft.print("Select Category");
+  } else if (s_screen == Screen::Brand) {
+    tft.print("Brand:");
     tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.print(p.name);
-    tft.setTextColor(isCurrentFavorite() ? UI_WARN : UI_DIM_TEXT, FEATURE_BG);
-    tft.print(isCurrentFavorite() ? "  [FAV]" : "  [fav]");
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.setCursor(10, y0 + 34);
-    tft.print("Proto: ");
+    tft.setCursor(kDetailValueX, kBrowseHeaderY);
+    String cat = s_selectedCategory.length() ? s_selectedCategory : "ALL";
+    if (cat.length() > 18) cat = cat.substring(0, 18);
+    tft.print(cat);
+  } else if (s_screen == Screen::Profile) {
+    tft.print("Profile:");
     tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.print(typeToString(p.proto));
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.print("  ");
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.printf("%d/%d", s_profileIdx + 1, (int)s_profiles.size());
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.print("  ");
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.print(s_loadedFromSd ? "SD" : "BUILTIN");
-    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-    tft.setCursor(10, y0 + 46);
-    tft.print(shortStatusLine(s_lastErr, 36));
-  } else {
-    tft.print(shortStatusLine(s_lastErr.length() ? s_lastErr : "No profiles", 36));
+    tft.setCursor(kDetailValueX, kBrowseHeaderY);
+    String br = s_selectedBrand.length() ? s_selectedBrand : "ALL";
+    if (br.length() > 18) br = br.substring(0, 18);
+    tft.print(br);
   }
+  tft.drawFastHLine(kPadX, kListY - 1, kListW, UI_LINE);
+}
+
+static bool handleToolbarTouch(int x, int y) {
+  if (y <= kToolbarY || y >= kToolbarBottom) return false;
+
+  if (x > kIconBackX && x < (kIconBackX + kIconSize)) {
+    if (s_screen == Screen::Remote) {
+      feature_exit_requested = true;
+    } else {
+      browseBack();
+      s_uiDrawn = false;
+    }
+    return true;
+  }
+
+  if (s_screen != Screen::Remote) return false;
+
+  if (x > kIconBrowseX && x < (kIconBrowseX + kIconSize)) {
+    openCategoryBrowser();
+    return true;
+  }
+  if (x > kIconReloadX && x < (kIconReloadX + kIconSize)) {
+    reloadUniversalProfiles();
+    return true;
+  }
+  return false;
 }
 
 static void rebuildCategoriesAndBrands() {
@@ -2280,11 +2676,10 @@ static void rebuildCategoriesAndBrands() {
     v.push_back(s);
   };
 
-  addUnique(s_categories, "FAVORITES");
   for (auto& p : s_profiles) {
     addUnique(s_categories, p.category.length() ? p.category : String("OTHER"));
   }
-  std::sort(s_categories.begin() + 1, s_categories.end());
+  std::sort(s_categories.begin(), s_categories.end());
   s_browseVersion++;
 }
 
@@ -2306,12 +2701,6 @@ static void rebuildBrandsForCategory(const String& cat) {
 static void rebuildFilteredProfiles() {
   s_filteredProfileIdx.clear();
   if (s_profiles.empty()) return;
-  if (s_browseFavoritesOnly) {
-    for (int i = 0; i < (int)s_profiles.size(); i++) {
-      if (isFavoriteId(profileIdForIndex(i))) s_filteredProfileIdx.push_back(i);
-    }
-    return;
-  }
 
   for (int i = 0; i < (int)s_profiles.size(); i++) {
     const Profile& p = s_profiles[i];
@@ -2323,13 +2712,11 @@ static void rebuildFilteredProfiles() {
 }
 
 static constexpr int LIST_ROW_H = 18;
-static constexpr int LIST_X = 8;
-static constexpr int LIST_W = 224;
 
-static int listTopY() { return kHeaderY + kHeaderH + 6; }
-static int footerY() { return tft.height() - FeatureUI::FOOTER_H; }
+static int listTopY() { return kListY; }
+static int universalContentBottom() { return irContentBottom(); }
 static int listRowsVisible() {
-  int h = footerY() - listTopY() - 6;
+  int h = universalContentBottom() - listTopY() - 4;
   int rows = h / LIST_ROW_H;
   if (rows < 4) rows = 4;
   if (rows > 10) rows = 10;
@@ -2339,25 +2726,23 @@ static int listRowsVisible() {
 static void drawListRow(int y, const String& left, const String& right, bool selected) {
   uint16_t bg = selected ? UI_FG : FEATURE_BG;
   uint16_t fg = selected ? UI_ICON : UI_TEXT;
-  tft.fillRect(LIST_X, y, LIST_W, LIST_ROW_H - 1, bg);
+  tft.fillRect(kPadX, y, kListW, LIST_ROW_H - 1, bg);
   tft.setTextFont(1);
   tft.setTextColor(fg, bg);
-  tft.setCursor(LIST_X + 4, y + 4);
-  tft.print(left);
+  tft.setCursor(kPadX, y + 4);
+  tft.print(truncateWithEllipsis(left, kListW - 4));
   if (right.length()) {
     int tw = tft.textWidth(right, 1);
-    tft.setCursor(LIST_X + LIST_W - 4 - tw, y + 4);
+    tft.setCursor(kPadX + kListW - tw, y + 4);
     tft.print(right);
   }
 }
 
-static void drawListScreen(const char* title, const std::vector<String>& items) {
+static void drawListScreen(const std::vector<String>& items) {
   static Screen s_lastListScreen = Screen::Remote;
   static int s_lastSel = -1;
   static int s_lastPageStart = -1;
   static uint32_t s_lastBrowseVersion = 0;
-
-  drawHeader();
 
   const int top = listTopY();
   const int rows = listRowsVisible();
@@ -2373,7 +2758,7 @@ static void drawListScreen(const char* title, const std::vector<String>& items) 
       (s_lastSel < 0);
 
   if (needFull) {
-    tft.fillRect(0, listTopY(), 240, footerY() - listTopY(), FEATURE_BG);
+    tft.fillRect(0, listTopY(), 240, universalContentBottom() - listTopY(), FEATURE_BG);
     for (int r = 0; r < rows; r++) {
       int idx = pageStart + r;
       if (idx >= total) break;
@@ -2396,70 +2781,73 @@ static void drawListScreen(const char* title, const std::vector<String>& items) 
   s_lastSel = s_listSel;
   s_lastPageStart = pageStart;
   s_lastBrowseVersion = s_browseVersion;
-
-  FeatureUI::drawFooterBg();
 }
 
-static void layoutFooterRemote() {
-  FeatureUI::layoutFooter4(
-    s_footerBtns,
-    "Back",   FeatureUI::ButtonStyle::Secondary,
-    "Browse", FeatureUI::ButtonStyle::Secondary,
-    "Favs",   FeatureUI::ButtonStyle::Secondary,
-    "Reload", FeatureUI::ButtonStyle::Secondary
-  );
+static int browseItemCount() {
+  if (s_screen == Screen::Category) return (int)s_categories.size();
+  if (s_screen == Screen::Brand) return (int)s_brands.size();
+  if (s_screen == Screen::Profile) return (int)s_filteredProfileIdx.size();
+  return 0;
 }
 
-static void layoutFooterBrowse() {
-  FeatureUI::layoutFooter4(
-    s_footerBtns,
-    "Back",   FeatureUI::ButtonStyle::Secondary,
-    "Select", FeatureUI::ButtonStyle::Primary,
-    "Prev",   FeatureUI::ButtonStyle::Secondary,
-    "Next",   FeatureUI::ButtonStyle::Secondary
-  );
+static std::vector<String> profileBrowseNames() {
+  std::vector<String> names;
+  names.reserve(s_filteredProfileIdx.size());
+  for (int idx : s_filteredProfileIdx) {
+    if (idx < 0 || idx >= (int)s_profiles.size()) continue;
+    names.push_back(s_profiles[idx].name);
+  }
+  return names;
+}
+
+static void redrawBrowseListOnly() {
+  if (s_screen == Screen::Category) drawListScreen(s_categories);
+  else if (s_screen == Screen::Brand) drawListScreen(s_brands);
+  else if (s_screen == Screen::Profile) drawListScreen(profileBrowseNames());
+}
+
+static void bumpBrowseSelection(int delta) {
+  const int total = browseItemCount();
+  if (total <= 0) return;
+  s_listSel += delta;
+  if (s_listSel < 0) s_listSel = 0;
+  if (s_listSel >= total) s_listSel = total - 1;
+  redrawBrowseListOnly();
 }
 
 static void layoutKeyButtons() {
-  const int footerY = tft.height() - FeatureUI::FOOTER_H;
-  const int topY = kHeaderY + kHeaderH + 8;
-  const int bottomY = footerY - 8;
+  const int topY = kRemoteKeysTop;
+  const int bottomY = universalContentBottom() - 6;
 
-  const int padX = 8;
   const int gap = 6;
-
-  // Top row
-  const int topBtnH = 36;
-  const int topBtnW = (240 - 2 * padX - 2 * gap) / 3;
+  const int topBtnH = 34;
+  const int topBtnW = (kInfoBoxW - 2 * gap) / 3;
   const int yTop = topY;
-  const int x0 = padX;
+  const int x0 = kInfoBoxX;
   const int x1 = x0 + topBtnW + gap;
-  const int x2 = x1 + topBtnW + gap;
+  const int x2 = kInfoBoxRight - topBtnW;
   s_keyBtns[(int)Power] = {(int16_t)x0,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Power),FeatureUI::ButtonStyle::Secondary,true};
   s_keyBtns[(int)Mute]  = {(int16_t)x1,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Mute), FeatureUI::ButtonStyle::Secondary,true};
   s_keyBtns[(int)Back]  = {(int16_t)x2,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Back), FeatureUI::ButtonStyle::Secondary,true};
 
-  // Middle area
-  const int yMidTop = yTop + topBtnH + 10;
+  const int yMidTop = yTop + topBtnH + 8;
   const int midH = bottomY - yMidTop;
-  const int rockerW = 56;
-  const int rockerH = 74;
-  const int dpadSize = 96;
+  const int rockerW = 54;
+  const int rockerH = 72;
+  const int dpadSize = 92;
   const int dpadX = (240 - dpadSize) / 2;
   const int dpadY = yMidTop + (midH - dpadSize) / 2;
 
-  // Rockers
-  const int volX = padX;
-  const int chX = 240 - padX - rockerW;
+  const int volX = kInfoBoxX;
+  const int chX = kInfoBoxRight - rockerW;
   const int rockerY = yMidTop + (midH - rockerH) / 2;
   s_keyBtns[(int)VolUp] = {(int16_t)volX,(int16_t)rockerY,(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(VolUp),FeatureUI::ButtonStyle::Secondary,true};
   s_keyBtns[(int)VolDn] = {(int16_t)volX,(int16_t)(rockerY + rockerH/2 + 2),(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(VolDn),FeatureUI::ButtonStyle::Secondary,true};
   s_keyBtns[(int)ChUp]  = {(int16_t)chX,(int16_t)rockerY,(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(ChUp),FeatureUI::ButtonStyle::Secondary,true};
   s_keyBtns[(int)ChDn]  = {(int16_t)chX,(int16_t)(rockerY + rockerH/2 + 2),(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(ChDn),FeatureUI::ButtonStyle::Secondary,true};
 
-  // D-pad (cross)
   const int unit = 28;
-  const int okSize = 40;
+  const int okSize = 38;
   const int okX = dpadX + (dpadSize - okSize) / 2;
   const int okY = dpadY + (dpadSize - okSize) / 2;
   s_keyBtns[(int)Ok]    = {(int16_t)okX,(int16_t)okY,(int16_t)okSize,(int16_t)okSize,keyLabel(Ok),FeatureUI::ButtonStyle::Secondary,true};
@@ -2471,28 +2859,23 @@ static void layoutKeyButtons() {
 
 static void drawKeys() {
   layoutKeyButtons();
-  const int footerY = tft.height() - FeatureUI::FOOTER_H;
-  const int topY = kHeaderY + kHeaderH + 6;
-  tft.fillRect(0, topY, 240, footerY - topY, FEATURE_BG);
+  tft.fillRect(0, kRemoteKeysTop, 240, universalContentBottom() - kRemoteKeysTop, FEATURE_BG);
 
   if (s_profiles.empty()) {
-    tft.setTextFont(2);
-    tft.setTextColor(UI_WARN, FEATURE_BG);
-    tft.setCursor(10, topY + 20);
-    tft.print("No profiles");
     tft.setTextFont(1);
     tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.setCursor(10, topY + 38);
+    tft.setCursor(kPadX, kRemoteKeysTop + 12);
     tft.print("Add SD profiles:");
-    tft.setCursor(10, topY + 50);
-    tft.print("/ir_profiles.json or /ir_profiles/*.json");
+    tft.setCursor(kPadX, kRemoteKeysTop + 26);
+    tft.print("/ir_profiles.json");
+    tft.setCursor(kPadX, kRemoteKeysTop + 40);
+    tft.print("or /ir_profiles/*.json");
     return;
   }
 
   const Profile& p = s_profiles[s_profileIdx];
   for (int i = 0; i < (int)KeyCount; i++) {
-    bool ok = p.has[i];
-    s_keyBtns[i].disabled = !ok;
+    s_keyBtns[i].disabled = !p.has[i];
   }
   for (int i = 0; i < (int)KeyCount; i++) {
     drawKeyButton((KeyId)i, false);
@@ -2500,43 +2883,30 @@ static void drawKeys() {
 }
 
 static void drawFooter() {
-  FeatureUI::drawFooterBg();
-  const bool hasProfiles = !s_profiles.empty();
   if (s_screen == Screen::Remote) {
-    layoutFooterRemote();
+    irSetUniversalRemoteNavLabels();
   } else {
-    layoutFooterBrowse();
+    irSetUniversalBrowseNavLabels();
   }
-  for (int i = 0; i < 4; i++) FeatureUI::drawButton(s_footerBtns[i], false);
+  irRedrawNavChrome();
 }
 
 static void drawAll() {
+  irClearBody(FEATURE_BG);
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  drawToolbar();
+
   if (s_screen == Screen::Remote) {
-    tft.fillScreen(FEATURE_BG);
-    float v = readBatteryVoltage();
-    drawStatusBar(v, true);
-    drawHeader();
+    drawInfoPanel();
     drawKeys();
     drawFooter();
     s_uiDrawn = true;
     return;
   }
 
-  drawFooter();
-  if (s_screen == Screen::Category) drawListScreen("Browse: Category", s_categories);
-  else if (s_screen == Screen::Brand) drawListScreen("Browse: Brand", s_brands);
-  else if (s_screen == Screen::Profile) {
-    std::vector<String> names;
-    names.reserve(s_filteredProfileIdx.size());
-    for (int idx : s_filteredProfileIdx) {
-      if (idx < 0 || idx >= (int)s_profiles.size()) continue;
-      const bool fav = isFavoriteId(profileIdForIndex(idx));
-      String nm = s_profiles[idx].name;
-      if (fav) nm = String("* ") + nm;
-      names.push_back(nm);
-    }
-    drawListScreen(s_browseFavoritesOnly ? "Browse: Favorites" : "Browse: Profiles", names);
-  }
+  drawBrowseHeader();
+  redrawBrowseListOnly();
   drawFooter();
   s_uiDrawn = true;
 }
@@ -2563,37 +2933,120 @@ static void changeProfile(int delta) {
   int n = (int)s_profiles.size();
   s_profileIdx = (s_profileIdx + delta) % n;
   if (s_profileIdx < 0) s_profileIdx += n;
-  drawHeader();
+  drawInfoPanel();
   drawKeys();
-  drawFooter();
+}
+
+static void openCategoryBrowser() {
+  s_screen = Screen::Category;
+  s_listSel = 0;
+  rebuildCategoriesAndBrands();
+  s_uiDrawn = false;
+}
+
+static void reloadUniversalProfiles() {
+  refreshProfiles();
+  rebuildCategoriesAndBrands();
+  s_uiDrawn = false;
+}
+
+static void browseBack() {
+  if (s_screen == Screen::Category) s_screen = Screen::Remote;
+  else if (s_screen == Screen::Brand) s_screen = Screen::Category;
+  else if (s_screen == Screen::Profile) s_screen = Screen::Brand;
+  s_uiDrawn = false;
+}
+
+static void browseSelect() {
+  if (s_screen == Screen::Category) {
+    if (s_categories.empty()) return;
+    s_selectedCategory = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size() - 1))];
+    rebuildBrandsForCategory(s_selectedCategory);
+    s_screen = Screen::Brand;
+    s_listSel = 0;
+    s_uiDrawn = false;
+  } else if (s_screen == Screen::Brand) {
+    if (s_brands.empty()) return;
+    s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size() - 1))];
+    rebuildFilteredProfiles();
+    s_screen = Screen::Profile;
+    s_listSel = 0;
+    s_uiDrawn = false;
+  } else if (s_screen == Screen::Profile) {
+    if (s_filteredProfileIdx.empty()) return;
+    int idx = s_filteredProfileIdx[std::max(0, std::min(s_listSel, (int)s_filteredProfileIdx.size() - 1))];
+    if (idx >= 0 && idx < (int)s_profiles.size()) {
+      s_profileIdx = idx;
+      s_screen = Screen::Remote;
+      s_uiDrawn = false;
+    }
+  }
+}
+
+static void handleUniversalNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+
+  if (s_screen == Screen::Remote) {
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      changeProfile(-1);
+    }
+    if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+      openCategoryBrowser();
+    }
+    if (isTouchNavButtonPressedEdge(BTN_UP)) {
+      reloadUniversalProfiles();
+    }
+    if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+      changeProfile(+1);
+    }
+    return;
+  }
+
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    browseBack();
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    bumpBrowseSelection(1);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+    bumpBrowseSelection(-1);
+  }
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+    browseSelect();
+  }
 }
 
 void setup() {
+  setTouchButtonInputEnabled(true);
+  irSetUniversalRemoteNavLabels();
   s_send.begin();
   s_profileIdx = 0;
   s_uiDrawn = false;
   s_screen = Screen::Remote;
-  loadFavorites();
   refreshProfiles();
   rebuildCategoriesAndBrands();
   drawAll();
 }
 
 void loop() {
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
+  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
     feature_exit_requested = true;
     return;
   }
 
   if (!s_uiDrawn) drawAll();
+  maintainTouchNavBar();
+  handleUniversalNavButtons();
 
   const uint32_t now = millis();
   static uint32_t lastBtnMs = 0;
   static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
-  const bool leftNow  = isButtonPressed(BTN_LEFT);
-  const bool rightNow = isButtonPressed(BTN_RIGHT);
-  const bool upNow    = isButtonPressed(BTN_UP);
-  const bool downNow  = isButtonPressed(BTN_DOWN);
+  const bool leftNow  = isPhysicalButtonPressed(BTN_LEFT);
+  const bool rightNow = isPhysicalButtonPressed(BTN_RIGHT);
+  const bool upNow    = isPhysicalButtonPressed(BTN_UP);
+  const bool downNow  = isPhysicalButtonPressed(BTN_DOWN);
   constexpr uint32_t kBtnDebounceMs = 320;
   if ((uint32_t)(now - lastBtnMs) > kBtnDebounceMs) {
     if (s_screen == Screen::Remote) {
@@ -2602,29 +3055,19 @@ void loop() {
       else if (upNow && !prevUp) { sendKey(VolUp); lastBtnMs = now; }
       else if (downNow && !prevDown) { sendKey(VolDn); lastBtnMs = now; }
     } else {
-      if (upNow && !prevUp) { s_listSel--; s_uiDrawn = false; lastBtnMs = now; }
-      else if (downNow && !prevDown) { s_listSel++; s_uiDrawn = false; lastBtnMs = now; }
+      if (upNow && !prevUp) { bumpBrowseSelection(-1); lastBtnMs = now; }
+      else if (downNow && !prevDown) { bumpBrowseSelection(1); lastBtnMs = now; }
       else if (leftNow && !prevLeft) {
         if (s_screen == Screen::Category) { s_screen = Screen::Remote; }
         else if (s_screen == Screen::Brand) { s_screen = Screen::Category; }
-        else if (s_screen == Screen::Profile) { s_screen = s_browseFavoritesOnly ? Screen::Category : Screen::Brand; }
+        else if (s_screen == Screen::Profile) { s_screen = Screen::Brand; }
         s_uiDrawn = false; lastBtnMs = now;
       } else if (rightNow && !prevRight) {
         if (s_screen == Screen::Category) {
           if (!s_categories.empty()) {
-            String cat = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size()-1))];
-            if (cat == "FAVORITES") {
-              s_browseFavoritesOnly = true;
-              s_selectedCategory = "";
-              s_selectedBrand = "";
-              rebuildFilteredProfiles();
-              s_screen = Screen::Profile;
-            } else {
-              s_browseFavoritesOnly = false;
-              s_selectedCategory = cat;
-              rebuildBrandsForCategory(cat);
-              s_screen = Screen::Brand;
-            }
+            s_selectedCategory = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size()-1))];
+            rebuildBrandsForCategory(s_selectedCategory);
+            s_screen = Screen::Brand;
             s_listSel = 0;
             s_uiDrawn = false;
             lastBtnMs = now;
@@ -2632,7 +3075,6 @@ void loop() {
         } else if (s_screen == Screen::Brand) {
           if (!s_brands.empty()) {
             s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size()-1))];
-            s_browseFavoritesOnly = false;
             rebuildFilteredProfiles();
             s_screen = Screen::Profile;
             s_listSel = 0;
@@ -2660,7 +3102,7 @@ void loop() {
 
   static uint32_t lastTouchMs = 0;
   static bool touchWasDown = false;
-  const bool touchNow = ts.touched();
+  const bool touchNow = isTouchDownDismiss();
   constexpr uint32_t kTouchDebounceMs = 320;
   if (touchNow && !touchWasDown) {
     int x, y;
@@ -2669,63 +3111,7 @@ void loop() {
     if ((uint32_t)(now - lastTouchMs) < kTouchDebounceMs) return;
     lastTouchMs = now;
 
-    if (x > 180 && y >= kHeaderY + 18 && y <= kHeaderY + 34 && s_screen == Screen::Remote) {
-      toggleFavoriteCurrent();
-      drawHeader();
-      return;
-    }
-
-    int f = FeatureUI::hit(s_footerBtns, 4, x, y);
-    if (f >= 0) {
-      if (s_screen == Screen::Remote) {
-        if (f == 0) { feature_exit_requested = true; return; }
-        if (f == 1) { s_screen = Screen::Category; s_listSel = 0; rebuildCategoriesAndBrands(); s_uiDrawn = false; return; }
-        if (f == 2) { s_browseFavoritesOnly = true; rebuildFilteredProfiles(); s_screen = Screen::Profile; s_listSel = 0; s_uiDrawn = false; return; }
-        if (f == 3) { refreshProfiles(); rebuildCategoriesAndBrands(); s_uiDrawn = false; return; }
-      } else {
-
-        if (f == 0) {
-          if (s_screen == Screen::Category) s_screen = Screen::Remote;
-          else if (s_screen == Screen::Brand) s_screen = Screen::Category;
-          else if (s_screen == Screen::Profile) s_screen = s_browseFavoritesOnly ? Screen::Category : Screen::Brand;
-          s_uiDrawn = false; return;
-        }
-        if (f == 1) {
-
-          if (s_screen == Screen::Category) { prevRight = false; }
-
-          if (s_screen == Screen::Category) {
-            if (!s_categories.empty()) {
-              String cat = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size()-1))];
-              if (cat == "FAVORITES") {
-                s_browseFavoritesOnly = true; s_selectedCategory=""; s_selectedBrand="";
-                rebuildFilteredProfiles(); s_screen = Screen::Profile;
-              } else {
-                s_browseFavoritesOnly = false; s_selectedCategory = cat;
-                rebuildBrandsForCategory(cat); s_screen = Screen::Brand;
-              }
-              s_listSel = 0; s_uiDrawn = false; return;
-            }
-          } else if (s_screen == Screen::Brand) {
-            if (!s_brands.empty()) {
-              s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size()-1))];
-              s_browseFavoritesOnly = false; rebuildFilteredProfiles(); s_screen = Screen::Profile;
-              s_listSel = 0; s_uiDrawn = false; return;
-            }
-          } else if (s_screen == Screen::Profile) {
-            if (!s_filteredProfileIdx.empty()) {
-              int idx = s_filteredProfileIdx[std::max(0, std::min(s_listSel, (int)s_filteredProfileIdx.size()-1))];
-              if (idx >= 0 && idx < (int)s_profiles.size()) {
-                s_profileIdx = idx; s_screen = Screen::Remote; s_uiDrawn = false; return;
-              }
-            }
-          }
-        }
-        if (f == 2) { s_listSel -= listRowsVisible(); if (s_listSel < 0) s_listSel = 0; s_uiDrawn = false; return; }
-        if (f == 3) { s_listSel += listRowsVisible(); s_uiDrawn = false; return; }
-      }
-      return;
-    }
+    if (handleToolbarTouch(x, y)) return;
 
     if (s_screen == Screen::Remote) {
       int k = FeatureUI::hit(s_keyBtns, (int)KeyCount, x, y);
@@ -2749,7 +3135,11 @@ void loop() {
         if (s_screen == Screen::Category) max = (int)s_categories.size();
         else if (s_screen == Screen::Brand) max = (int)s_brands.size();
         else if (s_screen == Screen::Profile) max = (int)s_filteredProfileIdx.size();
-        if (idx >= 0 && idx < max) { s_listSel = idx; s_uiDrawn = false; return; }
+        if (idx >= 0 && idx < max) {
+          s_listSel = idx;
+          redrawBrowseListOnly();
+          return;
+        }
       }
     }
   }

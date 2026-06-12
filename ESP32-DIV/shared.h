@@ -1,11 +1,15 @@
 #ifndef SHARED_H
 #define SHARED_H
 #include <stdint.h>
+#include "BoardConfig.h"
 
 /*──────────────────── Colors ────────────────────*/
-const uint16_t ORANGE = 0xFBE4, GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
+const uint16_t GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
                GREEN  = 0x07E0, BLACK = 0x0000, WHITE = 0xFFFF,
                LIGHT_GRAY = 0xC618, DARK_GRAY = 0x4208;
+
+uint16_t uiUniversalColor();
+#define ORANGE uiUniversalColor()
                
 #define TFT_DARKBLUE   0x3166
 #define TFT_LIGHTBLUE  0x051F
@@ -33,7 +37,7 @@ const uint16_t ORANGE = 0xFBE4, GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
 #define FEATURE_BG BLACK
 #endif
 
-#define SELECTED_ICON_COLOR 0xFBE4
+#define SELECTED_ICON_COLOR UI_ICON
 
 /*──────────────────── UI Defaults ────────────────────*/
 #ifndef UI_BG
@@ -58,7 +62,7 @@ const uint16_t ORANGE = 0xFBE4, GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
 #define UI_ACCENT UI.accent
 #endif
 #ifndef UI_WARN
-#define UI_WARN ORANGE
+#define UI_WARN UI.warn
 #endif
 #ifndef UI_OK
 #define UI_OK GREEN
@@ -81,13 +85,165 @@ static const uint8_t OBF_EM[]   = {107, 97, 110, 109, 122, 124, 109, 107, 96, 72
 static const uint8_t OBF_GH[]   = {111, 97, 124, 96, 125, 106, 38, 107, 103, 101, 39, 107, 97, 110, 109, 122, 124, 109, 107, 96}; 
 static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 102, 109, 124};       
 
+/*──────────────────── Board Selection ────────────────────*/
+// Default is selected in BoardConfig.h. You can also pass a BOARD_* define
+// from your build flags to target a board without editing source.
+#if !defined(BOARD_ESP32_DIV_V2) && !defined(BOARD_CYD) && !defined(BOARD_ESP32_DIV_V1)
+#define BOARD_ESP32_DIV_V2
+#endif
+
+#if (defined(BOARD_ESP32_DIV_V2) + defined(BOARD_CYD) + defined(BOARD_ESP32_DIV_V1)) > 1
+#error "Select only one board: BOARD_ESP32_DIV_V2, BOARD_ESP32_DIV_V1, or BOARD_CYD"
+#endif
+
+#if defined(BOARD_CYD)
+#ifndef ESP32DIV_BOARD_NAME
+#define ESP32DIV_BOARD_NAME "CYD ESP32-2432S028R"
+#endif
+#ifndef HAS_PCF8574_BUTTONS
+#define HAS_PCF8574_BUTTONS 0
+#endif
+#ifndef BOARD_HAS_ESP32S3
+#define BOARD_HAS_ESP32S3 0
+#endif
+#elif defined(BOARD_ESP32_DIV_V1)
+#ifndef ESP32DIV_BOARD_NAME
+#define ESP32DIV_BOARD_NAME "ESP32-DIV V1 ESP32U"
+#endif
+#ifndef HAS_PCF8574_BUTTONS
+#define HAS_PCF8574_BUTTONS 1
+#endif
+#ifndef BOARD_HAS_ESP32S3
+#define BOARD_HAS_ESP32S3 0
+#endif
+#elif defined(BOARD_ESP32_DIV_V2)
+#ifndef ESP32DIV_BOARD_NAME
+#define ESP32DIV_BOARD_NAME "ESP32-DIV V2"
+#endif
+#ifndef HAS_PCF8574_BUTTONS
+#define HAS_PCF8574_BUTTONS 1
+#endif
+#ifndef BOARD_HAS_ESP32S3
+#define BOARD_HAS_ESP32S3 1
+#endif
+#else
+#error "Unknown board: define BOARD_ESP32_DIV_V2, BOARD_ESP32_DIV_V1, or BOARD_CYD"
+#endif
+
+/*──────────────────── Touch calibration profiles ────────────────────*/
+/* Factory defaults per board (raw XPT2046 range). Override in BoardConfig.h.
+ * User-saved calibration in settings.json overrides when board id matches. */
+#if defined(BOARD_CYD)
+#ifndef TOUCH_PROFILE_ID
+#define TOUCH_PROFILE_ID "CYD"
+#endif
+#ifndef TOUCH_X_MIN
+#define TOUCH_X_MIN 200
+#endif
+#ifndef TOUCH_X_MAX
+#define TOUCH_X_MAX 3700
+#endif
+#ifndef TOUCH_Y_MIN
+#define TOUCH_Y_MIN 240
+#endif
+#ifndef TOUCH_Y_MAX
+#define TOUCH_Y_MAX 3800
+#endif
+#elif defined(BOARD_ESP32_DIV_V1)
+#ifndef TOUCH_PROFILE_ID
+#define TOUCH_PROFILE_ID "ESP32_DIV_V1"
+#endif
+#ifndef TOUCH_X_MIN
+#define TOUCH_X_MIN 300
+#endif
+#ifndef TOUCH_X_MAX
+#define TOUCH_X_MAX 3800
+#endif
+#ifndef TOUCH_Y_MIN
+#define TOUCH_Y_MIN 300
+#endif
+#ifndef TOUCH_Y_MAX
+#define TOUCH_Y_MAX 3800
+#endif
+#elif defined(BOARD_ESP32_DIV_V2)
+#ifndef TOUCH_PROFILE_ID
+#define TOUCH_PROFILE_ID "ESP32_DIV_V2"
+#endif
+#ifndef TOUCH_X_MIN
+#define TOUCH_X_MIN 280
+#endif
+#ifndef TOUCH_X_MAX
+#define TOUCH_X_MAX 3850
+#endif
+#ifndef TOUCH_Y_MIN
+#define TOUCH_Y_MIN 320
+#endif
+#ifndef TOUCH_Y_MAX
+#define TOUCH_Y_MAX 3750
+#endif
+#endif
+
+#ifndef TOUCH_PROFILE_ID
+#define TOUCH_PROFILE_ID "GENERIC"
+#endif
+#ifndef TOUCH_X_MIN
+#define TOUCH_X_MIN 300
+#endif
+#ifndef TOUCH_X_MAX
+#define TOUCH_X_MAX 3800
+#endif
+#ifndef TOUCH_Y_MIN
+#define TOUCH_Y_MIN 300
+#endif
+#ifndef TOUCH_Y_MAX
+#define TOUCH_Y_MAX 3800
+#endif
+
+#ifndef TFT_ROTATION
+#if defined(BOARD_CYD) || defined(BOARD_ESP32_DIV_V1)
+#define TFT_ROTATION 0
+#else
+#define TFT_ROTATION 2
+#endif
+#endif
+
+#ifndef TOUCH_SHARES_TFT_SPI
+/* CYD uses a dedicated VSPI touch bus (T_CLK/T_DIN/T_OUT on 25/32/39); TFT stays on HSPI. */
+#define TOUCH_SHARES_TFT_SPI 0
+#endif
+
+#if defined(BOARD_CYD)
+#ifndef TOUCH_ROTATION
+/* Match TFT_ROTATION (RNT CYD test uses the same rotation for tft and touch). */
+#define TOUCH_ROTATION TFT_ROTATION
+#endif
+#endif
+
 /*──────────────────── I/O & Pins ────────────────────*/
-#define pcf_ADDR     0x20
+// PCF8574 I2C address: auto-detect 0x20-0x27 by default.
+// To force a fixed address, add to BoardConfig.h: #define pcf_ADDR 0x21
+#ifndef pcf_ADDR
+#define PCF8574_AUTO_DETECT 1
+#define PCF8574_I2C_ADDR  0x20
+#else
+#define PCF8574_AUTO_DETECT 0
+#define PCF8574_I2C_ADDR  pcf_ADDR
+#endif
+#define PCF8574_ADDR_MIN 0x20
+#define PCF8574_ADDR_MAX 0x27
+#if defined(BOARD_ESP32_DIV_V1)
+#define BTN_UP       6
+#define BTN_DOWN     3
+#define BTN_LEFT     4
+#define BTN_RIGHT    5
+#define BTN_SELECT   7
+#else
 #define BTN_UP       7
 #define BTN_DOWN     5
 #define BTN_LEFT     3
 #define BTN_RIGHT    4
 #define BTN_SELECT   6
+#endif
 
 /* Buzzer */
 #ifndef BUZZER_PIN
@@ -96,65 +252,237 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 
 /* Backlight / PWM */
+#ifndef BACKLIGHT_PIN
+#if defined(BOARD_CYD)
+#define BACKLIGHT_PIN   21
+#elif defined(BOARD_ESP32_DIV_V1)
+#define BACKLIGHT_PIN   32
+#else
 #define BACKLIGHT_PIN   7
+#endif
+#endif
 #define PWM_CHANNEL     0
 #define PWM_FREQ        5000
 #define PWM_RESOLUTION  8
 
 /* XPT2046 (Touch) SPI */
+#ifndef XPT2046_CS
+#if defined(BOARD_CYD)
+#define XPT2046_CS   33
+#elif defined(BOARD_ESP32_DIV_V1)
+#define XPT2046_CS   33
+#else
 #define XPT2046_CS   18
+#endif
+#endif
+#ifndef XPT2046_MOSI
+#if defined(BOARD_CYD)
+#define XPT2046_MOSI 32
+#elif defined(BOARD_ESP32_DIV_V1)
+#define XPT2046_MOSI 23
+#else
 #define XPT2046_MOSI 35
+#endif
+#endif
+#ifndef XPT2046_MISO
+#if defined(BOARD_CYD)
+#define XPT2046_MISO 39
+#elif defined(BOARD_ESP32_DIV_V1)
+#define XPT2046_MISO 19
+#else
 #define XPT2046_MISO 37
+#endif
+#endif
+#ifndef XPT2046_CLK
+#if defined(BOARD_CYD)
+#define XPT2046_CLK  25
+#elif defined(BOARD_ESP32_DIV_V1)
+#define XPT2046_CLK  18
+#else
 #define XPT2046_CLK  36
+#endif
+#endif
+#ifndef XPT2046_IRQ
+#if defined(BOARD_CYD)
+#define XPT2046_IRQ  36
+#else
+#define XPT2046_IRQ  255
+#endif
+#endif
 
 /* SD Card */
+#ifndef SD_CS
+#if defined(BOARD_CYD)
+#define SD_CS    5
+#elif defined(BOARD_ESP32_DIV_V1)
+#define SD_CS    5
+#else
 #define SD_CS    10
+#endif
+#endif
+#ifndef SD_MOSI
+#if defined(BOARD_CYD)
+#define SD_MOSI  23
+#elif defined(BOARD_ESP32_DIV_V1)
+#define SD_MOSI  23
+#else
 #define SD_MOSI  11
+#endif
+#endif
+#ifndef SD_MISO
+#if defined(BOARD_CYD)
+#define SD_MISO  19
+#elif defined(BOARD_ESP32_DIV_V1)
+#define SD_MISO  19
+#else
 #define SD_MISO  13
+#endif
+#endif
+#ifndef SD_SCLK
+#if defined(BOARD_CYD)
+#define SD_SCLK  18
+#elif defined(BOARD_ESP32_DIV_V1)
+#define SD_SCLK  18
+#else
 #define SD_SCLK  12
+#endif
+#endif
+#if !defined(BOARD_CYD) && !defined(BOARD_ESP32_DIV_V1) && !defined(SD_CD)
 #define SD_CD    38
+#endif
+#ifndef SD_CS_PIN
 #define SD_CS_PIN 5
+#endif
 
-/* PN532 RFID/NFC (SPI). Defaults avoid CC1101_CS (5), Touch CS (18), SD pins (10–13).
- * Wire PN532 to these pins or override before build. Requires Adafruit PN532 library. */
+/* PN532 RFID/NFC (SPI).
+ * CYD has few spare GPIOs; these are suggested external wiring defaults.
+ * Override any pin below if your wiring differs. Requires Adafruit PN532 library. */
 #ifndef PN532_SCK
+#if defined(BOARD_CYD)
+#define PN532_SCK  18
+#else
 #define PN532_SCK  12
 #endif
+#endif
 #ifndef PN532_MISO
+#if defined(BOARD_CYD)
+#define PN532_MISO 19
+#else
 #define PN532_MISO 11
 #endif
+#endif
 #ifndef PN532_MOSI
+#if defined(BOARD_CYD)
+#define PN532_MOSI 23
+#else
 #define PN532_MOSI 13
 #endif
+#endif
 #ifndef PN532_SS
+#if defined(BOARD_CYD)
+#define PN532_SS   25
+#else
 #define PN532_SS   4
+#endif
 #endif
 
 /* UART (if you use hardware serial on external pins) */
+#ifndef RX_PIN
+#if defined(BOARD_CYD)
+#define RX_PIN 35
+#elif defined(BOARD_ESP32_DIV_V1)
+#define RX_PIN 16
+#else
 #define RX_PIN 6
+#endif
+#endif
+#ifndef TX_PIN
+#if defined(BOARD_CYD)
+#define TX_PIN 22
+#elif defined(BOARD_ESP32_DIV_V1)
+#define TX_PIN 26
+#else
 #define TX_PIN 3
+#endif
+#endif
 
 /* Neo-6M GPS — GPS module TX → ESP RX, GPS RX → ESP TX (optional). Uses UART2 by default. */
 #ifndef GPS_UART_RX
+#if defined(BOARD_CYD)
+#define GPS_UART_RX 35
+#elif defined(BOARD_ESP32_DIV_V1)
+#define GPS_UART_RX 3
+#else
 #define GPS_UART_RX 47
 #endif
+#endif
 #ifndef GPS_UART_TX
+#if defined(BOARD_CYD)
+#define GPS_UART_TX 22
+#elif defined(BOARD_ESP32_DIV_V1)
+#define GPS_UART_TX 1
+#else
 #define GPS_UART_TX 48
+#endif
 #endif
 
 /* CC1101 (Sub-GHz) */
+#ifndef CC1101_SCK
+#if defined(BOARD_CYD)
+#define CC1101_SCK  18
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CC1101_SCK  18
+#else
 #define CC1101_SCK  12
+#endif
+#endif
+#ifndef CC1101_MISO
+#if defined(BOARD_CYD)
+#define CC1101_MISO 19
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CC1101_MISO 19
+#else
 #define CC1101_MISO 13
+#endif
+#endif
+#ifndef CC1101_MOSI
+#if defined(BOARD_CYD)
+#define CC1101_MOSI 23
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CC1101_MOSI 23
+#else
 #define CC1101_MOSI 11
+#endif
+#endif
+#ifndef CC1101_CS
+#if defined(BOARD_CYD)
+#define CC1101_CS   27
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CC1101_CS   27
+#else
 #define CC1101_CS   5
+#endif
+#endif
 
 /* SubGHz (RCSwitch/Replay) data pins (wired to CC1101 GDO pins) */
 // Override these in your board config if your wiring differs.
 #ifndef SUBGHZ_RX_PIN
+#if defined(BOARD_CYD)
+#define SUBGHZ_RX_PIN 35
+#elif defined(BOARD_ESP32_DIV_V1)
+#define SUBGHZ_RX_PIN 16
+#else
 #define SUBGHZ_RX_PIN 3
 #endif
+#endif
 #ifndef SUBGHZ_TX_PIN
+#if defined(BOARD_CYD)
+#define SUBGHZ_TX_PIN 22
+#elif defined(BOARD_ESP32_DIV_V1)
+#define SUBGHZ_TX_PIN 26
+#else
 #define SUBGHZ_TX_PIN 6
+#endif
 #endif
 
 // CC1101 GDO mapping (used by ELECHOUSE_cc1101.setGDO).
@@ -172,22 +500,82 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 
 /* NRF24 */
+#ifndef CE_PIN_1
+#if defined(BOARD_CYD)
+#define CE_PIN_1  16
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CE_PIN_1  4
+#else
 #define CE_PIN_1  15
+#endif
+#endif
+#ifndef CSN_PIN_1
+#if defined(BOARD_CYD)
+#define CSN_PIN_1 17
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CSN_PIN_1 5
+#else
 #define CSN_PIN_1 4
+#endif
+#endif
+#ifndef CE_PIN_2
+#if defined(BOARD_CYD)
+#define CE_PIN_2  22
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CE_PIN_2  26
+#else
 #define CE_PIN_2  47
+#endif
+#endif
+#ifndef CSN_PIN_2
+#if defined(BOARD_CYD)
+#define CSN_PIN_2 27
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CSN_PIN_2 27
+#else
 #define CSN_PIN_2 48
+#endif
+#endif
+#ifndef CE_PIN_3
+#if defined(BOARD_CYD)
+#define CE_PIN_3  4
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CE_PIN_3  16
+#else
 #define CE_PIN_3  14
+#endif
+#endif
+#ifndef CSN_PIN_3
+#if defined(BOARD_CYD)
+#define CSN_PIN_3 25
+#elif defined(BOARD_ESP32_DIV_V1)
+#define CSN_PIN_3 17
+#else
 #define CSN_PIN_3 21
+#endif
+#endif
 
 /* IR Remote (Record/Replay)
  * NOTE: Default pins overlap with the optional NRF24 #3 wiring above.
  * If you use NRF24 on CE_PIN_3/CSN_PIN_3, override these in your board config.
  */
 #ifndef IR_RX_PIN
+#if defined(BOARD_CYD)
+#define IR_RX_PIN 35
+#elif defined(BOARD_ESP32_DIV_V1)
+#define IR_RX_PIN 4
+#else
 #define IR_RX_PIN 21
 #endif
+#endif
 #ifndef IR_TX_PIN
+#if defined(BOARD_CYD)
+#define IR_TX_PIN 4
+#elif defined(BOARD_ESP32_DIV_V1)
+#define IR_TX_PIN 5
+#else
 #define IR_TX_PIN 14
+#endif
 #endif
 #ifndef IR_DEFAULT_KHZ
 #define IR_DEFAULT_KHZ 38
@@ -202,19 +590,6 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 #ifndef STATUS_BAR_Y_OFFSET
 #define STATUS_BAR_Y_OFFSET 0
-#endif
-
-#ifndef TOUCH_X_MIN
-#define TOUCH_X_MIN 300
-#endif
-#ifndef TOUCH_X_MAX
-#define TOUCH_X_MAX 3800
-#endif
-#ifndef TOUCH_Y_MIN
-#define TOUCH_Y_MIN 300
-#endif
-#ifndef TOUCH_Y_MAX
-#define TOUCH_Y_MAX 3800
 #endif
 
 /*──────────────────── Timing ────────────────────*/
@@ -310,6 +685,9 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #ifndef FEATURE_BLE_TOOLS
 #define FEATURE_BLE_TOOLS    1
 #endif
+#ifndef FEATURE_BLE_DUCKY
+#define FEATURE_BLE_DUCKY    BOARD_HAS_ESP32S3
+#endif
 #ifndef FEATURE_SUBGHZ_TOOLS
 #define FEATURE_SUBGHZ_TOOLS 1
 #endif
@@ -337,7 +715,8 @@ void displaySubmenu();
 /*──────────────────── Runtime UI Palette ────────────────────*/
 struct UiPalette { uint16_t bg, fg, icon, text, accent, line, lable, warn, ok; };
 extern UiPalette UI;                   
-void applyThemeToPalette(Theme t);     
+void applyThemeToPalette(Theme t);
+uint16_t uiUniversalColor();
 
 /*──────────────────── UI Text Helpers ────────────────────*/
 // Dim label text color (used for *text* only).

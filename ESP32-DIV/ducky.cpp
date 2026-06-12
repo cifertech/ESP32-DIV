@@ -11,9 +11,6 @@
 #include "shared.h"
 #include "utils.h"
 
-
-#define pcf_ADDR 0x20
-
 extern PCF8574 pcf;
 
 extern bool feature_exit_requested;
@@ -73,6 +70,18 @@ static const int PADDING     = FeatureUI::PAD_X;
 static const int TOOLBAR_Y      = 37;
 static const int TOOLBAR_HEIGHT = HEADER_H;
 
+static int duckyFooterReserve() {
+  return featureHasTouchNavBar() ? touchNavReservedHeight() : FOOTER_H;
+}
+
+static int duckyToastTop() {
+  return DISPLAY_HEIGHT - duckyFooterReserve() - 28;
+}
+
+static int duckyToastCenterY() {
+  return DISPLAY_HEIGHT - duckyFooterReserve() - 24;
+}
+
 static bool sd_mounted = false;
 static bool ui_inited  = false;
 static bool ui_busy    = false;
@@ -107,7 +116,7 @@ static const unsigned char* icons[ICON_NUM] = {
 static const int ICON_SIZE = 16;
 
 static bool pcfPressedEdge(EdgeBtn& eb, uint16_t debounceMs=40) {
-  bool cur = pcf.digitalRead(eb.pin);
+  bool cur = isButtonPressed(eb.pin) ? LOW : HIGH;
   uint32_t now = millis();
   bool pressedEvent = (!cur && eb.last && (now - eb.tLast) > debounceMs);
   if (pressedEvent) eb.tLast = now;
@@ -126,6 +135,20 @@ static int  sel = 0;
 
 enum class Page { List, Details, Settings };
 static Page page = Page::List;
+
+static void duckyUpdateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (page == Page::List) {
+    setTouchNavLabels("Exit", "Reload", "Open", "Prev", "Next");
+  } else if (page == Page::Details) {
+    setTouchNavLabels("Back", "Delete", "Run", "List", "Run");
+  } else if (page == Page::Settings) {
+    setTouchNavLabels("Back", "Reload", "Open", "Prev", "Next");
+  }
+  redrawTouchButtonBar();
+}
 
 enum class Dialog { None, ConfirmDelete };
 static Dialog dialog = Dialog::None;
@@ -243,7 +266,7 @@ static void drawSettingsPage();
 
 static void drawIconHeader() {
     if (!uiDrawn) {
-        tft.drawLine(0, 19, 240, 19, TFT_WHITE);
+        tft.drawFastHLine(0, 19, 240, UI_LINE);
         tft.fillRect(0, 20, 240, 16, DARK_GRAY);
 
         for (int i = 0; i < ICON_NUM; i++) {
@@ -251,7 +274,7 @@ static void drawIconHeader() {
                 tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
             }
         }
-        tft.drawLine(0, 36, 240, 36, ORANGE);
+        tft.drawFastHLine(0, 36, 240, UI_LINE);
         uiDrawn = true;
     }
 }
@@ -308,7 +331,9 @@ static void updateIconAnimation() {
 
 static bool mountSD() {
   if (sd_mounted) return true;
+#ifdef SD_CD
   pinMode(SD_CD, INPUT_PULLUP);
+#endif
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
   if (SD.begin(SD_CS)) { sd_mounted = true; return true; }
   #ifdef SD_CS_PIN
@@ -613,7 +638,7 @@ static void drawHeader(HeaderType type, const String& title = "", bool drawFoote
     );
   }
 
-  if (drawFooterBg && type != HeaderType::IconBar) {
+  if (drawFooterBg && type != HeaderType::IconBar && !featureHasTouchNavBar()) {
     FeatureUI::drawFooterBg();
   }
 }
@@ -643,8 +668,12 @@ static void refreshHeaderStatusIfNeeded(bool force = false) {
   const uint32_t now = millis();
   if (force || (now - lastStatusPollMs) > 500) {
     lastStatusPollMs = now;
+#ifdef SD_CD
     pinMode(SD_CD, INPUT_PULLUP);
     bool cardPresent = !digitalRead(SD_CD);
+#else
+    bool cardPresent = true;
+#endif
 
     if (lastCardPresent && !cardPresent) {
       showAndExitNoSD("SD card removed", "Returning...");
@@ -690,11 +719,25 @@ static void calcListLayout(int& headerBottom, int& hintY, int& listTop,
   headerBottom = barY + TEXT_HEADER_H + 1;
   rowStride = LIST_ROW_H + LIST_ROW_GAP;
 
-  hintY   = headerBottom + 8;
-  listTop = headerBottom + 22;
-  maxVisibleItems = (DISPLAY_HEIGHT - FOOTER_H - listTop - 4) / rowStride;
+  const int contentBottom = DISPLAY_HEIGHT - duckyFooterReserve();
+  const int hintBandH = 18;
+  hintY = headerBottom + 6;
+  const int listAreaTop = headerBottom + hintBandH;
+  const int listAreaH = contentBottom - listAreaTop - 4;
+
+  maxVisibleItems = listAreaH / rowStride;
   if (maxVisibleItems < 1) maxVisibleItems = 1;
-  hasScrollbar = ((int)items.size() > maxVisibleItems);
+
+  const int itemCount = (int)items.size();
+  const int viewportH = maxVisibleItems * rowStride - LIST_ROW_GAP;
+  if (itemCount > 0 && itemCount < maxVisibleItems) {
+    const int blockH = itemCount * rowStride - LIST_ROW_GAP;
+    listTop = listAreaTop + (listAreaH - blockH) / 2;
+  } else {
+    listTop = listAreaTop + (listAreaH - viewportH) / 2;
+  }
+
+  hasScrollbar = (itemCount > maxVisibleItems);
   rw = DISPLAY_WIDTH - 2*PADDING - (hasScrollbar ? 12 : 0);
   rh = LIST_ROW_H - 2;
 }
@@ -720,10 +763,11 @@ static void drawListHints(int hintY) {
   tft.drawString("Double-tap to execute", PADDING, hintY, 1);
 }
 
-static void drawListScrollbar(int listTop, int maxVisibleItems, int startItem) {
+static void drawListScrollbar(int listTop, int rowStride, int maxVisibleItems, int startItem) {
   if ((int)items.size() <= maxVisibleItems) return;
   int scrollBarX = DISPLAY_WIDTH - 8;
-  int scrollBarHeight = DISPLAY_HEIGHT - FOOTER_H - listTop - 8;
+  const int viewportH = maxVisibleItems * rowStride - LIST_ROW_GAP;
+  int scrollBarHeight = viewportH - 8;
   int scrollBarY = listTop + 4;
   int indicatorHeight = (maxVisibleItems * scrollBarHeight) / (int)items.size();
   int indicatorY = scrollBarY + (startItem * (scrollBarHeight - indicatorHeight)) / (int)items.size();
@@ -780,12 +824,12 @@ static void drawListContentFull() {
   bool hasScrollbar;
   calcListLayout(headerBottom, hintY, listTop, rowStride, maxVisibleItems, hasScrollbar, rw, rh);
 
-  tft.fillRect(0, headerBottom, DISPLAY_WIDTH, DISPLAY_HEIGHT - headerBottom - FOOTER_H, COL_BG);
+  tft.fillRect(0, headerBottom, DISPLAY_WIDTH, DISPLAY_HEIGHT - headerBottom - duckyFooterReserve(), COL_BG);
 
   int startItem, endItem;
   calcListWindow(maxVisibleItems, startItem, endItem);
 
-  drawListScrollbar(listTop, maxVisibleItems, startItem);
+  drawListScrollbar(listTop, rowStride, maxVisibleItems, startItem);
 
   int y = listTop;
   for (int i = startItem; i < endItem; ++i) {
@@ -896,13 +940,17 @@ static void drawListPage(bool forceReload) {
     clampSel();
     drawListContentFull();
   }
-  FeatureUI::layoutFooter3(
-    listBtns,
-    "Open",    FeatureUI::ButtonStyle::Primary,
-    "Refresh", FeatureUI::ButtonStyle::Secondary,
-    "Exit",    FeatureUI::ButtonStyle::Secondary
-  );
-  for (auto& b: listBtns) FeatureUI::drawButton(b);
+  if (featureHasTouchNavBar()) {
+    duckyUpdateNavLabels();
+  } else {
+    FeatureUI::layoutFooter3(
+      listBtns,
+      "Open",    FeatureUI::ButtonStyle::Primary,
+      "Refresh", FeatureUI::ButtonStyle::Secondary,
+      "Exit",    FeatureUI::ButtonStyle::Secondary
+    );
+    for (auto& b: listBtns) FeatureUI::drawButton(b);
+  }
 }
 
 static void drawDetailsPage() {
@@ -914,7 +962,7 @@ static void drawDetailsPage() {
   const int barY = TOOLBAR_Y;
   const int baseY = barY + TEXT_HEADER_H + 1;
 
-  tft.fillRect(0, baseY, DISPLAY_WIDTH, DISPLAY_HEIGHT - baseY - FOOTER_H, COL_BG);
+  tft.fillRect(0, baseY, DISPLAY_WIDTH, DISPLAY_HEIGHT - baseY - duckyFooterReserve(), COL_BG);
 
   if (items.empty()) {
     tft.drawCentreString("No script selected", DISPLAY_WIDTH/2, baseY+24, 2);
@@ -960,7 +1008,7 @@ static void drawDetailsPage() {
     int descY = y;
     int maxWidth = DISPLAY_WIDTH - 2*PADDING;
     String remaining = desc;
-    const int bottomY = DISPLAY_HEIGHT - FOOTER_H - 6;
+    const int bottomY = DISPLAY_HEIGHT - duckyFooterReserve() - 6;
     while (remaining.length() > 0 && descY < bottomY) {
       String line;
       int consumed = wrapLineNoEllipsis(remaining, maxWidth, 1, line);
@@ -972,13 +1020,17 @@ static void drawDetailsPage() {
     }
 
   }
-  FeatureUI::layoutFooter3(
-    detailsBtns,
-    "Execute", FeatureUI::ButtonStyle::Primary,
-    "Delete",  FeatureUI::ButtonStyle::Danger,
-    "Back",    FeatureUI::ButtonStyle::Secondary
-  );
-  for (auto& b: detailsBtns) FeatureUI::drawButton(b);
+  if (featureHasTouchNavBar()) {
+    duckyUpdateNavLabels();
+  } else {
+    FeatureUI::layoutFooter3(
+      detailsBtns,
+      "Execute", FeatureUI::ButtonStyle::Primary,
+      "Delete",  FeatureUI::ButtonStyle::Danger,
+      "Back",    FeatureUI::ButtonStyle::Secondary
+    );
+    for (auto& b: detailsBtns) FeatureUI::drawButton(b);
+  }
 }
 
 static void drawSettingsPage() {
@@ -990,7 +1042,7 @@ static void drawSettingsPage() {
   const int barY = TOOLBAR_Y;
   const int baseY = barY + TEXT_HEADER_H + 1;
 
-  tft.fillRect(0, baseY, DISPLAY_WIDTH, DISPLAY_HEIGHT - baseY - FOOTER_H, COL_BG);
+  tft.fillRect(0, baseY, DISPLAY_WIDTH, DISPLAY_HEIGHT - baseY - duckyFooterReserve(), COL_BG);
 
   const int rowGap = 24;
   int y = baseY + 8;
@@ -1032,8 +1084,12 @@ static void drawSettingsPage() {
   y += 14;
   tft.drawString("Touch and hold for more options", PADDING, y, 1);
 
-  FeatureUI::layoutFooter1(infoBtn, "Back", FeatureUI::ButtonStyle::Secondary);
-  FeatureUI::drawButton(infoBtn);
+  if (featureHasTouchNavBar()) {
+    duckyUpdateNavLabels();
+  } else {
+    FeatureUI::layoutFooter1(infoBtn, "Back", FeatureUI::ButtonStyle::Secondary);
+    FeatureUI::drawButton(infoBtn);
+  }
 }
 
 static void drawConfirmDelete() {
@@ -1119,6 +1175,7 @@ static void startBleKeyboard(const char* devName) {
 
 void enter() {
 
+#ifdef SD_CD
   pinMode(SD_CD, INPUT_PULLUP);
   if (digitalRead(SD_CD)) {
 
@@ -1134,8 +1191,10 @@ void enter() {
     feature_exit_requested = true;
     return;
   }
+#endif
 
   ducky_active = true;
+  setTouchButtonInputEnabled(true);
   ui_busy = false;
   dialog = Dialog::None;
   ui_inited = false;
@@ -1167,7 +1226,8 @@ void enter() {
   }
 
   if (!mountSD() || !ensureDuckyDir()) {
-    tft.fillRect(0, TOOLBAR_Y - 1, DISPLAY_WIDTH, DISPLAY_HEIGHT - (TOOLBAR_Y - 1), COL_BG);
+    tft.fillRect(0, TOOLBAR_Y - 1, DISPLAY_WIDTH,
+                 DISPLAY_HEIGHT - (TOOLBAR_Y - 1) - duckyFooterReserve(), COL_BG);
     tft.setTextColor(UI_WARN, COL_BG);
     tft.setTextFont(2);
     tft.drawCentreString("SD mount failed", DISPLAY_WIDTH/2, DISPLAY_HEIGHT/2 - 14, 2);
@@ -1187,6 +1247,8 @@ bool active() { return ducky_active; }
 void exit() {
 
   ducky_active = false;
+  setTouchButtonInputEnabled(false);
+  setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
   ui_busy = false;
   dialog = Dialog::None;
   uiDrawn = false;
@@ -1218,7 +1280,8 @@ void loop() {
 
   if (!ui_inited) {
 
-    tft.fillRect(0, TOOLBAR_Y - 1, DISPLAY_WIDTH, DISPLAY_HEIGHT - (TOOLBAR_Y - 1), COL_BG);
+    tft.fillRect(0, TOOLBAR_Y - 1, DISPLAY_WIDTH,
+                 DISPLAY_HEIGHT - (TOOLBAR_Y - 1) - duckyFooterReserve(), COL_BG);
     sel = 0;
     page = Page::List;
     uiDrawn = false;
@@ -1237,33 +1300,76 @@ void loop() {
 
   if (dialog != Dialog::ConfirmDelete) {
     if (page == Page::List) {
-      if (pcfPressedEdge(ebUp))   { if (sel>0){ updateListSelection(sel - 1); } else {  } return; }
-      if (pcfPressedEdge(ebDown)) { if (sel < (int)items.size()-1){ updateListSelection(sel + 1); } return; }
-      if (pcfPressedEdge(ebRight) || pcfPressedEdge(ebSelect)) { if (!items.empty()) { page = Page::Details; drawDetailsPage(); } return; }
-      if (pcfPressedEdge(ebLeft)) {
-
-        ducky_active = false;
-        feature_exit_requested = true;
-        return;
+      if (featureHasTouchNavBar()) {
+        if (pcfPressedEdge(ebUp))   { if (sel > 0) { updateListSelection(sel - 1); } return; }
+        if (pcfPressedEdge(ebDown)) { drawListPage(true); return; }
+        if (pcfPressedEdge(ebRight)) {
+          if (sel < (int)items.size() - 1) { updateListSelection(sel + 1); }
+          return;
+        }
+        if (pcfPressedEdge(ebSelect)) {
+          if (!items.empty()) { page = Page::Details; drawDetailsPage(); }
+          return;
+        }
+        if (pcfPressedEdge(ebLeft)) {
+          ducky_active = false;
+          feature_exit_requested = true;
+          return;
+        }
+      } else {
+        if (pcfPressedEdge(ebUp))   { if (sel>0){ updateListSelection(sel - 1); } else {  } return; }
+        if (pcfPressedEdge(ebDown)) { if (sel < (int)items.size()-1){ updateListSelection(sel + 1); } return; }
+        if (pcfPressedEdge(ebRight) || pcfPressedEdge(ebSelect)) { if (!items.empty()) { page = Page::Details; drawDetailsPage(); } return; }
+        if (pcfPressedEdge(ebLeft)) {
+          ducky_active = false;
+          feature_exit_requested = true;
+          return;
+        }
       }
     } else if (page == Page::Details) {
-      if (pcfPressedEdge(ebRight) || pcfPressedEdge(ebSelect)) {
-        if (!bleConnected) {
-          tft.fillRoundRect(PADDING, DISPLAY_HEIGHT - FOOTER_H - 28, DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
-          tft.setTextColor(COL_BG, COL_WARN);
-          tft.drawCentreString("Not paired/connected", DISPLAY_WIDTH/2, DISPLAY_HEIGHT - FOOTER_H - 24, 2);
-        } else if (!items.empty()) {
-          bool ok = execFile(items[sel].path);
-          drawDetailsPage();
-          if (!ok) {
-            tft.fillRoundRect(PADDING, DISPLAY_HEIGHT - FOOTER_H - 28, DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
-            tft.setTextColor(COL_BG, COL_WARN);
-            tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, DISPLAY_HEIGHT - FOOTER_H - 24, 2);
-          }
+      if (featureHasTouchNavBar()) {
+        if (pcfPressedEdge(ebUp)) { page = Page::List; drawListPage(false); return; }
+        if (pcfPressedEdge(ebDown)) {
+          dialog = Dialog::ConfirmDelete;
+          drawConfirmDelete();
+          return;
         }
-        return;
+        if (pcfPressedEdge(ebRight) || pcfPressedEdge(ebSelect)) {
+          if (!bleConnected) {
+            tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+            tft.setTextColor(COL_BG, COL_WARN);
+            tft.drawCentreString("Not paired/connected", DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
+          } else if (!items.empty()) {
+            bool ok = execFile(items[sel].path);
+            drawDetailsPage();
+            if (!ok) {
+              tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+              tft.setTextColor(COL_BG, COL_WARN);
+              tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
+            }
+          }
+          return;
+        }
+        if (pcfPressedEdge(ebLeft)) { page = Page::List; drawListPage(false); return; }
+      } else {
+        if (pcfPressedEdge(ebRight) || pcfPressedEdge(ebSelect)) {
+          if (!bleConnected) {
+            tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+            tft.setTextColor(COL_BG, COL_WARN);
+            tft.drawCentreString("Not paired/connected", DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
+          } else if (!items.empty()) {
+            bool ok = execFile(items[sel].path);
+            drawDetailsPage();
+            if (!ok) {
+              tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+              tft.setTextColor(COL_BG, COL_WARN);
+              tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
+            }
+          }
+          return;
+        }
+        if (pcfPressedEdge(ebLeft)) { page = Page::List; drawListPage(false); return; }
       }
-      if (pcfPressedEdge(ebLeft)) { page = Page::List; drawListPage(false); return; }
     } else if (page == Page::Settings) {
       if (pcfPressedEdge(ebLeft)) { page = Page::List; drawListPage(false); return; }
     }
@@ -1298,23 +1404,29 @@ Tap tap = readTap();
   bool doubleTap = isDoubleTap(tap);
 
   if (page == Page::List) {
-    int id = FeatureUI::hit(listBtns, 3, tap.x, tap.y);
-    if (id == 0) {
-      if (!items.empty()) { page = Page::Details; drawDetailsPage(); }
-    } else if (id == 1) {
-      drawListPage(true);
-    } else if (id == 2) {
-      ducky_active = false;
-      feature_exit_requested = true;
-      return;
-    } else {
+    bool handledFooter = false;
+    if (!featureHasTouchNavBar()) {
+      int id = FeatureUI::hit(listBtns, 3, tap.x, tap.y);
+      if (id == 0) {
+        if (!items.empty()) { page = Page::Details; drawDetailsPage(); }
+        handledFooter = true;
+      } else if (id == 1) {
+        drawListPage(true);
+        handledFooter = true;
+      } else if (id == 2) {
+        ducky_active = false;
+        feature_exit_requested = true;
+        return;
+      }
+    }
 
+    if (!handledFooter) {
       int headerBottom, hintY, listTop, rowStride, maxVisibleItems, rw, rh;
       bool hasScrollbar;
       calcListLayout(headerBottom, hintY, listTop, rowStride, maxVisibleItems, hasScrollbar, rw, rh);
 
       int y = tap.y;
-      if (y >= listTop && y < DISPLAY_HEIGHT - FOOTER_H) {
+      if (y >= listTop && y < DISPLAY_HEIGHT - duckyFooterReserve()) {
         int startItem, endItem;
         calcListWindow(maxVisibleItems, startItem, endItem);
         int clickedRow = (y - listTop) / rowStride;
@@ -1322,16 +1434,14 @@ Tap tap = readTap();
 
         if (actualIdx >= 0 && actualIdx < (int)items.size()) {
           if (doubleTap && bleConnected) {
-
             bool ok = execFile(items[actualIdx].path);
             drawListPage(false);
             if (!ok) {
-              tft.fillRoundRect(PADDING, DISPLAY_HEIGHT - FOOTER_H - 28, DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+              tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
               tft.setTextColor(COL_BG, COL_WARN);
-              tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, DISPLAY_HEIGHT - FOOTER_H - 24, 2);
+              tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
             }
           } else {
-
             updateListSelection(actualIdx);
           }
         }
@@ -1339,32 +1449,35 @@ Tap tap = readTap();
     }
 
   } else if (page == Page::Details) {
-    int id = FeatureUI::hit(detailsBtns, 3, tap.x, tap.y);
-    if (id == 0) {
-      if (!bleConnected) {
-        tft.fillRoundRect(PADDING, DISPLAY_HEIGHT - FOOTER_H - 28, DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
-        tft.setTextColor(COL_BG, COL_WARN);
-        tft.drawCentreString("Not paired/connected", DISPLAY_WIDTH/2, DISPLAY_HEIGHT - FOOTER_H - 24, 2);
-      } else if (!items.empty()) {
-        bool ok = execFile(items[sel].path);
-
-        drawDetailsPage();
-        if (!ok) {
-          tft.fillRoundRect(PADDING, DISPLAY_HEIGHT - FOOTER_H - 28, DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+    if (!featureHasTouchNavBar()) {
+      int id = FeatureUI::hit(detailsBtns, 3, tap.x, tap.y);
+      if (id == 0) {
+        if (!bleConnected) {
+          tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
           tft.setTextColor(COL_BG, COL_WARN);
-          tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, DISPLAY_HEIGHT - FOOTER_H - 24, 2);
+          tft.drawCentreString("Not paired/connected", DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
+        } else if (!items.empty()) {
+          bool ok = execFile(items[sel].path);
+          drawDetailsPage();
+          if (!ok) {
+            tft.fillRoundRect(PADDING, duckyToastTop(), DISPLAY_WIDTH - 2*PADDING, 22, 6, COL_WARN);
+            tft.setTextColor(COL_BG, COL_WARN);
+            tft.drawCentreString(String("Error: ") + lastError, DISPLAY_WIDTH/2, duckyToastCenterY(), 2);
+          }
         }
+      } else if (id == 1) {
+        dialog = Dialog::ConfirmDelete;
+        drawConfirmDelete();
+      } else if (id == 2) {
+        page = Page::List; drawListPage(false);
       }
-    } else if (id == 1) {
-      dialog = Dialog::ConfirmDelete;
-      drawConfirmDelete();
-    } else if (id == 2) {
-      page = Page::List; drawListPage(false);
     }
   } else if (page == Page::Settings) {
-    int id = FeatureUI::hit(&infoBtn, 1, tap.x, tap.y);
-    if (id == 0) {
-      page = Page::List; drawListPage(false);
+    if (!featureHasTouchNavBar()) {
+      int id = FeatureUI::hit(&infoBtn, 1, tap.x, tap.y);
+      if (id == 0) {
+        page = Page::List; drawListPage(false);
+      }
     }
   }
 
