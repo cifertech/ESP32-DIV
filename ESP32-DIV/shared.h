@@ -73,7 +73,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.6.0"
+#define ESP32DIV_VERSION "v1.7.0"
 #endif
 
 
