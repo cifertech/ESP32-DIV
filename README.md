@@ -29,8 +29,7 @@
 
 Complete project story, in-depth tutorials, and all the features in [Wiki](https://github.com/cifertech/ESP32-DIV/wiki)! From Wi-Fi deauthentication attacks to Sub-GHz signal replay, the Wiki covers everything you need to get started. [Click here to explore now!](https://github.com/cifertech/ESP32-DIV/wiki)
 
-> 💡 **Tip:** Always check the [Wiki](https://github.com/cifertech/ESP32-DIV/wiki) and existing [Issues](https://github.com/cifertech/ESP32-DIV/issues) before opening a new report. Many common problems are already documented there.
-
+> ⚡ **Skip the IDE** — flash directly from your browser at [cifertech.github.io/ESP32-DIV](https://cifertech.github.io/ESP32-DIV)
 
 <div>&nbsp;</div>
 
