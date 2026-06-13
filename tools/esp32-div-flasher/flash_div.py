@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import ssl
@@ -37,40 +38,52 @@ FH_BROWSER_APP_URL = "https://cifertech.github.io/FirmwareHub/"
 
 _FH_PALETTE: dict[str, dict[str, str]] = {
     "dark": {
-        "canvas": "#0a0a0a",
-        "shell": "#121212",
-        "panel": "#181818",
-        "surface": "#222222",
-        "border": "#3d3d3d",
-        "text": "#f0f0f0",
-        "muted": "#a8a8a8",
-        "accent": "#fb923c",
+        "canvas": "#08090c",
+        "shell": "#101114",
+        "panel": "#16181d",
+        "surface": "#1e2028",
+        "border": "#2e3140",
+        "text": "#eaedf3",
+        "muted": "#8690a2",
+        "accent": "#f59e0b",
+        "accent_hover": "#fbbf24",
+        "accent_dim": "#b45309",
         "accent_text": "#0c0c0c",
-        "input": "#101010",
-        "log_bg": "#0e0e0e",
-        "log_fg": "#e6e6e6",
-        "sel_bg": "#4a4a4a",
-        "sel_fg": "#fafafa",
-        "pill_bg": "#2c2c2c",
-        "pill_hover": "#383838",
+        "accent_glow": "#f59e0b",
+        "input": "#0d0e12",
+        "log_bg": "#0b0c10",
+        "log_fg": "#c8cdd8",
+        "sel_bg": "#f59e0b",
+        "sel_fg": "#0c0c0c",
+        "pill_bg": "#1a1c24",
+        "pill_hover": "#262830",
+        "success": "#22c55e",
+        "error": "#ef4444",
+        "step_num": "#f59e0b",
     },
     "light": {
-        "canvas": "#eceff3",
-        "shell": "#ffffff",
-        "panel": "#fafbfc",
-        "surface": "#f3f5f7",
-        "border": "#d8dee6",
-        "text": "#111827",
+        "canvas": "#eef0f4",
+        "shell": "#f8f9fc",
+        "panel": "#ffffff",
+        "surface": "#f0f2f6",
+        "border": "#d0d5e0",
+        "text": "#0f172a",
         "muted": "#64748b",
-        "accent": "#ea580c",
+        "accent": "#d97706",
+        "accent_hover": "#b45309",
+        "accent_dim": "#f59e0b",
         "accent_text": "#ffffff",
+        "accent_glow": "#d97706",
         "input": "#ffffff",
-        "log_bg": "#ffffff",
-        "log_fg": "#111827",
-        "sel_bg": "#2563eb",
+        "log_bg": "#fafbfd",
+        "log_fg": "#1e293b",
+        "sel_bg": "#d97706",
         "sel_fg": "#ffffff",
-        "pill_bg": "#eef2f7",
-        "pill_hover": "#e2e8f0",
+        "pill_bg": "#e8ebf0",
+        "pill_hover": "#dde1e8",
+        "success": "#16a34a",
+        "error": "#dc2626",
+        "step_num": "#d97706",
     },
 }
 
@@ -103,39 +116,22 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
     shell, panel, surf, brd = pal["shell"], pal["panel"], pal["surface"], pal["border"]
     fg, mut = pal["text"], pal["muted"]
     ac, ac_txt = pal["accent"], pal["accent_text"]
+    ac_hov = pal.get("accent_hover", ac)
+    ac_dim = pal.get("accent_dim", ac)
 
     cast_style.configure(".", background=shell, foreground=fg)
     cast_style.configure("TFrame", background=shell, foreground=fg)
     cast_style.configure("TLabel", background=shell, foreground=fg, font=(ui, 10))
+    cast_style.configure("FHMuted.TLabel", background=shell, foreground=mut, font=(ui, 9))
+    cast_style.configure("FHInner.TLabel", background=panel, foreground=fg, font=(ui, 10))
+    cast_style.configure("FHInnerMuted.TLabel", background=panel, foreground=mut, font=(ui, 9))
+    cast_style.configure("FHInnerStrong.TLabel", background=panel, foreground=fg, font=(ui, 10, "bold"))
+    cast_style.configure("FHInnerAccent.TLabel", background=panel, foreground=ac, font=(ui, 9, "bold"))
     cast_style.configure(
-        "FHMuted.TLabel",
-        background=shell,
-        foreground=mut,
-        font=(ui, 9),
-    )
-    cast_style.configure(
-        "FHInner.TLabel",
+        "FHStepNum.TLabel",
         background=panel,
-        foreground=fg,
-        font=(ui, 10),
-    )
-    cast_style.configure(
-        "FHInnerMuted.TLabel",
-        background=panel,
-        foreground=mut,
-        font=(ui, 9),
-    )
-    cast_style.configure(
-        "FHInnerStrong.TLabel",
-        background=panel,
-        foreground=fg,
-        font=(ui, 10, "bold"),
-    )
-    cast_style.configure(
-        "FHInnerAccent.TLabel",
-        background=panel,
-        foreground=ac,
-        font=(ui, 9, "bold"),
+        foreground=pal.get("step_num", ac),
+        font=(ui, 11, "bold"),
     )
     cast_style.configure(
         "TLabelframe",
@@ -149,7 +145,7 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
         "TLabelframe.Label",
         background=panel,
         foreground=mut,
-        font=(ui, 8, "bold"),
+        font=(ui, 9, "bold"),
     )
     cast_style.configure(
         "TEntry",
@@ -159,7 +155,7 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
         lightcolor=brd,
         darkcolor=brd,
         insertcolor=fg,
-        padding=(7, 4),
+        padding=(8, 5),
     )
     cast_style.map(
         "TEntry",
@@ -174,18 +170,18 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
         fieldbackground=pal["input"],
         background=surf,
         foreground=fg,
-        arrowcolor=fg,
+        arrowcolor=mut,
         bordercolor=brd,
-        padding=(6, 3),
+        padding=(7, 4),
     )
     cast_style.map(
         "TCombobox",
         fieldbackground=[("readonly", pal["input"]), ("disabled", surf)],
         foreground=[("readonly", fg), ("disabled", mut)],
         bordercolor=[("focus", ac), ("!focus", brd)],
+        arrowcolor=[("focus", ac), ("!focus", mut)],
     )
     cast_style.configure("TCheckbutton", background=panel, foreground=fg, font=(ui, 10))
-    # Clam defaults can paint a very light hover background on Windows; force readable states.
     cast_style.map(
         "TCheckbutton",
         background=[
@@ -194,25 +190,19 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
             ("active", pal["pill_hover"]),
             ("!disabled", panel),
         ],
-        foreground=[
-            ("disabled", mut),
-            ("!disabled", fg),
-        ],
-        indicatorcolor=[
-            ("selected", ac),
-            ("!selected", mut),
-        ],
+        foreground=[("disabled", mut), ("!disabled", fg)],
+        indicatorcolor=[("selected", ac), ("!selected", mut)],
     )
     cast_style.configure("TNotebook", background=shell, borderwidth=0)
     try:
-        cast_style.configure("TNotebook", tabmargins=[4, 2, 4, 0])
+        cast_style.configure("TNotebook", tabmargins=[2, 4, 2, 0])
     except tk.TclError:
         pass
     cast_style.configure(
         "TNotebook.Tab",
         background=surf,
         foreground=mut,
-        padding=(10, 5),
+        padding=(14, 6),
         font=(ui, 10, "bold"),
     )
     cast_style.map(
@@ -227,12 +217,13 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
         bordercolor=ac,
         focuscolor=ac,
         font=(ui, 11, "bold"),
-        padding=(14, 6),
+        padding=(16, 8),
     )
     cast_style.map(
         "FHPrimary.TButton",
-        background=[("active", "#fb923c"), ("pressed", "#ea580c"), ("disabled", brd)],
+        background=[("active", ac_hov), ("pressed", ac_dim), ("disabled", brd)],
         foreground=[("disabled", mut)],
+        bordercolor=[("active", ac_hov), ("pressed", ac_dim), ("disabled", brd)],
     )
     cast_style.configure(
         "FHSecondary.TButton",
@@ -240,19 +231,20 @@ def _fh_apply_clam_theme(root: object, style: object, pal: dict[str, str]) -> tu
         foreground=fg,
         bordercolor=brd,
         font=(ui, 9),
-        padding=(10, 5),
+        padding=(12, 5),
     )
     cast_style.map(
         "FHSecondary.TButton",
-        background=[("active", panel), ("pressed", shell)],
+        background=[("active", pal["pill_hover"]), ("pressed", shell)],
+        foreground=[("active", ac), ("!active", fg)],
         bordercolor=[("active", ac), ("!active", brd)],
     )
     cast_style.configure(
         "TProgressbar",
-        thickness=8,
+        thickness=6,
         troughcolor=surf,
         background=ac,
-        bordercolor=brd,
+        bordercolor=surf,
         lightcolor=ac,
         darkcolor=ac,
     )
@@ -300,9 +292,34 @@ PRESETS: dict[str, dict] = {
 }
 
 PRESET_LABELS: dict[str, str] = {
-    "esp32s3": "ESP32-S3 (ESP32-DIV v2, recommended)",
-    "esp32": "ESP32 (legacy boards)",
+    "esp32s3": "ESP32-S3 (ESP32-DIV v2)",
+    "esp32": "ESP32 (CYD & ESP32-DIV v1)",
 }
+
+
+def infer_preset_from_app_bin(path: Path | str) -> Optional[str]:
+    """
+    Guess bundled preset from a release/sketch .bin filename.
+
+    Multi-board GitHub assets use names like ESP32-DIV-{cyd|v1|v2}-v1.7.0.bin.
+    CYD and v1 targets are classic ESP32; v2 is ESP32-S3.
+    """
+    stem = Path(path).stem.lower()
+    if "-cyd-" in stem or stem.endswith("-cyd"):
+        return "esp32"
+    if re.search(r"-v1-v\d", stem):
+        return "esp32"
+    if re.search(r"-v2-v\d", stem):
+        return "esp32s3"
+    return None
+
+
+def effective_bundled_preset(preset_key: str, app_bin: Path) -> str:
+    """Use filename inference when it disagrees with the selected preset."""
+    inferred = infer_preset_from_app_bin(app_bin)
+    if inferred and inferred != preset_key:
+        return inferred
+    return preset_key
 
 
 def offsets_for_chip(chip: str) -> dict[str, int]:
@@ -797,7 +814,7 @@ def github_fetch_release_by_tag(tag: str) -> dict[str, Any]:
 
 
 def github_list_release_choices(per_page: int = 40) -> list[GithubReleaseChoice]:
-    """Recent releases with optional firmware .bin asset per row."""
+    """Recent releases; one row per firmware .bin asset (multiple rows when a tag has variants)."""
     url = f"{GITHUB_API_RELEASES}?per_page={max(1, min(per_page, 100))}"
     data = _github_api_get_json(url, timeout=90.0)
     if not isinstance(data, list):
@@ -809,18 +826,18 @@ def github_list_release_choices(per_page: int = 40) -> list[GithubReleaseChoice]
         tag = str(rel.get("tag_name") or "?")
         assets_raw = rel.get("assets")
         assets: list[dict[str, Any]] = assets_raw if isinstance(assets_raw, list) else []
-        picked = github_pick_firmware_asset(assets)
-        if picked:
-            aname, dl_url = picked
-            lbl = f"{tag}   {aname}"
-            out.append(
-                GithubReleaseChoice(
-                    tag_name=tag,
-                    asset_name=aname,
-                    download_url=dl_url,
-                    label=lbl,
+        firmware_assets = github_list_firmware_assets(assets)
+        if firmware_assets:
+            for aname, dl_url in firmware_assets:
+                lbl = f"{tag}   {aname}"
+                out.append(
+                    GithubReleaseChoice(
+                        tag_name=tag,
+                        asset_name=aname,
+                        download_url=dl_url,
+                        label=lbl,
+                    )
                 )
-            )
         else:
             lbl = f"{tag}   (no firmware .bin)"
             out.append(
@@ -866,10 +883,11 @@ def download_release_app_bin(release: dict[str, Any], on_line: Callable[[str], N
     return download_github_firmware_asset(tag, name, url, on_line)
 
 
-def github_pick_firmware_asset(assets: list[dict[str, Any]]) -> Optional[tuple[str, str]]:
+def github_list_firmware_assets(assets: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """
-    Pick an application-sized .bin from release assets.
+    List application-sized .bin assets from a release.
     Skips obvious bootloader/partition/helper artifacts.
+    Best match first (same ranking as github_pick_firmware_asset).
     """
     scored: list[tuple[int, int, str, str]] = []
     for a in assets:
@@ -903,10 +921,15 @@ def github_pick_firmware_asset(assets: list[dict[str, Any]]) -> Optional[tuple[s
             score += 80
         scored.append((score, sz, name, url))
     if not scored:
-        return None
-    scored.sort(key=lambda t: (t[0], t[1]))
-    _score, _sz, name, url = scored[-1]
-    return name, url
+        return []
+    scored.sort(key=lambda t: (-t[0], -t[1], t[2].lower()))
+    return [(name, url) for _score, _sz, name, url in scored]
+
+
+def github_pick_firmware_asset(assets: list[dict[str, Any]]) -> Optional[tuple[str, str]]:
+    """Pick the best application-sized .bin from release assets."""
+    items = github_list_firmware_assets(assets)
+    return items[0] if items else None
 
 
 def http_download_file(url: str, dest: Path, on_line: Callable[[str], None]) -> None:
@@ -1129,7 +1152,7 @@ def _gui() -> None:
 
     root = tk.Tk()
     root.title(f"{APP_NAME} — Desktop flasher")
-    win_w, win_h = 1436, 794
+    win_w, win_h = 1440, 810
     root.minsize(win_w, win_h)
     root.maxsize(win_w, win_h)
     root.resizable(False, False)
@@ -1173,8 +1196,8 @@ def _gui() -> None:
     outer.rowconfigure(0, weight=1)
     outer.columnconfigure(0, weight=1)
 
-    shell = ttk.Frame(outer, padding=(12, 10))
-    shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+    shell = ttk.Frame(outer, padding=(16, 12))
+    shell.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
     shell.rowconfigure(0, weight=1)
     shell.columnconfigure(0, weight=1)
 
@@ -1222,31 +1245,45 @@ def _gui() -> None:
     header.columnconfigure(0, weight=1)
 
     try:
-        title_f = tkfont.Font(root, family="Segoe UI Variable Display", size=18, weight="bold")
+        title_f = tkfont.Font(root, family="Segoe UI Variable Display", size=20, weight="bold")
     except tk.TclError:
         try:
-            title_f = tkfont.Font(root, family=ui_family, size=18, weight="bold")
+            title_f = tkfont.Font(root, family=ui_family, size=20, weight="bold")
         except tk.TclError:
-            title_f = tkfont.Font(size=18, weight="bold")
+            title_f = tkfont.Font(size=20, weight="bold")
     try:
         sub_f = tkfont.Font(root, family=ui_family, size=9)
     except tk.TclError:
         sub_f = tkfont.Font(size=9)
     try:
-        ver_f = tkfont.Font(root, family=ui_family, size=9)
+        ver_f = tkfont.Font(root, family=ui_family, size=8)
     except tk.TclError:
-        ver_f = tkfont.Font(size=9)
+        ver_f = tkfont.Font(size=8)
 
     ht_left = tk.Frame(header, bg=pal["shell"])
     ht_left.grid(row=0, column=0, sticky="w")
+
+    title_row = tk.Frame(ht_left, bg=pal["shell"])
+    title_row.pack(anchor="w")
     title_lbl = tk.Label(
-        ht_left,
+        title_row,
         text=APP_NAME,
         font=title_f,
-        fg=pal["text"],
+        fg=pal["accent"],
         bg=pal["shell"],
     )
-    title_lbl.pack(anchor="w")
+    title_lbl.pack(side="left")
+    ver_lbl = tk.Label(
+        title_row,
+        text=f"v{__version__}",
+        font=ver_f,
+        fg=pal["muted"],
+        bg=pal["pill_bg"],
+        padx=6,
+        pady=1,
+    )
+    ver_lbl.pack(side="left", padx=(8, 0), pady=(4, 0))
+
     sub_lbl = tk.Label(
         ht_left,
         text="Guided firmware flashing for ESP32 boards",
@@ -1254,7 +1291,7 @@ def _gui() -> None:
         fg=pal["muted"],
         bg=pal["shell"],
     )
-    sub_lbl.pack(anchor="w")
+    sub_lbl.pack(anchor="w", pady=(1, 0))
 
     links_fr = tk.Frame(header, bg=pal["shell"])
     links_fr.grid(row=0, column=1, sticky="e", padx=(8, 0))
@@ -1283,8 +1320,8 @@ def _gui() -> None:
             bg=pal["pill_bg"],
             cursor="hand2",
             font=(ui_family, 9, "bold"),
-            padx=9,
-            pady=3,
+            padx=10,
+            pady=4,
         )
         lb.pack(side="left", padx=(0, 6))
         lb.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
@@ -1298,44 +1335,29 @@ def _gui() -> None:
         lb = tk.Label(
             header_extras,
             text=text,
-            fg=pal["accent"],
+            fg=pal["muted"],
             bg=pal["pill_bg"],
             cursor="hand2",
-            font=(ui_family, 8, "bold"),
-            padx=7,
-            pady=2,
+            font=(ui_family, 8),
+            padx=8,
+            pady=3,
         )
-        lb.pack(side="left", padx=(0, 5))
+        lb.pack(side="left", padx=(0, 4))
         lb.bind("<Button-1>", lambda _e: command())
         _style_link_pill(lb)
         extra_link_labs.append(lb)
 
-    ver_lbl = tk.Label(
-        header,
-        text=f"v{__version__}",
-        font=ver_f,
-        fg=pal["muted"],
-        bg=pal["pill_bg"],
-        padx=8,
-        pady=3,
-    )
-    ver_lbl.grid(row=0, column=2, sticky="e")
-
-    ttk.Separator(header, orient="horizontal").grid(
-        row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0)
-    )
-
-    accent_bar = tk.Frame(header, height=3, bg=pal["accent"], cursor="")
-    accent_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+    accent_bar = tk.Frame(header, height=2, bg=pal["accent"], cursor="")
+    accent_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     body = ttk.Frame(main)
-    body.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+    body.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
     body.columnconfigure(0, weight=3)
     body.columnconfigure(1, weight=2)
     body.rowconfigure(0, weight=1)
 
     left = ttk.Frame(body)
-    left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+    left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
     left.columnconfigure(0, weight=1)
     left.rowconfigure(1, weight=1)
 
@@ -1344,28 +1366,28 @@ def _gui() -> None:
     right.columnconfigure(0, weight=1)
     right.rowconfigure(1, weight=1)
 
-    lf_conn = ttk.LabelFrame(left, text="1  Connection", padding=(10, 6))
-    lf_conn.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-    lf_conn.columnconfigure(0, minsize=96)
+    lf_conn = ttk.LabelFrame(left, text="\u2460  Connection", padding=(12, 8))
+    lf_conn.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    lf_conn.columnconfigure(0, minsize=100)
     lf_conn.columnconfigure(1, weight=1)
     lf_conn.columnconfigure(2, weight=0)
 
     ttk.Label(lf_conn, text="Serial port", style="FHInnerMuted.TLabel").grid(
-        row=0, column=0, sticky="e", padx=(0, 10), pady=2
+        row=0, column=0, sticky="e", padx=(0, 10), pady=3
     )
     port_var = tk.StringVar()
     port_combo = ttk.Combobox(lf_conn, textvariable=port_var, state="readonly", width=22)
-    port_combo.grid(row=0, column=1, sticky="ew", pady=2)
+    port_combo.grid(row=0, column=1, sticky="ew", pady=3)
 
     refresh_btn = ttk.Button(lf_conn, text="Refresh", width=11, style=sec_st)
-    refresh_btn.grid(row=0, column=2, padx=(10, 0), pady=2)
+    refresh_btn.grid(row=0, column=2, padx=(10, 0), pady=3)
 
     ttk.Label(lf_conn, text="Upload baud", style="FHInnerMuted.TLabel").grid(
-        row=1, column=0, sticky="e", padx=(0, 10), pady=(4, 2)
+        row=1, column=0, sticky="e", padx=(0, 10), pady=(4, 3)
     )
     baud_var = tk.StringVar(value="921600")
     baud_line = ttk.Frame(lf_conn)
-    baud_line.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(4, 2))
+    baud_line.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(4, 3))
     baud_line.columnconfigure(1, weight=1)
     baud_entry = ttk.Entry(baud_line, textvariable=baud_var, width=12)
     baud_entry.grid(row=0, column=0, sticky="w")
@@ -1373,14 +1395,14 @@ def _gui() -> None:
         row=0, column=1, sticky="w", padx=(12, 0)
     )
 
-    lf_fw = ttk.LabelFrame(left, text="2  Firmware source", padding=(10, 6))
-    lf_fw.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
-    lf_fw.columnconfigure(0, minsize=96)
+    lf_fw = ttk.LabelFrame(left, text="\u2461  Firmware source", padding=(12, 8))
+    lf_fw.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+    lf_fw.columnconfigure(0, minsize=100)
     lf_fw.columnconfigure(1, weight=1)
     lf_fw.rowconfigure(1, weight=1)
 
     ttk.Label(lf_fw, text="Board preset", style="FHInnerMuted.TLabel").grid(
-        row=0, column=0, sticky="e", padx=(0, 10), pady=2
+        row=0, column=0, sticky="e", padx=(0, 10), pady=3
     )
     preset_display_var = tk.StringVar(value=preset_rows[0][1])
     preset_combo = ttk.Combobox(
@@ -1390,7 +1412,7 @@ def _gui() -> None:
         state="readonly",
         width=24,
     )
-    preset_combo.grid(row=0, column=1, sticky="ew", pady=2)
+    preset_combo.grid(row=0, column=1, sticky="ew", pady=3)
 
     src_var = tk.StringVar(value="folder")
     flash_nb = ttk.Notebook(lf_fw)
@@ -1412,33 +1434,36 @@ def _gui() -> None:
         wrap=tk.WORD,
         borderwidth=0,
         relief="flat",
-        padx=10,
-        pady=8,
+        padx=14,
+        pady=10,
     )
     howto_text.grid(row=0, column=0, sticky="nsew")
+    try:
+        howto_text.tag_configure("h1", font=(ui_family, 13, "bold"))
+        howto_text.tag_configure("h2", font=(ui_family, 10, "bold"))
+    except Exception:
+        pass
     _howto_body = (
         "Quick start\n\n"
-        "1. Connection — Choose the COM port for your board (often labeled CP210x or USB-SERIAL). "
+        "\u2460  Connection — Choose the COM port for your board (often labeled CP210x or USB-SERIAL). "
         "Use Refresh if the list is empty. Unplug/replug USB or install the USB–UART driver if needed.\n\n"
-        "2. Board preset — Match the preset to your hardware (ESP32-S3 vs classic ESP32).\n\n"
-        "3. Firmware source — Pick one of the two flashing tabs:\n"
-        "   • Local export — Folder from Arduino IDE: Sketch → Export compiled Binary. "
-        "Select the folder that contains bootloader, partition table, boot_app0, and application .bin files.\n"
-        "   • Toolbox / GitHub — Uses bundled bootloader/partitions/boot_app0 from this tool. "
+        "\u2461  Board preset — Auto-set when you pick a GitHub release (CYD/v1 → ESP32, v2 → ESP32-S3). "
+        "For older single-file releases, choose ESP32-S3 (v2) or ESP32 (CYD & v1) manually.\n\n"
+        "\u2462  Firmware source — Pick one of the two flashing tabs:\n"
+        "   \u2022  Local export — Folder from Arduino IDE: Sketch → Export compiled Binary.\n"
+        "   \u2022  Toolbox / GitHub — Uses bundled bootloader/partitions/boot_app0. "
         "Pick a GitHub release and Download, or Browse to a sketch .bin you already have.\n\n"
-        "4. Flash options — “Erase entire flash” gives a clean install; leave it off for a normal upgrade "
-        "when you know it is safe for your board.\n\n"
-        "5. Flash firmware — Closes the serial port, runs esptool, and shows live output in the activity log.\n\n"
-        "Tips — Close Arduino Serial Monitor and any terminal using that COM port before flashing. "
-        "If upload fails at high speed, try baud 115200. "
-        "Shortcuts: F5 refresh ports, Ctrl+Enter flash, Ctrl+L clear log (see Keys in the header).\n"
+        "④  Flash — “Erase entire flash” gives a clean install; leave it off for a normal upgrade. "
+        "Press Flash firmware — it runs esptool and shows live output in the activity log.\n\n"
+        "Tips — Close Arduino Serial Monitor before flashing. Try baud 115200 if upload fails.\n"
+        "Shortcuts: F5 refresh · Ctrl+Enter flash · Ctrl+L clear log · Ctrl+Q exit\n"
     )
     howto_text.insert("1.0", _howto_body)
     howto_text.configure(state="disabled")
 
-    flash_nb.add(tab_local, text="Local export")
-    flash_nb.add(tab_remote, text="Toolbox / GitHub")
-    flash_nb.add(tab_help, text="How to use")
+    flash_nb.add(tab_local, text="  Local export  ")
+    flash_nb.add(tab_remote, text="  Toolbox / GitHub  ")
+    flash_nb.add(tab_help, text="  How to use  ")
 
     frm_folder = ttk.Frame(tab_local)
     frm_folder.grid(row=0, column=0, sticky="ew")
@@ -1458,7 +1483,7 @@ def _gui() -> None:
 
     def _paint_dropzone(w: tk.Misc, active: bool = False) -> None:
         bg = pal["pill_hover"] if active else pal["surface"]
-        border = pal["accent"] if active else pal["border"]
+        border = pal.get("accent_hover", pal["accent"]) if active else pal["border"]
         try:
             w.configure(bg=bg, highlightbackground=border, highlightcolor=border)
             sub = getattr(w, "_dz_sub", None)
@@ -1484,9 +1509,17 @@ def _gui() -> None:
     dz_folder = tk.Frame(
         tab_local,
         bg=pal["surface"],
-        highlightthickness=2,
+        highlightthickness=1,
         highlightbackground=pal["border"],
         highlightcolor=pal["border"],
+        cursor="hand2",
+    )
+    dz_folder_icon = tk.Label(
+        dz_folder,
+        text="\U0001F4C2",
+        fg=pal["accent"],
+        bg=pal["surface"],
+        font=(ui_family, 18),
         cursor="hand2",
     )
     dz_folder_l1 = tk.Label(
@@ -1500,7 +1533,7 @@ def _gui() -> None:
     )
     dz_folder_l2 = tk.Label(
         dz_folder,
-        text="Use a folder with the exported bootloader, partitions, boot_app0, and app .bin files.",
+        text="Folder with bootloader, partitions, boot_app0, and app .bin",
         fg=pal["muted"],
         bg=pal["surface"],
         font=(ui_family, 9),
@@ -1510,13 +1543,15 @@ def _gui() -> None:
         anchor="w",
     )
     dz_folder._dz_sub = dz_folder_l2  # type: ignore[attr-defined]
-    dz_folder.columnconfigure(0, weight=1)
+    dz_folder.columnconfigure(0, weight=0)
+    dz_folder.columnconfigure(1, weight=1)
     dz_folder.rowconfigure(0, weight=0)
     dz_folder.rowconfigure(1, weight=0)
     dz_folder.rowconfigure(2, weight=1)
-    dz_folder_l1.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
-    dz_folder_l2.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-    for _w in (dz_folder, dz_folder_l1, dz_folder_l2):
+    dz_folder_icon.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(14, 6), pady=(12, 10))
+    dz_folder_l1.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(12, 1))
+    dz_folder_l2.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(0, 10))
+    for _w in (dz_folder, dz_folder_icon, dz_folder_l1, dz_folder_l2):
         _w.bind("<Button-1>", lambda _e: browse())
     dz_folder.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
     dz_widgets.append(dz_folder)
@@ -1524,12 +1559,11 @@ def _gui() -> None:
 
     frm_app = ttk.Frame(tab_remote)
     frm_app.grid(row=0, column=0, sticky="ew")
-    frm_app.columnconfigure(0, minsize=96)
+    frm_app.columnconfigure(0, minsize=100)
     frm_app.columnconfigure(1, weight=1)
     frm_app.columnconfigure(2, weight=0)
-    # GitHub first: only the sketch .bin is still required (bundled mode supplies bootloader/partitions/boot_app0).
     ttk.Label(frm_app, text="GitHub release", style="FHMuted.TLabel").grid(
-        row=0, column=0, sticky="e", padx=(0, 10), pady=2
+        row=0, column=0, sticky="e", padx=(0, 10), pady=3
     )
     release_var = tk.StringVar(value="")
     release_combo = ttk.Combobox(
@@ -1538,25 +1572,25 @@ def _gui() -> None:
         state="readonly",
         width=22,
     )
-    release_combo.grid(row=0, column=1, sticky="ew", pady=2)
+    release_combo.grid(row=0, column=1, sticky="ew", pady=3)
     gh_refresh_btn = ttk.Button(frm_app, text="Refresh list", width=13, style=sec_st)
-    gh_refresh_btn.grid(row=0, column=2, padx=(10, 0), pady=2)
+    gh_refresh_btn.grid(row=0, column=2, padx=(10, 0), pady=3)
 
-    gh_download_btn = ttk.Button(frm_app, text="Download release", width=16, style=sec_st)
-    gh_download_btn.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(3, 0))
+    gh_download_btn = ttk.Button(frm_app, text="\u2B07  Download release", width=18, style=sec_st)
+    gh_download_btn.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(4, 0))
 
     ttk.Label(frm_app, text="Sketch app (.bin)", style="FHMuted.TLabel").grid(
-        row=2, column=0, sticky="e", padx=(0, 10), pady=(8, 2)
+        row=2, column=0, sticky="e", padx=(0, 10), pady=(10, 3)
     )
     app_bin_var = tk.StringVar()
     app_bin_entry = ttk.Entry(frm_app, textvariable=app_bin_var)
-    app_bin_entry.grid(row=2, column=1, sticky="ew", pady=(8, 2))
-    appbrowse_btn = ttk.Button(frm_app, text="Browse…", width=11, style=sec_st)
-    appbrowse_btn.grid(row=2, column=2, padx=(10, 0), pady=(8, 2))
+    app_bin_entry.grid(row=2, column=1, sticky="ew", pady=(10, 3))
+    appbrowse_btn = ttk.Button(frm_app, text="Browse\u2026", width=11, style=sec_st)
+    appbrowse_btn.grid(row=2, column=2, padx=(10, 0), pady=(10, 3))
 
     ttk.Label(
         frm_app,
-        text="Download sets this path automatically. Browse or use the panel below only if you already have the sketch .bin.",
+        text="Download sets this path automatically. Browse below only if you already have the .bin.",
         style="FHInnerMuted.TLabel",
         wraplength=520,
     ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 4))
@@ -1564,14 +1598,22 @@ def _gui() -> None:
     dz_bin = tk.Frame(
         tab_remote,
         bg=pal["surface"],
-        highlightthickness=2,
+        highlightthickness=1,
         highlightbackground=pal["border"],
         highlightcolor=pal["border"],
         cursor="hand2",
     )
+    dz_bin_icon = tk.Label(
+        dz_bin,
+        text="\U0001F4E6",
+        fg=pal["accent"],
+        bg=pal["surface"],
+        font=(ui_family, 18),
+        cursor="hand2",
+    )
     dz_bin_l1 = tk.Label(
         dz_bin,
-        text="Pick sketch .bin (optional if you downloaded)",
+        text="Pick sketch .bin (optional if downloaded)",
         fg=pal["accent"],
         bg=pal["surface"],
         font=(ui_family, 10, "bold"),
@@ -1580,7 +1622,7 @@ def _gui() -> None:
     )
     dz_bin_l2 = tk.Label(
         dz_bin,
-        text="Bundled mode still needs the application image path; GitHub download fills it. Click to browse a .bin you already have.",
+        text="GitHub download fills this automatically. Click to browse a .bin you already have.",
         fg=pal["muted"],
         bg=pal["surface"],
         font=(ui_family, 9),
@@ -1590,13 +1632,15 @@ def _gui() -> None:
         anchor="w",
     )
     dz_bin._dz_sub = dz_bin_l2  # type: ignore[attr-defined]
-    dz_bin.columnconfigure(0, weight=1)
+    dz_bin.columnconfigure(0, weight=0)
+    dz_bin.columnconfigure(1, weight=1)
     dz_bin.rowconfigure(0, weight=0)
     dz_bin.rowconfigure(1, weight=0)
     dz_bin.rowconfigure(2, weight=1)
-    dz_bin_l1.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
-    dz_bin_l2.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-    for _w in (dz_bin, dz_bin_l1, dz_bin_l2):
+    dz_bin_icon.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(14, 6), pady=(12, 10))
+    dz_bin_l1.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(12, 1))
+    dz_bin_l2.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(0, 10))
+    for _w in (dz_bin, dz_bin_icon, dz_bin_l1, dz_bin_l2):
         _w.bind("<Button-1>", lambda _e: browse_app_bin())
     dz_bin.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
     dz_widgets.append(dz_bin)
@@ -1649,38 +1693,35 @@ def _gui() -> None:
     bottom_controls.columnconfigure(0, weight=1)
     bottom_controls.columnconfigure(1, weight=0)
 
-    lf_dev = ttk.LabelFrame(right, text="Device summary", padding=(10, 6))
-    lf_dev.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    lf_dev = ttk.LabelFrame(right, text="Device summary", padding=(12, 8))
+    lf_dev.grid(row=0, column=0, sticky="ew", pady=(0, 8))
     lf_dev.columnconfigure(0, minsize=64)
     lf_dev.columnconfigure(1, weight=1)
-    ttk.Label(lf_dev, text="Board", style="FHInnerMuted.TLabel").grid(
-        row=0, column=0, sticky="e", padx=(0, 10), pady=2
-    )
+    for _drow, _dlbl, _dstyle, _dvar in (
+        (0, "Board", "FHInner.TLabel", None),
+        (1, "Port", "FHInnerStrong.TLabel", None),
+        (2, "Baud", "FHInnerStrong.TLabel", None),
+        (3, "Source", "FHInnerAccent.TLabel", None),
+    ):
+        ttk.Label(lf_dev, text=_dlbl, style="FHInnerMuted.TLabel").grid(
+            row=_drow, column=0, sticky="e", padx=(0, 12), pady=3
+        )
     dev_board_lbl = ttk.Label(
         lf_dev, textvariable=preset_display_var, style="FHInner.TLabel", wraplength=280
     )
-    dev_board_lbl.grid(row=0, column=1, sticky="ew", pady=2)
-    ttk.Label(lf_dev, text="Port", style="FHInnerMuted.TLabel").grid(
-        row=1, column=0, sticky="e", padx=(0, 10), pady=2
-    )
+    dev_board_lbl.grid(row=0, column=1, sticky="ew", pady=3)
     dev_port_lbl = ttk.Label(lf_dev, textvariable=port_var, style="FHInnerStrong.TLabel", wraplength=280)
-    dev_port_lbl.grid(row=1, column=1, sticky="ew", pady=2)
-    ttk.Label(lf_dev, text="Baud", style="FHInnerMuted.TLabel").grid(
-        row=2, column=0, sticky="e", padx=(0, 10), pady=2
-    )
+    dev_port_lbl.grid(row=1, column=1, sticky="ew", pady=3)
     ttk.Label(lf_dev, textvariable=baud_var, style="FHInnerStrong.TLabel").grid(
-        row=2, column=1, sticky="w", pady=2
-    )
-    ttk.Label(lf_dev, text="Source", style="FHInnerMuted.TLabel").grid(
-        row=3, column=0, sticky="e", padx=(0, 10), pady=2
+        row=2, column=1, sticky="w", pady=3
     )
     dev_source_var = tk.StringVar(value="Local export")
     ttk.Label(lf_dev, textvariable=dev_source_var, style="FHInnerAccent.TLabel").grid(
-        row=3, column=1, sticky="w", pady=2
+        row=3, column=1, sticky="w", pady=3
     )
 
-    lf_opt = ttk.LabelFrame(bottom_controls, text="3  Flash options", padding=(10, 6))
-    lf_opt.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+    lf_opt = ttk.LabelFrame(bottom_controls, text="\u2462  Flash options", padding=(12, 8))
+    lf_opt.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
     lf_opt.columnconfigure(0, weight=1)
     erase_var = tk.BooleanVar(value=False)
     erase_chk = ttk.Checkbutton(
@@ -1688,9 +1729,9 @@ def _gui() -> None:
         text="Erase entire flash before write (clean install)",
         variable=erase_var,
     )
-    erase_chk.grid(row=0, column=0, sticky="w", pady=1)
+    erase_chk.grid(row=0, column=0, sticky="w", pady=2)
 
-    lf_log = ttk.LabelFrame(right, text="Activity log", padding=(10, 6))
+    lf_log = ttk.LabelFrame(right, text="Activity log", padding=(12, 8))
     lf_log.grid(row=1, column=0, sticky="nsew", pady=0)
     lf_log.columnconfigure(0, weight=1)
     lf_log.rowconfigure(1, weight=1)
@@ -1701,12 +1742,12 @@ def _gui() -> None:
     ttk.Label(log_bar, text="Live output", style="FHInnerMuted.TLabel").grid(row=0, column=0, sticky="w")
 
     try:
-        log_font = tkfont.Font(family="Cascadia Code", size=10)
+        log_font = tkfont.Font(family="Cascadia Code", size=9)
     except tk.TclError:
         try:
-            log_font = tkfont.Font(family="Consolas", size=10)
+            log_font = tkfont.Font(family="Consolas", size=9)
         except tk.TclError:
-            log_font = tkfont.Font(family="TkFixedFont", size=10)
+            log_font = tkfont.Font(family="TkFixedFont", size=9)
 
     log_widget = scrolledtext.ScrolledText(
         lf_log,
@@ -1716,8 +1757,8 @@ def _gui() -> None:
         wrap=tk.NONE,
         borderwidth=0,
         relief="flat",
-        padx=8,
-        pady=6,
+        padx=10,
+        pady=8,
     )
     log_widget.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
 
@@ -1737,6 +1778,12 @@ def _gui() -> None:
                 w.configure(**cfg)
             except tk.TclError:
                 pass
+        try:
+            log_widget.tag_configure("success", foreground=pal.get("success", "#22c55e"))
+            log_widget.tag_configure("error", foreground=pal.get("error", "#ef4444"))
+            log_widget.tag_configure("accent", foreground=pal["accent"])
+        except tk.TclError:
+            pass
 
     def sync_dropzone_theme() -> None:
         for w in dz_widgets:
@@ -1764,18 +1811,18 @@ def _gui() -> None:
     clear_btn = ttk.Button(log_bar, text="Clear log", command=clear_log, style=sec_st)
     clear_btn.grid(row=0, column=2, sticky="e")
 
-    actions = ttk.LabelFrame(bottom_controls, text="4  Flash", padding=(10, 6))
+    actions = ttk.LabelFrame(bottom_controls, text="\u2463  Flash", padding=(12, 8))
     actions.grid(row=0, column=1, sticky="nsew")
     actions.columnconfigure(0, weight=1)
 
-    progress = ttk.Progressbar(actions, mode="indeterminate", length=190)
-    progress.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
-    flash_btn = ttk.Button(actions, text="Flash firmware", style=prim_st, width=18)
+    flash_btn = ttk.Button(actions, text="\u26A1  Flash firmware", style=prim_st, width=18)
     flash_btn.grid(row=0, column=0, sticky="ew")
 
+    progress = ttk.Progressbar(actions, mode="indeterminate", length=190)
+    progress.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
     footer = ttk.Frame(main)
-    footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+    footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
     footer.columnconfigure(0, weight=1)
     footer.columnconfigure(1, weight=0)
 
@@ -1783,7 +1830,7 @@ def _gui() -> None:
     status = ttk.Label(footer, textvariable=status_var, style="FHMuted.TLabel")
     status.grid(row=0, column=0, sticky="ew")
 
-    hint = "F5 refreshes ports · Ctrl+Enter flashes · Ctrl+L clears the log"
+    hint = "F5 refresh  \u00B7  Ctrl+Enter flash  \u00B7  Ctrl+L clear log  \u00B7  Ctrl+Q exit"
     hint_lbl = ttk.Label(footer, text=hint, wraplength=560, justify="right", style="FHMuted.TLabel")
     hint_lbl.grid(row=0, column=1, sticky="e", padx=(16, 0))
     sync_src_ui()
@@ -1819,7 +1866,8 @@ def _gui() -> None:
         outer.configure(bg=pal["canvas"])
         header.configure(bg=pal["shell"])
         ht_left.configure(bg=pal["shell"])
-        title_lbl.configure(fg=pal["text"], bg=pal["shell"])
+        title_row.configure(bg=pal["shell"])
+        title_lbl.configure(fg=pal["accent"], bg=pal["shell"])
         sub_lbl.configure(fg=pal["muted"], bg=pal["shell"])
         ver_lbl.configure(fg=pal["muted"], bg=pal["pill_bg"])
         links_fr.configure(bg=pal["shell"])
@@ -1827,7 +1875,7 @@ def _gui() -> None:
         for lb in link_labs:
             lb.configure(fg=pal["accent"], bg=pal["pill_bg"])
         for lb in extra_link_labs:
-            lb.configure(fg=pal["accent"], bg=pal["pill_bg"])
+            lb.configure(fg=pal["muted"], bg=pal["pill_bg"])
         accent_bar.configure(bg=pal["accent"])
         set_windows_titlebar_dark(variant == "dark")
         sync_log_theme()
@@ -1847,6 +1895,23 @@ def _gui() -> None:
             if label == lab:
                 return key
         return preset_rows[0][0]
+
+    def set_preset_key(key: str) -> None:
+        if key not in PRESETS:
+            return
+        label = PRESET_LABELS.get(key, key)
+        preset_display_var.set(label)
+
+    def maybe_apply_preset_for_bin(path_or_name: str, *, announce: bool = True) -> None:
+        inferred = infer_preset_from_app_bin(path_or_name)
+        if not inferred:
+            return
+        if preset_key_from_ui() == inferred:
+            return
+        set_preset_key(inferred)
+        if announce:
+            name = Path(path_or_name).name
+            status_var.set(f"Board preset → {PRESET_LABELS[inferred]} (matches {name})")
 
     def refresh_ports() -> None:
         status_var.set("Refreshing serial ports...")
@@ -1887,6 +1952,7 @@ def _gui() -> None:
         )
         if p:
             app_bin_var.set(p)
+            maybe_apply_preset_for_bin(p)
             status_var.set(f"Selected app binary: {Path(p).name}")
 
     appbrowse_btn.configure(command=browse_app_bin)
@@ -1906,7 +1972,7 @@ def _gui() -> None:
         if labels:
             release_combo.current(0)
             release_var.set(labels[0])
-            status_var.set(f"Loaded {len(labels)} GitHub release(s)")
+            status_var.set(f"Loaded {len(labels)} GitHub firmware choice(s)")
         else:
             release_var.set("")
             status_var.set("No releases returned from GitHub")
@@ -1924,7 +1990,7 @@ def _gui() -> None:
             try:
                 ol("Fetching releases from GitHub API...")
                 rows = github_list_release_choices(per_page=40)
-                ol(f"Found {len(rows)} release(s).")
+                ol(f"Found {len(rows)} firmware choice(s).")
                 root.after(0, lambda: apply_github_release_rows(rows))
             except Exception as ex:
                 msg = str(ex)
@@ -1984,6 +2050,7 @@ def _gui() -> None:
 
                 def done() -> None:
                     app_bin_var.set(ps)
+                    maybe_apply_preset_for_bin(path.name)
                     status_var.set(f"Downloaded {path.name}")
 
                 root.after(0, done)
@@ -2009,15 +2076,36 @@ def _gui() -> None:
 
     gh_download_btn.configure(command=download_github_selected)
 
+    def on_release_selected(_evt: object | None = None) -> None:
+        choice = selected_github_choice()
+        if choice and choice.asset_name:
+            maybe_apply_preset_for_bin(choice.asset_name)
+
+    release_combo.bind("<<ComboboxSelected>>", on_release_selected)
+
     def append_log(line: str) -> None:
         log_q.put(line)
+
+    def _log_tag_for(line: str) -> str:
+        low = line.lower()
+        if "error" in low or "fail" in low or "traceback" in low:
+            return "error"
+        if "success" in low or "done" in low or "saved:" in low or "verified" in low:
+            return "success"
+        if line.startswith("---") or line.startswith("==="):
+            return "accent"
+        return ""
 
     def pump_log_queue() -> None:
         try:
             while True:
                 line = log_q.get_nowait()
+                tag = _log_tag_for(line)
                 log_widget.configure(state="normal")
-                log_widget.insert("end", line + "\n")
+                if tag:
+                    log_widget.insert("end", line + "\n", tag)
+                else:
+                    log_widget.insert("end", line + "\n")
                 log_widget.see("end")
                 log_widget.configure(state="disabled")
         except queue.Empty:
@@ -2082,6 +2170,7 @@ def _gui() -> None:
             )
             return
         pkey = preset_key_from_ui()
+        preset_note = ""
         try:
             if src_var.get() == "folder":
                 fw = folder_var.get().strip().strip('"').strip("'")
@@ -2104,7 +2193,15 @@ def _gui() -> None:
                         parent=root,
                     )
                     return
-                resolved = resolve_bundled_plus_app(pkey, Path(ap))
+                app_path = Path(ap)
+                use_pkey = effective_bundled_preset(pkey, app_path)
+                if use_pkey != pkey:
+                    set_preset_key(use_pkey)
+                    preset_note = (
+                        f"Board preset adjusted to {PRESET_LABELS[use_pkey]} "
+                        f"(matches {app_path.name})."
+                    )
+                resolved = resolve_bundled_plus_app(use_pkey, app_path)
         except Exception as ex:
             status_var.set("Firmware source could not be resolved")
             messagebox.showerror("Firmware", str(ex), parent=root)
@@ -2112,6 +2209,8 @@ def _gui() -> None:
 
         clear_log()
         status_var.set("Preparing flash command...")
+        if preset_note:
+            append_log(preset_note)
         append_log(f"Folder used: {resolved.bootloader.parent}")
         append_log(f"Bootloader : {resolved.bootloader.name}")
         append_log(f"Partitions : {resolved.partition_table.name}")
@@ -2253,13 +2352,24 @@ def main() -> None:
     if args.firmware_folder is not None:
         images = resolve_firmware_dir(Path(args.firmware_folder), preset_key=args.preset)
     elif args.bundled_app_bin is not None:
-        images = resolve_bundled_plus_app(args.preset, Path(args.bundled_app_bin))
+        app_path = Path(args.bundled_app_bin)
+        preset = effective_bundled_preset(args.preset, app_path)
+        if preset != args.preset:
+            on_line(
+                f"Using preset {preset!r} ({PRESET_LABELS[preset]}) inferred from {app_path.name}."
+            )
+        images = resolve_bundled_plus_app(preset, app_path)
     else:
         if args.github_tag:
             app_path = download_tagged_release_app_bin(args.github_tag, on_line)
         else:
             app_path = download_latest_release_app_bin(on_line)
-        images = resolve_bundled_plus_app(args.preset, app_path)
+        preset = effective_bundled_preset(args.preset, app_path)
+        if preset != args.preset:
+            on_line(
+                f"Using preset {preset!r} ({PRESET_LABELS[preset]}) inferred from {app_path.name}."
+            )
+        images = resolve_bundled_plus_app(preset, app_path)
 
     rc = flash_firmware(
         port=args.port,
