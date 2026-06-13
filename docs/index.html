@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ESP32-DIV — open-source multi-band wireless toolkit on ESP32-S3. Wi-Fi, BLE, 2.4GHz, Sub-GHz, IR, RFID/NFC, and GPS in one handheld device." />
+  <title>ESP32-DIV — Multi-band Wireless Toolkit</title>
+  <meta name="theme-color" content="#0a0a0b" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="ESP32-DIV — Multi-band Wireless Toolkit" />
+  <meta property="og:description" content="Wi-Fi, BLE, 2.4GHz, Sub-GHz, IR, RFID/NFC, and GPS — one open-source handheld built on ESP32-S3." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="ESP32-DIV — CiferTech" />
+  <meta name="twitter:description" content="Open-source multi-band wireless research toolkit on ESP32-S3." />
+
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Doto:wght@100..900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@hackernoon/pixel-icon-library/fonts/iconfont.css" />
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- ESP Web Tools -->
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/"
+      }
+    }
+  </script>
+</head>
+<body>
+
+  <!-- ── Navbar ────────────────────────────── -->
+  <header class="nav">
+    <div class="nav__inner">
+      <a href="#" class="nav__brand">
+        <span class="nav__logo">ESP32<em>-DIV</em></span>
+        <span class="nav__badge" data-repo-version>v1.7.0</span>
+      </a>
+      <nav class="nav__links" id="nav-links">
+        <a href="#features">Features</a>
+        <a href="#hardware">Hardware</a>
+        <a href="#flash">Flash</a>
+        <a href="#start">Get started</a>
+        <a href="#videos">Videos</a>
+        <a href="https://github.com/cifertech/ESP32-DIV/wiki" target="_blank" rel="noopener">Wiki</a>
+      </nav>
+      <div class="nav__actions">
+        <a class="btn btn--ghost btn--sm" href="https://github.com/cifertech/ESP32-DIV" target="_blank" rel="noopener">
+          <i class="hn hn-github"></i> GitHub
+        </a>
+        <a class="btn btn--ghost btn--sm" href="https://www.patreon.com/c/cifertech" target="_blank" rel="noopener">
+          <i class="hn hn-heart"></i> Patreon
+        </a>
+        <button class="nav__burger" id="nav-burger" aria-label="Menu"><i class="ti ti-menu-2"></i></button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- ── Hero ────────────────────────────── -->
+    <section class="hero">
+      <div class="hero__inner">
+        <div class="hero__copy">
+          <p class="hero__kicker"><span class="hero__kicker-dot"></span>Open-source hardware · CiferTech</p>
+          <h1 class="hero__title">Multi-band wireless toolkit<span class="accent">.</span></h1>
+          <p class="hero__sub">
+            Wi-Fi, BLE, 2.4GHz, Sub-GHz, IR, RFID/NFC, and GPS — all from one compact
+            handheld with a touchscreen UI, built on the ESP32-S3.
+          </p>
+          <div class="hero__cta">
+            <a href="#flash" class="btn btn--primary">Flash firmware</a>
+            <a href="https://github.com/cifertech/ESP32-DIV" class="btn btn--ghost" target="_blank" rel="noopener">
+              <i class="hn hn-github"></i> View source
+            </a>
+          </div>
+          <div class="hero__stats">
+            <div class="stat">
+              <i class="hn hn-star stat__icon" aria-hidden="true"></i>
+              <div class="stat__body">
+                <span class="stat__v" id="repo-stars">3.1k</span>
+                <span class="stat__l">stars</span>
+              </div>
+            </div>
+            <div class="stat">
+              <i class="hn hn-fork stat__icon" aria-hidden="true"></i>
+              <div class="stat__body">
+                <span class="stat__v" id="repo-forks">413</span>
+                <span class="stat__l">forks</span>
+              </div>
+            </div>
+            <div class="stat">
+              <i class="hn hn-tag stat__icon" aria-hidden="true"></i>
+              <div class="stat__body">
+                <span class="stat__v" data-repo-version>v1.7.0</span>
+                <span class="stat__l">latest</span>
+              </div>
+            </div>
+            <div class="stat">
+              <i class="hn hn-check-circle stat__icon" aria-hidden="true"></i>
+              <div class="stat__body">
+                <span class="stat__v">MIT</span>
+                <span class="stat__l">license</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="hero__visual">
+          <div class="model-switch" id="model-switch" data-target="hero-viewer" role="group" aria-label="Choose board model">
+            <button type="button" class="is-active" data-model-src="models/ESP32DIV2.glb">v2</button>
+            <button type="button" data-model-src="models/ESP32DIVv1.glb?v=20260613b">v1</button>
+          </div>
+          <div class="viewer" id="hero-viewer" data-model="models/ESP32DIV2.glb">
+            <canvas></canvas>
+            <p class="viewer__status">Loading model…</p>
+            <span class="viewer__hint"><i class="ti ti-hand-move"></i> drag to rotate</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Features ────────────────────────── -->
+    <section class="section" id="features">
+      <div class="section__inner">
+        <span class="eyebrow"><i class="hn hn-wifi"></i>Features</span>
+        <h2 class="section__title">Everything wireless,<br />one device<span class="accent">.</span></h2>
+        <p class="section__sub">Eight tool categories cover the full spectrum — scan, capture, replay, and analyze.</p>
+
+        <div class="grid">
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-wifi"></i></div>
+            <h3 class="card__title">Wi-Fi</h3>
+            <p class="card__desc">Packet monitor with waterfall graph, scanner, beacon spammer, deauth attack &amp; detector, captive portal, probe flood.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-bluetooth"></i></div>
+            <h3 class="card__title">Bluetooth</h3>
+            <p class="card__desc">BLE scanner, sniffer, spoofer, Sour Apple, jammer, and a BLE Rubber Ducky running scripts from SD.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-antenna"></i></div>
+            <h3 class="card__title">2.4GHz</h3>
+            <p class="card__desc">Spectrum analyzer across 128 channels and Protokill for Zigbee, Wi-Fi, and custom RF protocols.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-radio"></i></div>
+            <h3 class="card__title">Sub-GHz</h3>
+            <p class="card__desc">Capture and replay remotes and garage doors, jam across bands, and manage saved signal profiles.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-device-remote"></i></div>
+            <h3 class="card__title">Infrared</h3>
+            <p class="card__desc">IR replay with visualization, saved profiles with carrier frequency, and a universal remote controller.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-nfc"></i></div>
+            <h3 class="card__title">RFID / NFC</h3>
+            <p class="card__desc">Read, clone, dump, and erase tags. Decode access bits, jam readers, and run disruption flows.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-satellite"></i></div>
+            <h3 class="card__title">GPS</h3>
+            <p class="card__desc">Wardriving with Wi-Fi/BLE logging to SD and a satellite scanner with fix diagnostics.</p>
+          </div>
+          <div class="card" data-reveal>
+            <div class="card__icon"><i class="ti ti-settings"></i></div>
+            <h3 class="card__title">System</h3>
+            <p class="card__desc">Serial monitor on TFT, SD file manager, firmware updates from SD, touch calibration, themes.</p>
+          </div>
+        </div>
+
+        <p class="section__more">
+          Full tool documentation lives in the
+          <a href="https://github.com/cifertech/ESP32-DIV/wiki" target="_blank" rel="noopener">project Wiki →</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- ── Hardware ────────────────────────── -->
+    <section class="section section--alt" id="hardware">
+      <div class="section__inner">
+        <span class="eyebrow"><i class="hn hn-cog"></i>Hardware</span>
+        <h2 class="section__title">Two boards,<br />zero compromise<span class="accent">.</span></h2>
+        <p class="section__sub">A custom main board paired with a shield — open schematics and PCB files included.</p>
+
+        <div class="hw">
+          <div class="hw__col" data-reveal>
+            <h3 class="hw__head"><i class="ti ti-cpu"></i> Main board</h3>
+            <ul class="hw__list">
+              <li><strong>ESP32-S3</strong> — Wi-Fi + BLE microcontroller</li>
+              <li><strong>2.8″ ILI9341 TFT</strong> — touchscreen UI (XPT2046)</li>
+              <li><strong>IP5306</strong> — LiPo charging &amp; protection</li>
+              <li><strong>CP2102</strong> — USB-to-serial flashing</li>
+              <li><strong>PCF8574</strong> — I/O expander for buttons</li>
+              <li><strong>SD card slot</strong> — logs, captures, ducky scripts</li>
+              <li><strong>WS2812 NeoPixels</strong> — status feedback</li>
+              <li><strong>External antenna</strong> connector + buzzer</li>
+            </ul>
+          </div>
+          <div class="hw__col" data-reveal>
+            <h3 class="hw__head"><i class="ti ti-shield"></i> Shield</h3>
+            <ul class="hw__list">
+              <li><strong>3× NRF24 modules</strong> — 2.4GHz analysis &amp; spoofing</li>
+              <li><strong>CC1101 module</strong> — Sub-GHz capture &amp; replay</li>
+              <li><strong>IR transceiver</strong> — capture &amp; replay remotes</li>
+              <li><strong>Multiple antennas</strong> — extended range</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Web Flasher ─────────────────────── -->
+    <section class="section" id="flash">
+      <div class="section__inner">
+        <span class="eyebrow"><i class="hn hn-bolt"></i>Flash</span>
+        <h2 class="section__title">Flash from<br />your browser<span class="accent">.</span></h2>
+        <p class="section__sub">No toolchain needed — pick your board, plug in USB, and flash <span data-repo-version>v1.7.0</span> over Web Serial.</p>
+
+        <div class="flasher" data-reveal>
+          <div class="flasher__head">
+            <div>
+              <p class="flasher__label">Latest firmware</p>
+              <p class="flasher__ver" data-repo-version>v1.7.0</p>
+            </div>
+            <a class="flasher__releases" id="releases-link" href="https://github.com/cifertech/ESP32-DIV/releases" target="_blank" rel="noopener">
+              All releases <i class="ti ti-arrow-up-right"></i>
+            </a>
+          </div>
+
+          <div class="flasher__boards" id="board-picker">
+            <button class="board is-active"
+              data-board="v2"
+              data-chip="ESP32-S3" data-size="1.7 MB" data-esptool="esp32s3">
+              <span class="board__name">ESP32-DIV v2</span>
+              <span class="board__chip">ESP32-S3 · custom PCB</span>
+            </button>
+            <button class="board"
+              data-board="v1"
+              data-chip="ESP32" data-size="1.8 MB" data-esptool="esp32">
+              <span class="board__name">ESP32-DIV v1</span>
+              <span class="board__chip">ESP32 · custom PCB</span>
+            </button>
+            <button class="board"
+              data-board="cyd"
+              data-chip="ESP32" data-size="1.8 MB" data-esptool="esp32">
+              <span class="board__name">CYD</span>
+              <span class="board__chip">ESP32 · Cheap Yellow Display</span>
+            </button>
+          </div>
+
+          <div class="flasher__file">
+            <i class="ti ti-file-code"></i>
+            <div class="flasher__file-info">
+              <span class="flasher__file-name" id="fw-name">ESP32-DIV-v2-v1.7.0-merged.bin</span>
+              <span class="flasher__file-meta" id="fw-meta">ESP32-S3 · 1.7 MB · complete image (bootloader + partitions + app)</span>
+            </div>
+            <span class="flasher__file-tag" data-repo-version>v1.7.0</span>
+          </div>
+
+          <p class="flasher__warn" id="fw-stale-warn" hidden>
+            <i class="ti ti-alert-circle"></i>
+            Bundled web-flasher image for <span data-repo-version>v1.7.0</span> isn’t on this site yet —
+            <a id="release-dl-link" href="https://github.com/cifertech/ESP32-DIV/releases/latest" target="_blank" rel="noopener">download from GitHub Releases</a>.
+          </p>
+
+          <div class="flasher__action">
+            <esp-web-install-button id="install-btn" manifest="manifest.json">
+              <button slot="activate" class="btn btn--primary"><i class="hn hn-bolt"></i> Install firmware</button>
+              <span slot="unsupported"></span>
+              <span slot="not-allowed"></span>
+            </esp-web-install-button>
+            <a class="btn btn--ghost" id="dl-btn" href="firmware/ESP32-DIV-v2-v1.7.0-merged.bin" download>
+              <i class="hn hn-download"></i> Download .bin
+            </a>
+          </div>
+
+          <p class="flasher__warn" id="browser-warn">
+            <i class="ti ti-alert-circle"></i>
+            Web Serial requires Chrome or Edge on desktop. You can still download the binary and flash it with esptool below.
+          </p>
+
+          <p class="flasher__desktop">
+            <a href="https://github.com/cifertech/ESP32-DIV/tree/main/tools/esp32-div-flasher" target="_blank" rel="noopener">
+              <i class="hn hn-cloud-download-alt"></i> Prefer a desktop app? Use ESP32-DIV Flasher
+            </a>
+            ·
+            <a href="#start" data-start-tab="desktop">Setup guide</a>
+          </p>
+
+          <details class="flasher__alt">
+            <summary><i class="ti ti-terminal-2"></i> Flash with esptool instead</summary>
+            <div class="flasher__cmd-row">
+              <code class="flasher__cmd" id="esptool-cmd">esptool.py --chip esp32s3 --baud 921600 write_flash 0x0 ESP32-DIV-v2-v1.7.0-merged.bin</code>
+              <button class="btn btn--ghost btn--sm" id="copy-cmd" title="Copy command"><i class="ti ti-copy"></i></button>
+            </div>
+          </details>
+
+          <ul class="flasher__tips">
+            <li><i class="ti ti-plug"></i><span>Device not detected? Hold <strong>BOOT</strong>, tap <strong>RESET</strong>, then release BOOT and retry.</span></li>
+            <li><i class="ti ti-usb"></i><span>Use a data-capable USB cable, not a charge-only one.</span></li>
+            <li><i class="ti ti-info-circle"></i><span>Works on blank chips too — the installer writes the bootloader, partitions, and app. First install? Choose <strong>Erase&nbsp;device</strong> when prompted.</span></li>
+            <li><i class="ti ti-refresh"></i><span>After flashing finishes, <strong>press&nbsp;RESET</strong> (or replug USB) — the board doesn't always restart on its own.</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Getting started ─────────────────── -->
+    <section class="section section--alt" id="start">
+      <div class="section__inner">
+        <span class="eyebrow"><i class="hn hn-book"></i>Get started</span>
+        <h2 class="section__title">Up and running<br />in minutes<span class="accent">.</span></h2>
+        <p class="section__sub">Pick a method below. Full details in the <a href="https://github.com/cifertech/ESP32-DIV/wiki/Firmware-Upload" target="_blank" rel="noopener">Firmware Upload wiki</a>.</p>
+
+        <div class="start-tabs" id="start-tabs" data-reveal>
+          <div class="start-tabs__nav" role="tablist" aria-label="Programming methods">
+            <button type="button" class="start-tab is-active" role="tab" aria-selected="true" data-tab="web">
+              <i class="hn hn-bolt" aria-hidden="true"></i> Web flasher
+            </button>
+            <button type="button" class="start-tab" role="tab" aria-selected="false" data-tab="desktop">
+              <i class="hn hn-cloud-download-alt" aria-hidden="true"></i> DIV Flasher
+            </button>
+            <button type="button" class="start-tab" role="tab" aria-selected="false" data-tab="ota-sd">
+              <i class="hn hn-wifi" aria-hidden="true"></i> OTA / SD
+            </button>
+            <button type="button" class="start-tab" role="tab" aria-selected="false" data-tab="flash-tool">
+              <i class="hn hn-file-import" aria-hidden="true"></i> Flash tool
+            </button>
+            <button type="button" class="start-tab" role="tab" aria-selected="false" data-tab="esptool">
+              <i class="hn hn-laptop-code" aria-hidden="true"></i> esptool
+            </button>
+            <button type="button" class="start-tab" role="tab" aria-selected="false" data-tab="arduino">
+              <i class="hn hn-code" aria-hidden="true"></i> Arduino IDE
+            </button>
+          </div>
+
+          <div class="start-tabs__panels">
+            <div class="start-panel is-active" data-panel="web" role="tabpanel">
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Enter flash mode</h3>
+                    <p class="step__desc">Hold <strong>BOOT</strong>, press <strong>RESET</strong>, release BOOT — then plug in USB-C.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Flash in the browser</h3>
+                    <p class="step__desc">Open the <a href="#flash">web flasher</a>, pick your board (v2, v1, or CYD), and click <strong>Install firmware</strong>. Use Chrome or Edge on desktop.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Reboot the device</h3>
+                    <p class="step__desc">Press <strong>RESET</strong> after the upload finishes — the touchscreen UI boots into the toolkit.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">04</span>
+                  <div>
+                    <h3 class="step__title">Explore the Wiki</h3>
+                    <p class="step__desc">Tool guides and tutorials live in the <a href="https://github.com/cifertech/ESP32-DIV/wiki" target="_blank" rel="noopener">Wiki</a>.</p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+
+            <div class="start-panel" data-panel="desktop" role="tabpanel" hidden>
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Get ESP32-DIV Flasher</h3>
+                    <p class="step__desc">Download the official desktop app from the repo: <a href="https://github.com/cifertech/ESP32-DIV/tree/main/tools/esp32-div-flasher" target="_blank" rel="noopener">tools/esp32-div-flasher</a>. Clone the repo or grab just that folder.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Install and launch</h3>
+                    <p class="step__desc">Windows: double-click <strong>ESP32-DIV-Flasher.bat</strong>. Or install deps and run manually:</p>
+                    <code class="step__code">pip install -r requirements.txt &amp;&amp; python flash_div.py</code>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Flash from the GUI</h3>
+                    <p class="step__desc">Pick your preset (<strong>ESP32-S3</strong> for v2, <strong>ESP32</strong> for v1/CYD), select the COM port, choose firmware or click download latest from GitHub, then flash. Optional <strong>Erase flash</strong> for first-time installs.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">04</span>
+                  <div>
+                    <h3 class="step__title">Reboot the device</h3>
+                    <p class="step__desc">Press <strong>RESET</strong> when the log shows success — same result as the web flasher, with a full desktop UI and activity log.</p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+
+            <div class="start-panel" data-panel="esptool" role="tabpanel" hidden>
+              <p class="start-panel__note">Command-line alternative using a single merged image at offset 0x0. For separate .bin + partitions files, use the <a href="#start" data-start-tab="flash-tool">Flash tool</a> tab instead.</p>
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Install esptool</h3>
+                    <p class="step__desc">Python 3 required. Install the flasher utility:</p>
+                    <code class="step__code">pip install esptool</code>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Download the merged binary</h3>
+                    <p class="step__desc">Grab the complete image for your board from the <a href="#flash">Flash section</a> or <a href="https://github.com/cifertech/ESP32-DIV/releases" target="_blank" rel="noopener">GitHub releases</a>.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Flash from terminal</h3>
+                    <p class="step__desc">Enter flash mode, then run (updates with your board selection in the flasher):</p>
+                    <div class="step__cmd-row">
+                      <code class="step__code" id="start-esptool-cmd">esptool.py --chip esp32s3 --baud 921600 write_flash 0x0 ESP32-DIV-v2-v1.7.0-merged.bin</code>
+                      <button class="btn btn--ghost btn--sm" id="start-copy-cmd" title="Copy command"><i class="hn hn-copy"></i></button>
+                    </div>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">04</span>
+                  <div>
+                    <h3 class="step__title">Reboot and verify</h3>
+                    <p class="step__desc">Press <strong>RESET</strong>. If the device boot-loops after a major upgrade, run <code class="step__code step__code--inline">esptool.py erase_flash</code> once, then re-flash.</p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+
+            <div class="start-panel" data-panel="arduino" role="tabpanel" hidden>
+              <p class="start-panel__note">For building and uploading the sketch from source — see <a href="https://github.com/cifertech/ESP32-DIV/wiki/Firmware-Upload#method-3-upload-sketch-via-arduino-ide" target="_blank" rel="noopener">Method 3</a> in the wiki.</p>
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Install Arduino IDE &amp; ESP32 core</h3>
+                    <p class="step__desc">Install <a href="https://www.arduino.cc/en/software" target="_blank" rel="noopener">Arduino IDE 2.x</a>, open Board Manager, and install <strong>esp32 by Espressif Systems (v2.0.10)</strong>.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Replace platform.txt</h3>
+                    <p class="step__desc">Download <code class="step__code step__code--inline">platform.txt</code> from the repo <a href="https://github.com/cifertech/ESP32-DIV/tree/main/Flash%20File" target="_blank" rel="noopener">Flash File</a> folder and replace the file in your Arduino15 ESP32 package (back up the original first).</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Install project libraries</h3>
+                    <p class="step__desc">Copy libraries from the repo <a href="https://github.com/cifertech/ESP32-DIV/tree/main/Libraries" target="_blank" rel="noopener">Libraries</a> folder into your Arduino <strong>libraries</strong> directory, then restart the IDE.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">04</span>
+                  <div>
+                    <h3 class="step__title">Configure board settings</h3>
+                    <p class="step__desc">Open the sketch from the repo. Board: <strong>ESP32 S3 Dev Module</strong> (v2) or classic <strong>ESP32</strong> (v1/CYD). Partition scheme: <strong>Minimal SPIFFS</strong>. Upload speed: <strong>921600</strong> (or 115200 if unstable).</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">05</span>
+                  <div>
+                    <h3 class="step__title">Verify and upload</h3>
+                    <p class="step__desc">Click <strong>Verify</strong>, then <strong>Upload</strong>. Enter download mode (hold BOOT, press RESET) if prompted. Check the TFT or serial monitor at <strong>115200 baud</strong>.</p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+
+            <div class="start-panel" data-panel="ota-sd" role="tabpanel" hidden>
+              <p class="start-panel__note">Recommended for updates when main firmware is already running — no PC required. See <a href="https://github.com/cifertech/ESP32-DIV/wiki/Firmware-Upload#method-1-update-firmware-via-ota-or-sd-card-recommended" target="_blank" rel="noopener">Method 1</a> in the wiki.</p>
+
+              <h3 class="start-subhead"><i class="hn hn-wifi"></i> OTA update</h3>
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Host the firmware file</h3>
+                    <p class="step__desc">Download the latest <strong>.bin</strong> from <a href="https://github.com/cifertech/ESP32-DIV/releases" target="_blank" rel="noopener">GitHub releases</a> and host it on a local server or device. Note the URL (e.g. <code class="step__code step__code--inline">http://192.168.1.100/firmware.bin</code>).</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Connect to Wi-Fi</h3>
+                    <p class="step__desc">On the TFT, open <strong>Wi-Fi Settings</strong>, select your network, and enter the password with the on-screen keyboard.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Run OTA update</h3>
+                    <p class="step__desc">Go to <strong>Firmware Update → OTA Update</strong>, enter the firmware URL, and press <strong>Update</strong>. The device reboots when finished.</p>
+                  </div>
+                </li>
+              </ol>
+
+              <h3 class="start-subhead"><i class="hn hn-download"></i> SD card update</h3>
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Prepare the SD card</h3>
+                    <p class="step__desc">Format a microSD card to <strong>FAT32</strong>. Download the <strong>.bin</strong>, rename it to <code class="step__code step__code--inline">firmware.bin</code>, and place it in the card root directory.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Insert and update</h3>
+                    <p class="step__desc">Power off, insert the SD card, then power on. Open <strong>Firmware Update → SD Card Update</strong>, select <code class="step__code step__code--inline">firmware.bin</code>, and press <strong>Update</strong>.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Verify and clean up</h3>
+                    <p class="step__desc">Confirm the new version on the TFT or serial monitor (115200 baud). The file may be renamed to <code class="step__code step__code--inline">firmware.bak</code> — remove or reformat the card for future updates.</p>
+                  </div>
+                </li>
+              </ol>
+              <p class="start-panel__foot">First-time install? Use the <a href="#start" data-start-tab="web">web flasher</a>, <a href="#start" data-start-tab="desktop">DIV Flasher</a>, or <a href="#start" data-start-tab="flash-tool">Flash tool</a> tabs instead.</p>
+            </div>
+
+            <div class="start-panel" data-panel="flash-tool" role="tabpanel" hidden>
+              <p class="start-panel__note">Espressif Flash Download Tool — ideal for initial setup, recovery, or bricked devices. See <a href="https://github.com/cifertech/ESP32-DIV/wiki/Firmware-Upload#method-2-flash-a-bin-file-with-flash-download-tool" target="_blank" rel="noopener">Method 2</a> in the wiki.</p>
+              <ol class="steps">
+                <li class="step">
+                  <span class="step__num">01</span>
+                  <div>
+                    <h3 class="step__title">Get firmware files</h3>
+                    <p class="step__desc">Download the app <strong>.bin</strong> from <a href="https://github.com/cifertech/ESP32-DIV/tree/main/Pre-compiled%20Bin" target="_blank" rel="noopener">Pre-compiled Bin</a> and the <strong>.partitions</strong> file from <a href="https://github.com/cifertech/ESP32-DIV/tree/main/Flash%20File" target="_blank" rel="noopener">Flash File</a>.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">02</span>
+                  <div>
+                    <h3 class="step__title">Install Flash Download Tool</h3>
+                    <p class="step__desc">Download the <a href="https://www.espressif.com/en/support/download/other-tools" target="_blank" rel="noopener">Espressif Flash Download Tool</a>. On Windows, run as Administrator.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">03</span>
+                  <div>
+                    <h3 class="step__title">Enter download mode</h3>
+                    <p class="step__desc">Connect USB, hold <strong>BOOT</strong>, press <strong>RESET</strong>, release both. Select the correct <strong>COM port</strong> (install CP2102/CH340 drivers if missing).</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">04</span>
+                  <div>
+                    <h3 class="step__title">Configure flash offsets</h3>
+                    <p class="step__desc">Chip: <strong>ESP32-S3</strong> (v2) or <strong>ESP32</strong> (v1/CYD). SPI mode <strong>DIO</strong>, speed <strong>40&nbsp;MHz</strong>. App <strong>.bin</strong> → offset <code class="step__code step__code--inline">0x10000</code>. Partitions file → offset <code class="step__code step__code--inline">0x8000</code>.</p>
+                  </div>
+                </li>
+                <li class="step">
+                  <span class="step__num">05</span>
+                  <div>
+                    <h3 class="step__title">Flash and verify</h3>
+                    <p class="step__desc">Click <strong>START</strong> and wait for “FINISH”. Power-cycle the device and check the TFT or serial monitor. Try 20&nbsp;MHz or a different USB cable if flashing fails.</p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Videos ──────────────────────────── -->
+    <section class="section" id="videos">
+      <div class="section__inner">
+        <span class="eyebrow"><i class="hn hn-youtube"></i>Videos</span>
+        <h2 class="section__title">Watch it<br />in action<span class="accent">.</span></h2>
+        <p class="section__sub">Build guides, demos, and tool walkthroughs from the official ESP32-DIV playlist.</p>
+
+        <div class="video" data-reveal>
+          <div class="video__layout">
+            <div class="video__player">
+              <div class="video__frame">
+                <iframe
+                  id="video-player"
+                  src="https://www.youtube.com/embed/wuQRoT1DsFM?rel=0"
+                  title="ESP32-DIV video player"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowfullscreen
+                  loading="lazy"
+                  referrerpolicy="strict-origin-when-cross-origin"
+                ></iframe>
+              </div>
+            </div>
+            <div class="video__side">
+              <div class="video__grid" id="video-grid" aria-label="ESP32-DIV playlist videos"></div>
+            </div>
+          </div>
+          <p class="video__meta">
+            <a href="https://youtube.com/playlist?list=PLwydWA9gIJ2p14uvDDpcJkhcJB90Wm7PZ" target="_blank" rel="noopener">
+              Open full playlist on YouTube →
+            </a>
+          </p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── Footer ──────────────────────────── -->
+  <footer class="footer">
+    <div class="footer__inner">
+      <div class="footer__brand">
+        <span class="nav__logo">ESP32<em>-DIV</em></span>
+        <p class="footer__tag">Open hardware for wireless research — MIT licensed.</p>
+      </div>
+      <div class="footer__links">
+        <a href="https://github.com/cifertech/ESP32-DIV" target="_blank" rel="noopener"><i class="hn hn-github"></i> GitHub</a>
+        <a href="https://github.com/cifertech/ESP32-DIV/wiki" target="_blank" rel="noopener"><i class="hn hn-book"></i> Wiki</a>
+        <a href="https://github.com/cifertech/ESP32-DIV/discussions" target="_blank" rel="noopener"><i class="hn hn-message"></i> Discussions</a>
+        <a href="https://youtube.com/playlist?list=PLwydWA9gIJ2p14uvDDpcJkhcJB90Wm7PZ" target="_blank" rel="noopener"><i class="hn hn-youtube"></i> YouTube</a>
+        <a href="https://www.patreon.com/c/cifertech" target="_blank" rel="noopener"><i class="hn hn-heart"></i> Patreon</a>
+        <a href="https://cifertech.net" target="_blank" rel="noopener"><i class="hn hn-globe"></i> Blog</a>
+      </div>
+    </div>
+    <p class="footer__copy">© 2026 CiferTech · ESP32-DIV</p>
+  </footer>
+
+  <script type="module" src="project-viewer.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
