@@ -2,7 +2,9 @@
 #include <PCF8574.h>
 #include <TFT_eSPI.h>
 #include <Wire.h>
+#include "BuzzerService.h"
 #include "SettingsStore.h"
+#include "StatusLedService.h"
 #include "Touchscreen.h"
 #include "config.h"
 #include "ducky.h"
@@ -3297,6 +3299,7 @@ void setup() {
 
   Serial.begin(115200);
   Serial.println("[boot] start");
+  BuzzerService::begin();
 
   tft.init();
   tft.setRotation(TFT_ROTATION);
@@ -3320,6 +3323,8 @@ void setup() {
   settingsLoad();
   applyThemeToPalette(settings().theme);
   setBrightness(settings().brightness);
+  StatusLedService::begin();
+  StatusLedService::setMode(StatusLedService::Mode::Boot);
 
 #if HAS_PCF8574_BUTTONS
   if (!initPcf8574Buttons()) {
@@ -3343,17 +3348,26 @@ void setup() {
 
   Serial.println("[boot] draw menu");
   menu_initialized = false;
+  Serial.println("[boot] read battery");
   currentBatteryVoltage = readBatteryVoltage();
+  Serial.println("[boot] display menu");
   displayMenu();
+  Serial.println("[boot] draw status");
   drawStatusBar(currentBatteryVoltage, false);
 
+  Serial.println("[boot] setup touchscreen");
   setupTouchscreen();
 
   last_interaction_time = millis();
   Serial.println("[boot] ready");
+  BuzzerService::beepSuccess();
+  StatusLedService::setMode(StatusLedService::Mode::Idle);
+  StatusLedService::event(StatusLedService::Event::BootOk);
 }
 
 void loop() {
+  BuzzerService::loop();
+  StatusLedService::loop();
   applyThemeToPalette(settings().theme);
   handleButtons();
   updateStatusBar();
