@@ -248,7 +248,16 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 /* Buzzer */
 #ifndef BUZZER_PIN
 // User hardware: buzzer on IO2
-#define BUZZER_PIN -1
+#define BUZZER_PIN 2
+#endif
+
+/* WS2812B status LEDs */
+#ifndef STATUS_LED_PIN
+// ESP32-DIV V2 schematic: D1 DIN is driven from IO1 through R33.
+#define STATUS_LED_PIN 1
+#endif
+#ifndef STATUS_LED_COUNT
+#define STATUS_LED_COUNT 4
 #endif
 
 /* Backlight / PWM */
