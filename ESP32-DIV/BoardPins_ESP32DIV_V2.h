@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * ESP32-DIV V2/V2.1 hardware map.
+ * ESP32-DIV V2/V2.0 hardware map.
  *
  * This file is intentionally documentary for now. Do not include it from
  * shared.h until each pin has been validated on the target hardware.

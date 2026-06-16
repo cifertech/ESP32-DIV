@@ -5,7 +5,7 @@
 ### Build e TFT
 
 - Fixed the ESP32-S3 link conflict by making `ieee80211_raw_frame_sanity_check` weak in `wifi.cpp`.
-- Restored the TFT display on ESP32-DIV V2/V2.1 by applying the recommended local TFT_eSPI V2 `User_Setup.h` configuration.
+- Restored the TFT display on ESP32-DIV V2/V2.0 by applying the recommended local TFT_eSPI V2 `User_Setup.h` configuration.
 - Added boot diagnostics around battery read, menu draw, status bar draw, and touchscreen startup.
 
 ### Buzzer
