@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <vector>
+#include "BuzzerService.h"
 #include "KeyboardUI.h"
+#include "StatusLedService.h"
 #include "Touchscreen.h"
 #include "config.h"
 #include "icon.h"
@@ -574,30 +576,6 @@ static uint16_t lastDetectAlertFreq = 0xFFFF;
 static uint32_t notifHideAtMs = 0;
 static bool notifActive = false;
 
-static constexpr uint8_t BUZZER_LEDC_CH = 7;
-static bool buzzerArmed = false;
-static uint32_t buzzerOffAtMs = 0;
-static void replayBeep(uint16_t hz = 2200, uint16_t ms = 60) {
-  #ifdef BUZZER_PIN
-  ledcSetup(BUZZER_LEDC_CH, 4000, 8);
-  ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
-  ledcWriteTone(BUZZER_LEDC_CH, hz);
-  buzzerArmed = true;
-  buzzerOffAtMs = millis() + ms;
-  #endif
-}
-
-static void replayBeepPoll() {
-  #ifdef BUZZER_PIN
-  if (!buzzerArmed) return;
-  if ((int32_t)(millis() - buzzerOffAtMs) < 0) return;
-  ledcWriteTone(BUZZER_LEDC_CH, 0);
-
-  ledcDetachPin(BUZZER_PIN);
-  buzzerArmed = false;
-  #endif
-}
-
 static void replayShowDetectNotice(const String& reason, int rssi = 0) {
   uint32_t now = millis();
 
@@ -610,7 +588,8 @@ static void replayShowDetectNotice(const String& reason, int rssi = 0) {
 
   snprintf(msg, sizeof(msg), "%s @ %.2f MHz | RSSI %d", reason.c_str(), mhz, rssi);
   showNotificationActions("SubGHz Detected", msg, true);
-  replayBeep(reason == "DECODE" ? 2600 : 2000, 70);
+  BuzzerService::beepCapture();
+  StatusLedService::event(StatusLedService::Event::CaptureSuccess);
   notifActive = true;
   notifHideAtMs = 0;
 }
@@ -1412,7 +1391,7 @@ void ReplayAttackLoop() {
     const bool upPressed    = isPhysicalButtonPressed(BTN_UP);
     const bool downPressed  = isPhysicalButtonPressed(BTN_DOWN);
 
-    replayBeepPoll();
+    BuzzerService::loop();
 
     if (notifActive && isNotificationVisible()) {
       int x, y;

@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "icon.h"
 #include "shared.h"
+#include "StatusLedService.h"
 #include "utils.h"
 
 #ifdef TFT_BLACK
@@ -1524,30 +1525,37 @@ static void ensureBleInit() {
 }
 
 static void bgBleScanTask(void* ) {
-  ensureBleInit();
   for (;;) {
     const uint32_t now = millis();
     if (bgBootMs == 0) bgBootMs = now;
 
     const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
     if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
+      ensureBleInit();
       if (fgBleScanInProgress) {
         vTaskDelay(250 / portTICK_PERIOD_MS);
         continue;
       }
       bgBleScanRunning = true;
       isScanning = true;
+      setStatusBarBleState(StatusBarRadioState::Scanning);
       bleResults = bleScan->start(2, false);
       isScanning = false;
       bgBleScanRunning = false;
       if (bleResults.getCount() >= 0) {
         bgHasResults = (bleResults.getCount() > 0);
         bgLastScanMs = now;
+        setStatusBarBleState((bleResults.getCount() > 0) ? StatusBarRadioState::Active : StatusBarRadioState::Off);
+      } else {
+        setStatusBarBleState(StatusBarRadioState::Error);
       }
       vTaskDelay(BG_BLE_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
     } else {
       if (bgBleScanRunning) {
         stopBgBleScanIfRunning();
+      }
+      if (!settings().autoBleScan) {
+        setStatusBarBleState(StatusBarRadioState::Off);
       }
       vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
@@ -1582,7 +1590,6 @@ void startBLEScan() {
   if (bgBleScanRunning) {
     stopBgBleScanIfRunning();
   }
-  displayScanning();
   isDetailView = false;
   current_page = 0;
   currentIndex = 0;
@@ -1592,6 +1599,10 @@ void startBLEScan() {
   fullScreenUpdate = true;
   ensureBleInit();
   fgBleScanInProgress = true;
+  setStatusBarBleState(StatusBarRadioState::Scanning);
+  drawStatusBar(currentBatteryVoltage, true);
+  StatusLedService::startActivity(StatusLedService::Mode::BleScan);
+  displayScanning();
   bleResults = bleScan->start(5, false);
   fgBleScanInProgress = false;
   isScanning = false;
@@ -1600,7 +1611,12 @@ void startBLEScan() {
   if (bleResults.getCount() >= 0) {
     bgHasResults = (bleResults.getCount() > 0);
     bgLastScanMs = millis();
+    setStatusBarBleState((bleResults.getCount() > 0) ? StatusBarRadioState::Active : StatusBarRadioState::Off);
+  } else {
+    setStatusBarBleState(StatusBarRadioState::Error);
   }
+  StatusLedService::stopActivity(StatusLedService::Mode::Idle);
+  drawStatusBar(currentBatteryVoltage, true);
 }
 
 void handleButtons() {
@@ -2006,6 +2022,7 @@ void bleScanLoop() {
 }
 
 void startBackgroundScanner() {
+  if (!settings().autoBleScan) return;
   if (bgBleScanTaskHandle != nullptr) return;
   xTaskCreatePinnedToCore(
     bgBleScanTask,
@@ -2020,7 +2037,6 @@ void startBackgroundScanner() {
 
 int getLastCount() {
 
-  if (!settings().autoBleScan) return 0;
   return bleResults.getCount();
 }
 
@@ -2033,6 +2049,7 @@ void exit() {
     bleScan->stop();
     isScanning = false;
   }
+  setStatusBarBleState(StatusBarRadioState::Off);
 }
 }
 
