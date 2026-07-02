@@ -21,7 +21,7 @@ static bool s_touchInitialized = false;
 
 #ifndef TOUCH_ROTATION
 #if defined(BOARD_ESP32_DIV_V2)
-#define TOUCH_ROTATION 0
+#define TOUCH_ROTATION 2
 #else
 #define TOUCH_ROTATION TFT_ROTATION
 #endif
