@@ -30,18 +30,6 @@ void startStatusBarTask();
 /** Request a status bar pass on the next update (e.g. after SD or ward state changes). */
 void requestStatusBarRedraw();
 
-enum class StatusBarRadioState : uint8_t {
-  Off,
-  Scanning,
-  Active,
-  Error
-};
-
-void setStatusBarWifiState(StatusBarRadioState state);
-void setStatusBarBleState(StatusBarRadioState state);
-StatusBarRadioState getStatusBarWifiState();
-StatusBarRadioState getStatusBarBleState();
-
 extern bool feature_exit_requested;
 
 extern void setBrightness(uint8_t value);
@@ -166,3 +154,4 @@ namespace FeatureUI {
 }
 
 #endif
+ 

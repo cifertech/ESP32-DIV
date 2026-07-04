@@ -15,8 +15,8 @@ struct AppSettings {
 
   bool     neopixelEnabled = false;
 
-  bool     autoWifiScan    = false;
-  bool     autoBleScan     = false;
+  bool     autoWifiScan    = true;
+  bool     autoBleScan     = true;
 
   uint16_t touchXMin = TOUCH_X_MIN;
   uint16_t touchXMax = TOUCH_X_MAX;
