@@ -35,7 +35,7 @@
 #include "esp_gap_bt_api.h"
 
 #include "arduinoFFT.h"
-#include "ELECHOUSE_CC1101_SRC_DRV.h"
+#include "ELECHOUSE_CC1101_ESP32DIV.h"
 #include "utils.h"
 #include "shared.h"
 

@@ -472,22 +472,28 @@ void requestStatusBarRedraw() {
 const float R1 = 100000.0;
 const float R2 = 100000.0;
 
-float readBatteryVoltage() {
-  const int sampleCount = 10;
-  long sum = 0;
+float readBatteryVoltage()
+{
+    static bool adcInitialized = false;
 
-  for (int i = 0; i < sampleCount; i++) {
-    sum += analogRead(BATTERY_ADC_PIN);
-    delay(5);
-  }
+    if (!adcInitialized)
+    {
+        analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
+        adcInitialized = true;
+    }
 
-  float averageADC = sum / (float)sampleCount;
+    const int sampleCount = 16;
+    uint32_t sum = 0;
 
-  float pinVoltage = (averageADC / 4095.0) * 2.2;
+    for (int i = 0; i < sampleCount; i++)
+    {
+        sum += analogReadMilliVolts(BATTERY_ADC_PIN);
+        delayMicroseconds(500);
+    }
 
-  float outputVoltage = pinVoltage * 2.0;
+    float avgMv = sum / (float)sampleCount;
 
-  return outputVoltage;
+    return (avgMv / 1000.0f) * 2.0f;
 }
 
 float readInternalTemperature() {
@@ -810,24 +816,26 @@ bool initPcf8574Buttons() {
   pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
 
 #if PCF8574_AUTO_DETECT
-  for (uint8_t addr = PCF8574_ADDR_MIN; addr <= PCF8574_ADDR_MAX; addr++) {
-    if (pcf.begin(addr)) {
-      s_pcf8574Addr = addr;
-      Serial.printf("[PCF8574] auto-detected at 0x%02X\n", addr);
-      break;
-    }
-  }
-  if (s_pcf8574Addr == 0) {
-    Serial.println("[PCF8574] not found (scanned 0x20-0x27)");
+
+  // Address is fixed in the PCF8574 constructor, so begin() takes no arguments.
+  if (!pcf.begin()) {
+    Serial.printf("[PCF8574] not found at 0x%02X\n", PCF8574_I2C_ADDR);
     return false;
   }
+
+  s_pcf8574Addr = PCF8574_I2C_ADDR;
+  Serial.printf("[PCF8574] using PCF8574 at 0x%02X\n", s_pcf8574Addr);
+
 #else
-  if (!pcf.begin(PCF8574_I2C_ADDR)) {
+
+  if (!pcf.begin()) {
     Serial.printf("[PCF8574] not found at fixed address 0x%02X\n", PCF8574_I2C_ADDR);
     return false;
   }
+
   s_pcf8574Addr = PCF8574_I2C_ADDR;
   Serial.printf("[PCF8574] using fixed address 0x%02X\n", s_pcf8574Addr);
+
 #endif
 
   for (int pin = 0; pin < 8; pin++) {
@@ -836,6 +844,7 @@ bool initPcf8574Buttons() {
     Serial.print(": ");
     Serial.println(pcf.digitalRead(pin) ? "Released" : "Pressed");
   }
+
   return true;
 }
 #else

@@ -73,7 +73,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.0"
+#define ESP32DIV_VERSION "v1.7.k"
 #endif
 
 
@@ -279,7 +279,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_MOSI 32
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_MOSI 23
+#define XPT2046_MOSI 32
 #else
 #define XPT2046_MOSI 35
 #endif
@@ -288,7 +288,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_MISO 39
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_MISO 19
+#define XPT2046_MISO 35
 #else
 #define XPT2046_MISO 37
 #endif
@@ -297,7 +297,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_CLK  25
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_CLK  18
+#define XPT2046_CLK  25
 #else
 #define XPT2046_CLK  36
 #endif
@@ -305,6 +305,8 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #ifndef XPT2046_IRQ
 #if defined(BOARD_CYD)
 #define XPT2046_IRQ  36
+#elif defined(BOARD_ESP32_DIV_V1)
+#define XPT2046_IRQ  34
 #else
 #define XPT2046_IRQ  255
 #endif
@@ -630,7 +632,15 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 
 /*──────────────────── Battery ────────────────────*/
 #ifndef BATTERY_ADC_PIN
+#if defined(BOARD_ESP32_DIV_V1)
+#define BATTERY_ADC_PIN 36
+#elif defined(BOARD_CYD)
+// CYD has no onboard battery monitor
 #define BATTERY_ADC_PIN -1
+//#else
+// Verify the correct ADC pin for V2 hardware
+//#define BATTERY_ADC_PIN -1
+#endif
 #endif
 #ifndef BATTERY_VDIV_R1
 #define BATTERY_VDIV_R1 200000.0f
