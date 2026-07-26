@@ -893,6 +893,15 @@ void ptmLoop() {
   deauths = 0;
   rssiSum = 0;
   }
+
+// IMPROVEMENT: Cleanup handler
+void exit() {
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  Serial.println("[WiFi] PacketMonitor exit: promisc disabled, radio reset");
+}
 }
 
 namespace BeaconSpammer {
@@ -1449,6 +1458,13 @@ void beaconSpamLoop() {
       break;
     }
   }
+}
+
+// IMPROVEMENT: Cleanup handler
+void exit() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  Serial.println("[WiFi] BeaconSpammer exit: stopped, radio reset");
 }
 }
 
@@ -2649,6 +2665,14 @@ void wifiscanLoop() {
     lastDetailView = true;
     }
   }
+
+// IMPROVEMENT: Cleanup handler
+void exit() {
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  Serial.println("[WiFi] WifiScan exit: scan stopped, radio reset");
+}
 }
 
 namespace CaptivePortal {

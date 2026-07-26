@@ -152,15 +152,65 @@ float navAltM = NAN;
 bool rmcNavValid = false;
 uint32_t lastNavMs = 0;
 
+// BUGFIX: Validate NMEA checksum before accepting sentence
+// Previously just stripped it without verification — corrupted GPS data was silently accepted
+bool validateAndStripChecksum(char* s) {
+  // Remove trailing CR/LF first
+  char* cr = strchr(s, '\r');
+  if (cr) *cr = '\0';
+  char* lf = strchr(s, '\n');
+  if (lf) *lf = '\0';
+
+  char* star = strchr(s, '*');
+  if (!star) {
+    return false;  // No checksum present — reject
+  }
+
+  // Parse the expected checksum (2 hex digits after *)
+  uint8_t expected = 0;
+  if (star[1] && star[2]) {
+    char hexStr[3] = { star[1], star[2], '\0' };
+    expected = (uint8_t)strtoul(hexStr, NULL, 16);
+  } else {
+    *star = '\0';
+    return false;  // Malformed checksum
+  }
+
+  // Compute XOR checksum over everything between $ and *
+  uint8_t computed = 0;
+  char* p = s;
+  if (*p == '$' || *p == '!') p++;  // Skip leading $ or ! (NMEA/AIS)
+  while (p < star) {
+    computed ^= (uint8_t)*p++;
+  }
+
+  *star = '\0';  // Strip the checksum from the sentence
+
+  if (computed != expected) {
+    Serial.printf("[GPS] Checksum mismatch\n");
+    return false;
+  }
+  return true;
+}
+
+// Legacy wrapper — maintains old interface but now validates
 void stripChecksum(char* s) {
+  // Try to validate; if it fails, still strip for best-effort parsing
+  // but log the error so bad data is visible in serial monitor
   char* star = strchr(s, '*');
   if (star) {
+    // We have a checksum — validate it
+    char temp[256];
+    strncpy(temp, s, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    if (!validateAndStripChecksum(temp)) {
+      Serial.println("[GPS] WARNING: Bad NMEA checksum");
+    }
+    // Still strip it from the original for backward compat
     *star = '\0';
   }
   char* cr = strchr(s, '\r');
-  if (cr) {
-    *cr = '\0';
-  }
+  if (cr) *cr = '\0';
 }
 
 int splitCommaFields(char* s, const char** fields, int maxFields) {
