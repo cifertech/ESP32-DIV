@@ -151,40 +151,11 @@ static QueueHandle_t pcapWriteQ = nullptr;
 
 static bool pcapMountSD() {
   if (pcapMounted) {
-    if (SD.exists("/")) return true;
+    if (SD.cardType() != CARD_NONE) return true;
     pcapMounted = false;
   }
-
-  #ifdef SD_CD
-  pinMode(SD_CD, INPUT_PULLUP);
-  if (digitalRead(SD_CD)) return false;
-  #endif
-
-  #ifdef SD_SCLK
-  #ifdef SD_MISO
-  #ifdef SD_MOSI
-  #ifdef SD_CS
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  #endif
-  #endif
-  #endif
-  #endif
-
-  #ifdef SD_CS
-  if (SD.begin(SD_CS)) { pcapMounted = true; return true; }
-  #endif
-
-  #ifdef SD_CS_PIN
-  #ifdef CC1101_CS
-  if (SD_CS_PIN != CC1101_CS) {
-    if (SD.begin(SD_CS_PIN)) { pcapMounted = true; return true; }
-  }
-  #else
-  if (SD.begin(SD_CS_PIN)) { pcapMounted = true; return true; }
-  #endif
-  #endif
-
-  return false;
+  pcapMounted = isSDCardAvailable();
+  return pcapMounted;
 }
 
 static bool pcapEnsureDir(const char* dirPath) {
@@ -2869,27 +2840,12 @@ void saveCredential(String username, String password, String ssid) {
 static bool cp_sd_mounted = false;
 
 static bool cpMountSD() {
-
   if (cp_sd_mounted) {
-    if (SD.exists("/")) return true;
+    if (SD.cardType() != CARD_NONE) return true;
     cp_sd_mounted = false;
   }
-
-  bool ok = false;
-  #ifdef SD_CS
-  ok = SD.begin(SD_CS);
-  #endif
-  #ifdef SD_CS_PIN
-  if (!ok) {
-    #ifdef CC1101_CS
-    if (SD_CS_PIN != CC1101_CS) ok = SD.begin(SD_CS_PIN);
-    #else
-    ok = SD.begin(SD_CS_PIN);
-    #endif
-  }
-  #endif
-  cp_sd_mounted = ok;
-  return ok;
+  cp_sd_mounted = isSDCardAvailable();
+  return cp_sd_mounted;
 }
 
 static bool cpEnsureDir(const char* dirPath) {
@@ -4475,27 +4431,31 @@ void drawAttackScreen() {
 static void deautherHandleNavButtons() {
     const unsigned long now = millis();
     if (now - deautherLastButtonPress < deautherDebounceTime) {
+        // Keep edge state in sync while debounce is active so a held press
+        // cannot fire again as soon as the window expires.
+        (void)isButtonPressedEdge(BTN_LEFT);
+        (void)isButtonPressedEdge(BTN_RIGHT);
+        (void)isButtonPressedEdge(BTN_UP);
+        (void)isButtonPressedEdge(BTN_DOWN);
         return;
     }
 
     if (selected_ap_index >= 0) {
-        if (isButtonPressed(BTN_LEFT)) {
+        if (isButtonPressedEdge(BTN_LEFT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
             deautherLastButtonPress = now;
-            delay(200);
             return;
         }
-        if (isButtonPressed(BTN_RIGHT)) {
+        if (isButtonPressedEdge(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
             deautherLastButtonPress = now;
-            delay(200);
             return;
         }
         return;
@@ -4505,32 +4465,28 @@ static void deautherHandleNavButtons() {
         return;
     }
 
-    if (isButtonPressed(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
         if (scanNetworks()) {
             drawScanScreen();
         }
         deautherLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_UP) && currentIndex > 0) {
+    if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
         currentIndex--;
         drawScanScreen();
         deautherLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_DOWN) && currentIndex < network_count - 1) {
+    if (isButtonPressedEdge(BTN_DOWN) && currentIndex < network_count - 1) {
         currentIndex++;
         drawScanScreen();
         deautherLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
         deautherOpenTarget(currentIndex);
         deautherLastButtonPress = now;
-        delay(200);
     }
 }
 
@@ -4539,6 +4495,12 @@ void handleTouch() {
     int x, y;
     if (!readTouchXY(x, y)) return;
 
+    static unsigned long lastTouchActionMs = 0;
+    const unsigned long now = millis();
+    if (now - lastTouchActionMs < 300) {
+        return;
+    }
+
     bool redraw = false;
     if (selected_ap_index == -1) {
         const int listMaxY = LIST_FIRST_ROW_Y + (deautherNetworksPerPage() * LIST_ROW_H);
@@ -4546,27 +4508,27 @@ void handleTouch() {
             int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * deautherNetworksPerPage());
             if (index >= 0 && index < network_count) {
                 deautherOpenTarget(index);
-                delay(50);
+                lastTouchActionMs = now;
             }
         } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, "Rescan", true, false);
-                delay(50);
                 if (scanNetworks()) {
                     drawScanScreen();
                 }
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 122 && x <= 179 && currentIndex > 0) {
                 drawButton(117, 304, 57, 16, "Prev", true, false);
                 currentIndex--;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240 && currentIndex < network_count - 1) {
                 drawButton(178, 304, 57, 16, "Next", true, false);
                 currentIndex++;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
@@ -4579,7 +4541,7 @@ void handleTouch() {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240) {
                 drawButton(177, 304, 57, 16, "Back", true, false);
@@ -4587,14 +4549,14 @@ void handleTouch() {
                 last_packet_time = 0;
                 selected_ap_index = -1;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
     }
 
     if (redraw) {
-        delay(100);
+        delay(50);
     }
 }
 
@@ -5159,27 +5121,31 @@ void drawAttackScreen() {
 static void probeHandleNavButtons() {
     const unsigned long now = millis();
     if (now - probeLastButtonPress < probeDebounceTime) {
+        // Keep edge state in sync while debounce is active so a held press
+        // cannot fire again as soon as the window expires.
+        (void)isButtonPressedEdge(BTN_LEFT);
+        (void)isButtonPressedEdge(BTN_RIGHT);
+        (void)isButtonPressedEdge(BTN_UP);
+        (void)isButtonPressedEdge(BTN_DOWN);
         return;
     }
 
     if (selected_ap_index >= 0) {
-        if (isButtonPressed(BTN_LEFT)) {
+        if (isButtonPressedEdge(BTN_LEFT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
             probeLastButtonPress = now;
-            delay(200);
             return;
         }
-        if (isButtonPressed(BTN_RIGHT)) {
+        if (isButtonPressedEdge(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
             probeLastButtonPress = now;
-            delay(200);
             return;
         }
         return;
@@ -5189,32 +5155,28 @@ static void probeHandleNavButtons() {
         return;
     }
 
-    if (isButtonPressed(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
         if (scanNetworks()) {
             drawScanScreen();
         }
         probeLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_UP) && currentIndex > 0) {
+    if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
         currentIndex--;
         drawScanScreen();
         probeLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_DOWN) && currentIndex < network_count - 1) {
+    if (isButtonPressedEdge(BTN_DOWN) && currentIndex < network_count - 1) {
         currentIndex++;
         drawScanScreen();
         probeLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
         probeOpenTarget(currentIndex);
         probeLastButtonPress = now;
-        delay(200);
     }
 }
 
@@ -5223,6 +5185,12 @@ void handleTouch() {
     int x, y;
     if (!readTouchXY(x, y)) return;
 
+    static unsigned long lastTouchActionMs = 0;
+    const unsigned long now = millis();
+    if (now - lastTouchActionMs < 300) {
+        return;
+    }
+
     bool redraw = false;
     if (selected_ap_index == -1) {
         const int listMaxY = LIST_FIRST_ROW_Y + (probeNetworksPerPage() * LIST_ROW_H);
@@ -5230,27 +5198,27 @@ void handleTouch() {
             int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * probeNetworksPerPage());
             if (index >= 0 && index < network_count) {
                 probeOpenTarget(index);
-                delay(50);
+                lastTouchActionMs = now;
             }
         } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, "Rescan", true, false);
-                delay(50);
                 if (scanNetworks()) {
                     drawScanScreen();
                 }
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 122 && x <= 179 && currentIndex > 0) {
                 drawButton(117, 304, 57, 16, "Prev", true, false);
                 currentIndex--;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240 && currentIndex < network_count - 1) {
                 drawButton(178, 304, 57, 16, "Next", true, false);
                 currentIndex++;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
@@ -5263,7 +5231,7 @@ void handleTouch() {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240) {
                 drawButton(177, 304, 57, 16, "Back", true, false);
@@ -5271,14 +5239,14 @@ void handleTouch() {
                 last_packet_time = 0;
                 selected_ap_index = -1;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
     }
 
     if (redraw) {
-        delay(100);
+        delay(50);
     }
 }
 
@@ -6232,19 +6200,7 @@ void performSDUpdate() {
     tft.setCursor(10, 30 + yshift);
     tft.println("Initializing SD...");
 
-    bool ok = false;
-    #ifdef SD_CS
-    ok = SD.begin(SD_CS);
-    #endif
-    #ifdef SD_CS_PIN
-    if (!ok) {
-      #ifdef CC1101_CS
-      if (SD_CS_PIN != CC1101_CS) ok = SD.begin(SD_CS_PIN);
-      #else
-      ok = SD.begin(SD_CS_PIN);
-      #endif
-    }
-    #endif
+    bool ok = isSDCardAvailable();
     if (!ok) {
       tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 40 + yshift);

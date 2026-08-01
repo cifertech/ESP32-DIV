@@ -73,7 +73,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.k"
+#define ESP32DIV_VERSION "v1.7.0"
 #endif
 
 
@@ -384,7 +384,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define PN532_SS   25
 #else
-#define PN532_SS   4
+#define PN532_SS   5
 #endif
 #endif
 
@@ -415,7 +415,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_ESP32_DIV_V1)
 #define GPS_UART_RX 3
 #else
-#define GPS_UART_RX 47
+#define GPS_UART_RX 5
 #endif
 #endif
 #ifndef GPS_UART_TX
@@ -424,7 +424,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_ESP32_DIV_V1)
 #define GPS_UART_TX 1
 #else
-#define GPS_UART_TX 48
+#define GPS_UART_TX 6
 #endif
 #endif
 
@@ -635,11 +635,9 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_ESP32_DIV_V1)
 #define BATTERY_ADC_PIN 36
 #elif defined(BOARD_CYD)
-// CYD has no onboard battery monitor
 #define BATTERY_ADC_PIN -1
-//#else
-// Verify the correct ADC pin for V2 hardware
-//#define BATTERY_ADC_PIN -1
+#else
+#define BATTERY_ADC_PIN -1
 #endif
 #endif
 #ifndef BATTERY_VDIV_R1

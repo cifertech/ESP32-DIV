@@ -2,7 +2,7 @@
 #define SUBCONFIG_H
 
 #include <EEPROM.h>
-#include <ELECHOUSE_CC1101_ESP32DIV.h>
+#include <ELECHOUSE_CC1101_SRC_DRV.h>
 #include <PCF8574.h>
 #include <RCSwitch.h>
 #include <SPI.h>

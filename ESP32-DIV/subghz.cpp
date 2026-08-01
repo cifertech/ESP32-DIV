@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <vector>
+#include "driver/gpio.h"
 #include "KeyboardUI.h"
 #include "Touchscreen.h"
 #include "config.h"
@@ -47,34 +48,28 @@ namespace {
       subghz_sd_mounted = false;
     }
 
-    #ifdef SD_CD
+#ifdef SD_CD
     pinMode(SD_CD, INPUT_PULLUP);
     if (digitalRead(SD_CD)) return false;
-    #endif
+#endif
 
-    #ifdef SD_SCLK
-    #ifdef SD_MISO
-    #ifdef SD_MOSI
-    #ifdef SD_CS
+#if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
     SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-    #endif
-    #endif
-    #endif
-    #endif
+#endif
 
-    #ifdef SD_CS
+#ifdef SD_CS
     if (SD.begin(SD_CS)) { subghz_sd_mounted = true; return true; }
-    #endif
+#endif
 
-    #ifdef SD_CS_PIN
-    #ifdef CC1101_CS
+#ifdef SD_CS_PIN
+#ifdef CC1101_CS
     if (SD_CS_PIN != CC1101_CS) {
       if (SD.begin(SD_CS_PIN)) { subghz_sd_mounted = true; return true; }
     }
-    #else
+#else
     if (SD.begin(SD_CS_PIN)) { subghz_sd_mounted = true; return true; }
-    #endif
-    #endif
+#endif
+#endif
 
     return false;
   }
@@ -1313,19 +1308,50 @@ void ReplayAttackSetup() {
   setTouchButtonInputEnabled(true);
   subghzSetReplayNavLabels();
 
-  ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+  // Detach any prior RCSwitch ISR before re-init (RFID → Replay path).
+  mySwitch.disableReceive();
+  mySwitch.disableTransmit();
 
+  // RFID remounts SD on the same SPI pins as CC1101. SD.begin() leaves a high
+  // SPI clock and can hold MISO; PN532 bitbang also leaves those GPIOs dirty.
+  // Bring the bus up for CC1101 only — do not remount SD here.
+  reclaimSharedSpiBus();
+  holdSdInactiveOnSharedSpi();
+
+  // GDO lines feed RCSwitch; reset them after RFID/shared-SPI use.
+#if defined(CC1101_GDO0)
+  gpio_reset_pin((gpio_num_t)CC1101_GDO0);
+#endif
+#if defined(CC1101_GDO2)
+  gpio_reset_pin((gpio_num_t)CC1101_GDO2);
+#endif
+  pinMode(REPLAY_RX_PIN, INPUT);
+  pinMode(REPLAY_TX_PIN, OUTPUT);
+  digitalWrite(REPLAY_TX_PIN, LOW);
+
+  // SmartRC/ELECHOUSE requires setSpiPin + setGDO BEFORE Init().
+  ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+  ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
+  ELECHOUSE_cc1101.Init();
+  // Soft-reset chip in case a prior session left it wedged after bus contention.
+#if defined(CC1101_SRES)
+  ELECHOUSE_cc1101.SpiStrobe(CC1101_SRES);
+#else
+  ELECHOUSE_cc1101.SpiStrobe(0x30);
+#endif
+  delay(10);
   ELECHOUSE_cc1101.Init();
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(500.0);
 
-  ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
-
+  holdSdInactiveOnSharedSpi();
   ELECHOUSE_cc1101.SetRx();
+  delay(20);
 
   mySwitch.enableReceive(REPLAY_RX_PIN);
   mySwitch.enableTransmit(REPLAY_TX_PIN);
   mySwitch.setRepeatTransmit(8);
+  mySwitch.resetAvailable();
 
   EEPROM.begin(EEPROM_SIZE);
   readProfileCount();

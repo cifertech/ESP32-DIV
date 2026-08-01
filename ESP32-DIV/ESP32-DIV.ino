@@ -1476,6 +1476,7 @@ void handleBluetoothSubmenuButtons() {
                     break;
                 }
             }
+            BleJammer::exit();
             if (feature_exit_requested) {
                 in_sub_menu = true;
                 is_main_menu = false;
@@ -1685,6 +1686,7 @@ void handleBluetoothSubmenuButtons() {
                             break;
                         }
                     }
+                    BleJammer::exit();
                     if (feature_exit_requested) {
                         in_sub_menu = true;
                         is_main_menu = false;
@@ -1892,6 +1894,7 @@ void handleNRFSubmenuButtons() {
                     break;
                 }
             }
+            Scanner::exit();
             if (feature_exit_requested) {
                 in_sub_menu = true;
                 is_main_menu = false;
@@ -1926,6 +1929,7 @@ void handleNRFSubmenuButtons() {
                     break;
                 }
             }
+            ProtoKill::exit();
             if (feature_exit_requested) {
                 in_sub_menu = true;
                 is_main_menu = false;
@@ -1987,6 +1991,7 @@ void handleNRFSubmenuButtons() {
                             break;
                         }
                     }
+                    Scanner::exit();
                     if (feature_exit_requested) {
                         in_sub_menu = true;
                         is_main_menu = false;
@@ -2019,6 +2024,7 @@ void handleNRFSubmenuButtons() {
                             break;
                         }
                     }
+                    ProtoKill::exit();
                     if (feature_exit_requested) {
                         in_sub_menu = true;
                         is_main_menu = false;

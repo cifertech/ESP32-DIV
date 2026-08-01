@@ -35,7 +35,7 @@
 #include "esp_gap_bt_api.h"
 
 #include "arduinoFFT.h"
-#include "ELECHOUSE_CC1101_ESP32DIV.h"
+#include "ELECHOUSE_CC1101_SRC_DRV.h"
 #include "utils.h"
 #include "shared.h"
 
@@ -73,10 +73,12 @@ namespace BleScan {
 namespace Scanner {
   void scannerSetup();
   void scannerLoop();
+  void exit();
 }
 namespace ProtoKill {
   void prokillSetup();
   void prokillLoop();
+  void exit();
 }
 namespace BleSniffer {
   void blesnifferSetup();
