@@ -33,4 +33,9 @@ namespace subjammer {
   void subjammerLoop();
 }
 
+namespace jammingdetector {
+  void Setup();
+  void Loop();
+}
+
 #endif
