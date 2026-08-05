@@ -92,6 +92,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Replay Attack | Captures and replays Sub-GHz commands (e.g., garage doors, remotes) |
 | Sub-GHz Jammer | Disrupts Sub-GHz communication across various bands |
 | Saved Profiles | Stores and manages captured signal profiles |
+| Jamming Detector | Receive-only monitor that detects Sub-GHz jamming attacks (e.g. car-fob jamming) |
  
 </details>
 <details>
@@ -139,6 +140,28 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Touch Calibrate | Four-corner XPT2046 touchscreen calibration |
 | Settings | Brightness, dark/light theme, NeoPixel, background auto-scan |
  
+</details>
+<details>
+<summary><strong>🚨 Jamming Detector — car-fob jam detection</strong></summary>
+
+A **receive-only** tool that watches a single Sub-GHz frequency (default **434.42 MHz**, a common EU keyless-entry band) and warns when the channel is being **jammed**.
+
+**Why:** a thief can jam a key fob so the car never receives the lock command — the owner presses lock, walks away, and the car silently stays unlocked and open to theft. This tool detects that condition. A real key-fob press is a short burst; a jammer holds the channel busy continuously — the detector tells them apart using an adaptive noise floor plus **duration** and **duty-cycle** thresholds, so it flags an attack without false-alarming on normal remotes.
+
+- FFT waterfall + live RSSI / noise-floor readout
+- Status box: **CLEAR** / **ACTIVITY** / **JAMMING DETECTED**
+- Logs each event to `/logs/jamdet.csv` on the SD card (`uptime_ms, freq, JAM, peak_rssi, duration_ms, duty%`)
+- Nav bar: switch frequency (433.92 / 434.42 / 315 / 868.35 MHz), reset counter, toggle logging
+
+**Tuning sensitivity** — thresholds are `#define`s at the top of `ESP32-DIV/jamming_detector.cpp`:
+
+| Define | Default | Effect |
+|--------|---------|--------|
+| `JD_JAM_STREAK_MS` | `400` | Continuous-busy time before it declares JAMMING (lower = more sensitive) |
+| `JD_JAM_AVG_DUTY` | `0.80` | Duty cycle over the ~1 s window that also trips JAMMING |
+| `JD_MARGIN_DB` | `18` | dB above the noise floor counted as "busy" |
+| `JD_ABS_THRESH_DBM` | `-75` | Absolute busy threshold, regardless of noise floor |
+
 </details>
 
 
