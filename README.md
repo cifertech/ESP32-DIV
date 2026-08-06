@@ -47,7 +47,6 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 
 <!-- Features -->
 ## :dart: Features
-
 <details>
 <summary><strong>📡 Wi-Fi</strong></summary>
   
@@ -60,7 +59,11 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Deauth Detector | Monitors for incoming deauth attacks |
 | Captive Portal | AP + DNS + web server; clone networks and force sign-in pages |
 | Probe Flood | Floods probe requests to stress-test APs |
- 
+| Hidden SSID Revealer | Forces hidden networks to expose their SSID |
+| WPS Scanner | Detects access points with WPS enabled |
+| ARP Scanner | Maps all devices on a network with IP and MAC after joining |
+| Karma Attack | Listens for probe requests and impersonates saved networks to auto-connect devices |
+
 </details>
 <details>
 <summary><strong>🔵 Bluetooth</strong></summary>
@@ -73,16 +76,23 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Sour Apple | Spoof Apple BLE advertisements (e.g., AirDrop popups) |
 | BLE Jammer | Disrupts BLE and classic Bluetooth channels |
 | BLE Rubber Ducky | Acts as a BLE keyboard; executes scripts from `/ducky` on SD |
- 
+| AirTag Spoofer | Broadcasts fake AirTag signals into the Find My network |
+| AirTag Sniffer | Monitors for AirTags in range |
+| Skimmer Detect | Scans for BLE signatures matching known card skimmer profiles |
+
 </details>
 <details>
-<summary><strong>📶 2.4GHz</strong></summary>
+<summary><strong>📶 2.4GHz / NRF24</strong></summary>
   
 | Tool | Description |
 |------|-------------|
 | 2.4GHz Scanner | Spectrum analyzer across 128 channels (Zigbee, custom RF, etc.) |
 | Protokill | Disrupts Zigbee, Wi-Fi, and other 2.4GHz protocols |
- 
+| ESB Sniffer | Passively captures Enhanced ShockBurst NRF24 packets |
+| ESB Replay | Replays captured ESB packets |
+| MouseJack Scan | Detects vulnerable wireless mice and keyboards |
+| MouseJack Inject | Injects keystrokes into vulnerable wireless receivers |
+
 </details>
 <details>
 <summary><strong>📻 Sub-GHz</strong></summary>
@@ -92,8 +102,9 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Replay Attack | Captures and replays Sub-GHz commands (e.g., garage doors, remotes) |
 | Sub-GHz Jammer | Disrupts Sub-GHz communication across various bands |
 | Saved Profiles | Stores and manages captured signal profiles |
+| De Bruijn / Brute Force | Cycles through all possible fixed codes for Sub-GHz remotes |
 | Jamming Detector | Receive-only monitor that detects Sub-GHz jamming attacks (e.g. car-fob jamming) |
- 
+
 </details>
 <details>
 <summary><strong>📺 Infrared (IR)</strong></summary>
@@ -103,7 +114,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | IR Replay Attack | Captures real IR presses, visualizes, replays, and saves to SD |
 | IR Saved Profiles | Browses IR captures; preserves signal and carrier frequency |
 | Universal IR Controller | Built-in profiles, SD imports, favorites, and remote-style control |
- 
+
 </details>
 <details>
 <summary><strong>🧲 RFID / NFC</strong></summary>
@@ -118,7 +129,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Jam Reader | Impedes another reader with RF patterns |
 | Tag Disrupt | Advanced disruption flows for authorized physical tests |
 | Disrupt Emulate | Disruption combined with emulation-style flows |
- 
+
 </details>
 <details>
 <summary><strong>🛰️ GPS</strong></summary>
@@ -127,7 +138,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 |------|-------------|
 | Wardriver | Logs GNSS position with Wi-Fi/BLE observations to SD |
 | Satellite Scanner | Shows satellites in view, signal strength, and fix diagnostics |
- 
+
 </details>
 <details>
 <summary><strong>🧰 Device & System</strong></summary>
@@ -139,32 +150,8 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Update Firmware | Flashes new firmware from SD |
 | Touch Calibrate | Four-corner XPT2046 touchscreen calibration |
 | Settings | Brightness, dark/light theme, NeoPixel, background auto-scan |
- 
-</details>
-<details>
-<summary><strong>🚨 Jamming Detector — car-fob jam detection</strong></summary>
-
-A **receive-only** tool that watches a single Sub-GHz frequency (default **434.42 MHz**, a common EU keyless-entry band) and warns when the channel is being **jammed**.
-
-**Why:** a thief can jam a key fob so the car never receives the lock command — the owner presses lock, walks away, and the car silently stays unlocked and open to theft. This tool detects that condition. A real key-fob press is a short burst; a jammer holds the channel busy continuously — the detector tells them apart using an adaptive noise floor plus **duration** and **duty-cycle** thresholds, so it flags an attack without false-alarming on normal remotes.
-
-- FFT waterfall + live RSSI / noise-floor readout
-- Status box: **CLEAR** / **ACTIVITY** / **JAMMING DETECTED**
-- Logs each event to `/logs/jamdet.csv` on the SD card (`uptime_ms, freq, JAM, peak_rssi, duration_ms, duty%`)
-- Nav bar: switch frequency (433.92 / 434.42 / 315 / 868.35 MHz), reset counter, toggle logging
-
-**Tuning sensitivity** — thresholds are `#define`s at the top of `ESP32-DIV/jamming_detector.cpp`:
-
-| Define | Default | Effect |
-|--------|---------|--------|
-| `JD_JAM_STREAK_MS` | `400` | Continuous-busy time before it declares JAMMING (lower = more sensitive) |
-| `JD_JAM_AVG_DUTY` | `0.80` | Duty cycle over the ~1 s window that also trips JAMMING |
-| `JD_MARGIN_DB` | `18` | dB above the noise floor counted as "busy" |
-| `JD_ABS_THRESH_DBM` | `-75` | Absolute busy threshold, regardless of noise floor |
 
 </details>
-
-
 
 <div>&nbsp;</div>
 
