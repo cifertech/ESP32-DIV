@@ -99,6 +99,10 @@ namespace subjammer {
   void subjammerSetup();
   void subjammerLoop();
 }
+namespace jammingdetector {
+  void Setup();
+  void Loop();
+}
 
 /* ───────────── WiFi namespaces ───────────── */
 namespace PacketMonitor {
