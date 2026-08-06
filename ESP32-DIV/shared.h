@@ -279,7 +279,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_MOSI 32
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_MOSI 23
+#define XPT2046_MOSI 32
 #else
 #define XPT2046_MOSI 35
 #endif
@@ -288,7 +288,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_MISO 39
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_MISO 19
+#define XPT2046_MISO 35
 #else
 #define XPT2046_MISO 37
 #endif
@@ -297,7 +297,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_CLK  25
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_CLK  18
+#define XPT2046_CLK  25
 #else
 #define XPT2046_CLK  36
 #endif
@@ -305,6 +305,8 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #ifndef XPT2046_IRQ
 #if defined(BOARD_CYD)
 #define XPT2046_IRQ  36
+#elif defined(BOARD_ESP32_DIV_V1)
+#define XPT2046_IRQ  34
 #else
 #define XPT2046_IRQ  255
 #endif
@@ -382,7 +384,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define PN532_SS   25
 #else
-#define PN532_SS   4
+#define PN532_SS   5
 #endif
 #endif
 
@@ -413,7 +415,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_ESP32_DIV_V1)
 #define GPS_UART_RX 3
 #else
-#define GPS_UART_RX 47
+#define GPS_UART_RX 5
 #endif
 #endif
 #ifndef GPS_UART_TX
@@ -422,7 +424,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_ESP32_DIV_V1)
 #define GPS_UART_TX 1
 #else
-#define GPS_UART_TX 48
+#define GPS_UART_TX 6
 #endif
 #endif
 
@@ -630,7 +632,13 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 
 /*──────────────────── Battery ────────────────────*/
 #ifndef BATTERY_ADC_PIN
+#if defined(BOARD_ESP32_DIV_V1)
+#define BATTERY_ADC_PIN 36
+#elif defined(BOARD_CYD)
 #define BATTERY_ADC_PIN -1
+#else
+#define BATTERY_ADC_PIN -1
+#endif
 #endif
 #ifndef BATTERY_VDIV_R1
 #define BATTERY_VDIV_R1 200000.0f

@@ -41,7 +41,10 @@ enum CardType { UNKNOWN, MIFARE_CLASSIC, MIFARE_ULTRALIGHT, NTAG, MIFARE_DESFIRE
 enum class RfidUiEvt { None, Back, Primary };
 
 static void rfidAttachBus() {
-  SPI.begin(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
+  // Adafruit_PN532 is constructed for software SPI (bitbang). Do NOT call
+  // SPI.begin(PN532_*) here: on DIV V2 the PN532 MOSI/MISO pins are swapped
+  // vs the SD/CC1101 bus, and remapping hardware SPI that way leaves the SD
+  // card dead until something else (e.g. SubGHz) re-inits the bus correctly.
   if (s_hwOk) {
     s_nfc.begin();
     s_nfc.SAMConfig();
@@ -49,11 +52,9 @@ static void rfidAttachBus() {
   }
 }
 
-/** Return shared SPI to SD wiring without remounting (fast). Call restoreSdAfterSharedSpi once when leaving RFID. */
+/** Release PN532 bitbang pins and remount SD on the shared SPI bus. */
 static void rfidRestoreBus() {
-#if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-#endif
+  restoreSdAfterSharedSpi();
 }
 
 static void rfidPn532VerStr(uint32_t ver) {
@@ -1576,7 +1577,7 @@ bool begin() {
   s_nfc.SAMConfig();
   s_nfc.setPassiveActivationRetries(0xFF);
   s_hwOk = true;
-  rfidRestoreBus();
+  restoreSdAfterSharedSpi();
   return true;
 }
 

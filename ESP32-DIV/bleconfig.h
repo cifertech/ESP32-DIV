@@ -23,6 +23,7 @@ extern PCF8574 pcf;
 namespace BleJammer {
 void blejamSetup();
 void blejamLoop();
+void exit();
 }
 
 namespace BleSpoofer {
@@ -46,11 +47,13 @@ namespace BleScan {
 namespace Scanner {
   void scannerSetup();
   void scannerLoop();
+  void exit();
 }
 
 namespace ProtoKill {
   void prokillLoop();
   void prokillSetup();
+  void exit();
 }
 
 namespace BleSniffer {

@@ -62,26 +62,12 @@ static bool sd_mounted = false;
 static bool mountSD() {
 
   if (sd_mounted) {
-    if (SD.exists("/")) return true;
+    if (SD.cardType() != CARD_NONE) return true;
     sd_mounted = false;
   }
 
-  sdSpiInit();
-
-  #ifdef SD_CS
-  if (sdMountChipSelect(SD_CS)) { sd_mounted = true; return true; }
-  #endif
-  #ifdef SD_CS_PIN
-
-  #ifdef CC1101_CS
-  if (SD_CS_PIN != CC1101_CS) {
-    if (sdMountChipSelect(SD_CS_PIN)) { sd_mounted = true; return true; }
-  }
-  #else
-  if (sdMountChipSelect(SD_CS_PIN)) { sd_mounted = true; return true; }
-  #endif
-  #endif
-  return false;
+  sd_mounted = isSDCardAvailable();
+  return sd_mounted;
 }
 
 static bool ensureDir(const char* dirPath) {

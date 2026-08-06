@@ -73,10 +73,12 @@ namespace BleScan {
 namespace Scanner {
   void scannerSetup();
   void scannerLoop();
+  void exit();
 }
 namespace ProtoKill {
   void prokillSetup();
   void prokillLoop();
+  void exit();
 }
 namespace BleSniffer {
   void blesnifferSetup();

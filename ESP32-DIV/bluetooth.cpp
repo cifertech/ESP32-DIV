@@ -1241,7 +1241,6 @@ void configureRadio(RF24 &radio, const byte* channels, size_t size) {
   radio.setPALevel(RF24_PA_MAX, true);
   radio.setDataRate(RF24_2MBPS);
   radio.setCRCLength(RF24_CRC_DISABLED);
-  radio.printPrettyDetails();
 
   for (size_t i = 0; i < size; i++) {
     radio.setChannel(channels[i]);
@@ -1404,12 +1403,17 @@ void blejamLoop() {
       radio3.setChannel(channel);
     }
   }
+
+  // Yield to the scheduler so the idle task/watchdog and core-0 radio stack get
+  // CPU time; without this the tight loop starves the system and everything lags.
+  delay(1);
 }
 
 void exit() {
 
   jammerActive = false;
   initializeRadios();
+  restoreSdAfterSharedSpi();
 }
 }
 
@@ -2976,6 +2980,19 @@ void scannerLoop() {
   }
 }
 
+void exit() {
+  // Fully release the nRF24 so it stops holding the shared SPI bus and drawing
+  // RX current after the user leaves the feature.
+  scanning = false;
+  disable();    // CE low: leave RX mode
+  powerDown();  // clear PWR_UP in CONFIG
+  digitalWrite(CSN, HIGH);
+
+  // Scanner remaps SPI (SCK/MISO swapped vs SD on DIV V2). Remount SD on the
+  // default shared bus so later features see a working card.
+  restoreSdAfterSharedSpi();
+}
+
 }  // namespace Scanner
 
 namespace ProtoKill {
@@ -3106,7 +3123,6 @@ void configureRadio(RF24 &radio, const byte* channels, size_t size) {
   radio.setPALevel(RF24_PA_MAX, true);
   radio.setDataRate(RF24_2MBPS);
   radio.setCRCLength(RF24_CRC_DISABLED);
-  radio.printPrettyDetails();
 
   for (size_t i = 0; i < size; i++) {
     radio.setChannel(channels[i]);
@@ -3330,6 +3346,24 @@ void prokillLoop() {
       radio3.setChannel(channel);
     }
   }
+
+  // Yield to the scheduler so the idle task/watchdog and core-0 radio stack get
+  // CPU time; without this the tight loop starves the system and everything lags.
+  delay(1);
+}
+
+void exit() {
+  // Without this, leaving the feature keeps the radios running
+  // startConstCarrier(RF24_PA_MAX): a permanent full-power 2.4GHz transmission
+  // that jams the ESP32's own WiFi/BLE and makes the whole device sluggish.
+  jammerActive = false;
+  modeChangeRequested = false;
+  modeChangeRequested1 = false;
+  jammerToggleRequested = false;
+  radio1.powerDown();
+  radio2.powerDown();
+  radio3.powerDown();
+  restoreSdAfterSharedSpi();
 }
 
 }  // namespace ProtoKill

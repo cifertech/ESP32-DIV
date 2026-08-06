@@ -28,26 +28,26 @@ constexpr int KEY_START_Y  = 95;
 
 constexpr unsigned long CURSOR_BLINK_MS = 500;
 
-/* Row 3 ends with ^ (caps); row 4 ends with # (symbols) and < (backspace). */
+/* Row 3 ends with ^ (caps); row 4 ends with space, # (symbols), and < (backspace). */
 static const char* const kStdRowsLower[OS_KEYBOARD_ROW_COUNT] = {
   "1234567890",
   "qwertyuiop",
-  "asdfghjk ^",
-  "zxcvbnm#<",
+  "asdfghjkl^",
+  "zxcvbnm #<",
 };
 
 static const char* const kStdRowsUpper[OS_KEYBOARD_ROW_COUNT] = {
   "1234567890",
   "QWERTYUIOP",
-  "ASDFGHJK ^",
-  "ZXCVBNM#<",
+  "ASDFGHJKL^",
+  "ZXCVBNM #<",
 };
 
 static const char* const kStdRowsSymbol[OS_KEYBOARD_ROW_COUNT] = {
   "1234567890",
   "!@#$%^&*()",
-  "[]\\;':, ^",
-  "(){}[]=+#<",
+  "-_=[]{}; ^",
+  "/\\.?,\"~|#<",
 };
 
 static const char* const* kbStdRowsFor(bool upperCase, bool symbolMode) {
@@ -244,10 +244,6 @@ bool handleKeyPress(char c, String& text, uint8_t maxLen,
     }
     return true;
   }
-  if (c == '-') {
-    text = "";
-    return true;
-  }
   if (c == ' ') {
     if (text.length() < maxLen) {
       text += ' ';
@@ -341,8 +337,6 @@ OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
             if (res.text.length() > 0) {
               res.text.remove(res.text.length() - 1);
             }
-          } else if (c == '-') {
-            res.text = "";
           } else if (c != ' ') {
             if (res.text.length() < cfg.maxLen) {
               res.text += c;
