@@ -1,12 +1,12 @@
 {
   "name": "ESP32-DIV v1",
-  "version": "1.7.0",
+  "version": "1.7.2",
   "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32",
       "parts": [
-        { "path": "firmware/ESP32-DIV-v1-v1.7.0-merged.bin?cb=20260613b", "offset": 0 }
+        { "path": "firmware/ESP32-DIV-v1-v1.7.2-merged.bin?cb=20260806", "offset": 0 }
       ]
     }
   ]
