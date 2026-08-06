@@ -10,6 +10,11 @@
 #include "Touchscreen.h"
 #include "shared.h"
 
+#ifdef TFT_GREEN
+#undef TFT_GREEN
+#endif
+#define TFT_GREEN GREEN
+
 extern TFT_eSPI tft;
 
 // Obfuscated-string helpers (XOR decode, then print).
@@ -35,6 +40,12 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate = false, bool bottomSe
 void startStatusBarTask();
 /** Request a status bar pass on the next update (e.g. after SD or ward state changes). */
 void requestStatusBarRedraw();
+
+/** Init NimBLE once (releases unused Classic BT RAM first). Safe to call repeatedly. */
+bool ensureBleStackReady();
+
+/** Allow another SD mount attempt (clears v1 boot "gave up" latch). */
+void sdRetryMount();
 
 extern bool feature_exit_requested;
 

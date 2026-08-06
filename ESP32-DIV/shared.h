@@ -5,7 +5,7 @@
 
 /*──────────────────── Colors ────────────────────*/
 const uint16_t GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
-               GREEN  = 0x07E0, BLACK = 0x0000, WHITE = 0xFFFF,
+               GREEN  = 0xB721, BLACK = 0x0000, WHITE = 0xFFFF,
                LIGHT_GRAY = 0xC618, DARK_GRAY = 0x4208;
 
 uint16_t uiUniversalColor();
@@ -15,6 +15,15 @@ uint16_t uiUniversalColor();
 #define TFT_LIGHTBLUE  0x051F
 #define TFTWHITE       0xFFFF
 #define TFT_GRAY       0x8410
+
+#ifdef TFT_GREEN
+#undef TFT_GREEN
+#endif
+#define TFT_GREEN GREEN
+#ifdef TFT_GREENYELLOW
+#undef TFT_GREENYELLOW
+#endif
+#define TFT_GREENYELLOW GREEN
 
 #define BG_Dark        0x20e4
 #define BG_Light       0xf7de
@@ -73,7 +82,7 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.0"
+#define ESP32DIV_VERSION "v1.7.2"
 #endif
 
 
@@ -128,6 +137,39 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 #else
 #error "Unknown board: define BOARD_ESP32_DIV_V2, BOARD_ESP32_DIV_V1, or BOARD_CYD"
+#endif
+
+/* v1 ESP32 has less internal DRAM for static buffers; v2/S3 keeps full sizes. */
+#if BOARD_HAS_ESP32S3
+#define ESP32DIV_FFT_SAMPLES       256
+#define ESP32DIV_FFT_PALETTE_SIZE  128
+#define ESP32DIV_PKT_GRAPH_WIDTH   240
+#define ESP32DIV_JD_WAVE_WIDTH     220
+#define ESP32DIV_JD_RSSI_SAMPLES   128
+#define ESP32DIV_BLE_SCANNER_BARS  128
+#define ESP32DIV_BLE_SCANNER_CHANS 128
+#define ESP32DIV_ESB_RP_CAPTURES   8
+#define ESP32DIV_ESB_RP_SEL_LINES  8
+#define ESP32DIV_ESB_RP_LOG_LINES  10
+#define ESP32DIV_MAX_WIFI_NETWORKS 50
+#define ESP32DIV_PCAP_POOL_SIZE    10
+#define ESP32DIV_PCAP_SNAP_LEN     2324
+#define ESP32DIV_RFID_SRC_PAGES    256
+#else
+#define ESP32DIV_FFT_SAMPLES       256
+#define ESP32DIV_FFT_PALETTE_SIZE  128
+#define ESP32DIV_PKT_GRAPH_WIDTH   240
+#define ESP32DIV_JD_WAVE_WIDTH     220
+#define ESP32DIV_JD_RSSI_SAMPLES   64
+#define ESP32DIV_BLE_SCANNER_BARS  64
+#define ESP32DIV_BLE_SCANNER_CHANS 64
+#define ESP32DIV_ESB_RP_CAPTURES   4
+#define ESP32DIV_ESB_RP_SEL_LINES  4
+#define ESP32DIV_ESB_RP_LOG_LINES  6
+#define ESP32DIV_MAX_WIFI_NETWORKS 28
+#define ESP32DIV_PCAP_POOL_SIZE    3
+#define ESP32DIV_PCAP_SNAP_LEN     512
+#define ESP32DIV_RFID_SRC_PAGES    128
 #endif
 
 /*──────────────────── Touch calibration profiles ────────────────────*/
@@ -554,6 +596,42 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #define CSN_PIN_3 17
 #else
 #define CSN_PIN_3 21
+#endif
+#endif
+
+/* nRF24 bit-bang CE/CSN pair used by Scanner / ESB / MouseJack helpers. */
+#ifndef NRF24_SCAN_CE
+#define NRF24_SCAN_CE  CE_PIN_3
+#endif
+#ifndef NRF24_SCAN_CSN
+#define NRF24_SCAN_CSN CSN_PIN_3
+#endif
+/* Shared SPI pinout for those nRF features (must match board SD/CC1101 bus on v1). */
+#if BOARD_HAS_ESP32S3
+#ifndef NRF24_SPI_SCK
+#define NRF24_SPI_SCK  12
+#endif
+#ifndef NRF24_SPI_MISO
+#define NRF24_SPI_MISO 13
+#endif
+#ifndef NRF24_SPI_MOSI
+#define NRF24_SPI_MOSI 11
+#endif
+#ifndef NRF24_SPI_SS
+#define NRF24_SPI_SS   4
+#endif
+#else
+#ifndef NRF24_SPI_SCK
+#define NRF24_SPI_SCK  SD_SCLK
+#endif
+#ifndef NRF24_SPI_MISO
+#define NRF24_SPI_MISO SD_MISO
+#endif
+#ifndef NRF24_SPI_MOSI
+#define NRF24_SPI_MOSI SD_MOSI
+#endif
+#ifndef NRF24_SPI_SS
+#define NRF24_SPI_SS   CSN_PIN_1
 #endif
 #endif
 

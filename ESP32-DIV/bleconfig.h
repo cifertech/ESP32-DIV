@@ -36,6 +36,24 @@ namespace SourApple {
   void sourappleLoop();
 }
 
+namespace AirTagSpoofer {
+  void airTagSetup();
+  void airTagLoop();
+  void exit();
+}
+
+namespace AirTagSniffer {
+  void airTagSnifferSetup();
+  void airTagSnifferLoop();
+  void exit();
+}
+
+namespace BleSkimmer {
+  void bleSkimmerSetup();
+  void bleSkimmerLoop();
+  void exit();
+}
+
 namespace BleScan {
   void bleScanSetup();
   void bleScanLoop();
@@ -53,6 +71,30 @@ namespace Scanner {
 namespace ProtoKill {
   void prokillLoop();
   void prokillSetup();
+  void exit();
+}
+
+namespace EsbSniffer {
+  void esbSnifferSetup();
+  void esbSnifferLoop();
+  void exit();
+}
+
+namespace EsbReplay {
+  void esbReplaySetup();
+  void esbReplayLoop();
+  void exit();
+}
+
+namespace MouseJack {
+  void mouseJackSetup();
+  void mouseJackLoop();
+  void exit();
+}
+
+namespace MouseJackInject {
+  void mouseJackInjectSetup();
+  void mouseJackInjectLoop();
   void exit();
 }
 

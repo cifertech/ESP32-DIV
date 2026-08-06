@@ -612,11 +612,11 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     tft.fillRect(x + 22, y + 3, 2, 4, TFT_WHITE);
 
     int batteryLevelWidth = ::map(batteryPercentage, 0, 100, 0, 20);
-    uint16_t batteryColor = (batteryPercentage > 20) ? TFT_GREEN : TFT_RED;
+    uint16_t batteryColor = (batteryPercentage > 20) ? GREEN : TFT_RED;
     tft.fillRoundRect(x + 2, y + 2, batteryLevelWidth, 6, 1, batteryColor);
 
     tft.setCursor(x + 30, y + 2);
-    tft.setTextColor(TFT_GREEN, UI_LABLE);
+    tft.setTextColor(GREEN, UI_LABLE);
     tft.setTextFont(1);
     tft.setTextSize(1);
     tft.print(String(batteryPercentage) + "%");
@@ -641,7 +641,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       tft.drawBitmap(wardGpsX, iconY, bitmap_icon_satellite, iconW, iconW, TFT_ORANGE);
     }
 
-    uint16_t wifiColor = (wifiDevices > 0) ? TFT_GREEN : TFT_WHITE;
+    uint16_t wifiColor = (wifiDevices > 0) ? GREEN : TFT_WHITE;
     uint16_t bleColor  = (bleDevices  > 0) ? TFT_CYAN  : TFT_WHITE;
 
     int wifiStrength = 0;
@@ -659,7 +659,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       const int barX      = wifiX + i * 6;
 
       if (wifiStrength > i * 25) {
-        tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_GREEN);
+        tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, GREEN);
       } else {
         tft.drawRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_WHITE);
       }
@@ -673,11 +673,11 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     } else if (internalTemp > 55) {
       tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, TFT_RED);
     } else {
-      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, TFT_GREEN);
+      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, GREEN);
     }
 
     if (sdCardPresent) {
-      tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_sdcard, 16, 16, TFT_GREEN);
+      tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_sdcard, 16, 16, GREEN);
     } else {
       tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_nullsdcard, 16, 16, TFT_RED);
     }
@@ -810,6 +810,11 @@ uint8_t getPcf8574Address() {
 }
 
 bool initPcf8574Buttons() {
+  // Prevent I2C bus hangs (no ACK / missing pull-ups) from tripping the task WDT
+  // and rebooting right after the intro on classic ESP32.
+  Wire.begin();
+  Wire.setTimeOut(50);
+
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
   pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
@@ -818,6 +823,7 @@ bool initPcf8574Buttons() {
 
 #if PCF8574_AUTO_DETECT
   for (uint8_t addr = PCF8574_ADDR_MIN; addr <= PCF8574_ADDR_MAX; addr++) {
+    yield();
     if (pcf.begin(addr)) {
       s_pcf8574Addr = addr;
       Serial.printf("[PCF8574] auto-detected at 0x%02X\n", addr);
@@ -837,12 +843,6 @@ bool initPcf8574Buttons() {
   Serial.printf("[PCF8574] using fixed address 0x%02X\n", s_pcf8574Addr);
 #endif
 
-  for (int pin = 0; pin < 8; pin++) {
-    Serial.print("Button ");
-    Serial.print(pin);
-    Serial.print(": ");
-    Serial.println(pcf.digitalRead(pin) ? "Released" : "Pressed");
-  }
   return true;
 }
 #else
@@ -870,6 +870,13 @@ static bool s_sdFsMounted = false;
 
 /** GPIO CS that last mounted SD (-1 = unknown). Tried first to avoid long SD.begin on wrong CS. */
 static int8_t s_sdLastGoodCs = -1;
+
+/** After a failed mount on classic ESP32, do not keep retrying (SD.begin can WDT). */
+static bool s_sdMountGaveUp = false;
+
+void sdRetryMount() {
+  s_sdMountGaveUp = false;
+}
 
 /** Deselect every other SPI slave that shares the SD bus so none holds MISO. */
 static void sdRaiseCsPin(int pin) {
@@ -908,13 +915,15 @@ void sdSpiInit() {
 #if TOUCH_SHARES_TFT_SPI
   s_sdSpi.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
 #else
-  // RFID software-SPI bitbangs these GPIOs (and on DIV V2 its MOSI is the SD
-  // MISO pin). gpio_reset_pin clears that so SPI.begin can reclaim the matrix —
-  // without this, SD stays dead until another feature (e.g. SubGHz) re-inits SPI.
+  // On ESP32-S3 (v2), RFID bitbang remaps these pins — reset before reclaim.
+  // On classic ESP32 (v1), SD often shares SPI with TFT_eSPI; gpio_reset_pin
+  // after tft.init() can WDT/reboot during boot SD mount.
+#if BOARD_HAS_ESP32S3
   gpio_reset_pin((gpio_num_t)SD_SCLK);
   gpio_reset_pin((gpio_num_t)SD_MISO);
   gpio_reset_pin((gpio_num_t)SD_MOSI);
   gpio_reset_pin((gpio_num_t)SD_CS);
+#endif
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
   SPI.setDataMode(SPI_MODE0);
   SPI.setBitOrder(MSBFIRST);
@@ -925,9 +934,9 @@ void sdSpiInit() {
 
 bool sdMountChipSelect(uint8_t cs) {
 #if TOUCH_SHARES_TFT_SPI
-  return SD.begin(cs, s_sdSpi);
+  return SD.begin(cs, s_sdSpi, 4000000);
 #else
-  return SD.begin(cs);
+  return SD.begin(cs, SPI, 4000000);
 #endif
 }
 
@@ -937,8 +946,22 @@ void initSDCard() {
   pinMode(SD_CD, INPUT_PULLUP);
 #endif
 
+#if !BOARD_HAS_ESP32S3
+  // Classic ESP32: raise CS only. Full SD.begin is deferred — boot mount was
+  // rebooting right after the intro ("3 sd").
+#if defined(SD_CS)
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+#endif
+  sdReleaseOtherChipSelects();
+  // Block auto-mount from settingsLoad / status bar until an SD feature asks.
+  s_sdMountGaveUp = true;
+  updateSdCardStatus();
+  return;
+#else
   restoreSdAfterSharedSpi();
   updateSdCardStatus();
+#endif
 }
 
 static bool sdPinIsOkForSdMount(uint8_t pin) {
@@ -1052,6 +1075,12 @@ bool isSDCardAvailable() {
     SD.end();
   }
 
+#if !BOARD_HAS_ESP32S3
+  if (s_sdMountGaveUp) {
+    return false;
+  }
+#endif
+
   // Prefer a soft remount so SubGHz (CC1101 on the same SPI pins) stays alive.
   if (sdRemountSoft()) {
     return true;
@@ -1061,6 +1090,12 @@ bool isSDCardAvailable() {
   // Only do the destructive reclaim when no radio feature owns the bus.
   if (!feature_active) {
     restoreSdAfterSharedSpi();
+#if !BOARD_HAS_ESP32S3
+    if (!s_sdFsMounted) {
+      s_sdMountGaveUp = true;
+      Serial.println("[sd] mount failed — will not retry until reboot");
+    }
+#endif
     return s_sdFsMounted;
   }
   return false;
@@ -1101,6 +1136,7 @@ void reclaimSharedSpiBus() {
 
 #if !TOUCH_SHARES_TFT_SPI
   SPI.end();
+#if BOARD_HAS_ESP32S3
 #if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI)
   gpio_reset_pin((gpio_num_t)SD_SCLK);
   gpio_reset_pin((gpio_num_t)SD_MISO);
@@ -1132,6 +1168,7 @@ void reclaimSharedSpiBus() {
   pinMode(CC1101_CS, OUTPUT);
   digitalWrite(CC1101_CS, HIGH);
 #endif
+#endif // BOARD_HAS_ESP32S3
 #if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
 #if defined(CC1101_SCK) && defined(CC1101_MISO) && defined(CC1101_MOSI) && defined(CC1101_CS)
   // Prefer CC1101 CS as SPI SS — same data pins as SD on DIV V2, but matches
@@ -2959,6 +2996,7 @@ static void handleTap(int x, int y) {
 }
 
 void setup() {
+  sdRetryMount();
   sdFmResetNavLabelCache();
   page = Page::Browser;
   cwd = "/";

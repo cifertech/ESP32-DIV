@@ -9,7 +9,7 @@ AppSettings& settings() { return g_settings; }
 
 static const AccentOption kAccentPresets[] = {
   {"Orange", 0xFBE4},
-  {"Green",  0x07E0},
+  {"Green",  0xB721},
   {"Red",    0xF800},
   {"Cyan",   0x07FF},
   {"Purple", 0xF81F},
@@ -85,6 +85,7 @@ static bool ensureDir(const char* dirPath) {
 
 bool settingsLoad() {
   settingsApplyBoardTouchDefaults();
+  sdRetryMount();
   if (!mountSD()) return false;
   if (!SD.exists(SETTINGS_PATH)) return true;
 
@@ -125,6 +126,7 @@ bool settingsLoad() {
 }
 
 bool settingsSave() {
+  sdRetryMount();
 
   if (!ensureDir("/config")) {
     sd_mounted = false;

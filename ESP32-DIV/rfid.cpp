@@ -2221,7 +2221,7 @@ void sessionCardReader() {
 }
 
 static uint8_t s_srcData[16][3][16];
-static uint8_t s_srcPages[256][4];
+static uint8_t s_srcPages[ESP32DIV_RFID_SRC_PAGES][4];
 
 void sessionClone() {
   uint8_t uid[7] = {0};
