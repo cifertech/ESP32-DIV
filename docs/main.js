@@ -7,7 +7,7 @@
     cyd: { prefix: "ESP32-DIV-cyd", manifestName: "ESP32-DIV CYD", chipFamily: "ESP32" },
   };
 
-  let repoVersion = "1.7.0";
+  let repoVersion = "1.7.2";
   let releaseAssets = {};
   let manifestBlobUrl = null;
   let firmwareReady = true;
@@ -283,6 +283,7 @@
 
   /* —— Video playlist grid —— */
   const PLAYLIST_VIDEOS = [
+    { id: "2YumcTh3O7s", title: "ESP32-DIV Full Guide | The Open Source Flipper Zero Alternative" },
     { id: "wuQRoT1DsFM", title: "ESP32-DIV | Passive Wi-Fi Monitoring" },
     { id: "BlE0nNkenzE", title: "I Built Something Better Than Flipper | ESP32-DIV v2" },
     { id: "B7bdqAX_2_g", title: "Your Garage Door is NOT Safe!!" },
