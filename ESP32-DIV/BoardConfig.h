@@ -5,7 +5,7 @@
 
 // #define BOARD_CYD
 // #define BOARD_ESP32_DIV_V1
- #define BOARD_ESP32_DIV_V2
+#define BOARD_ESP32_DIV_V2
 
 // Set to 0 to hide the on-screen touch nav bar (5 footer buttons).
 // Touch button input will still work when this is disabled.

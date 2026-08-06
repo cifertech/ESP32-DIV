@@ -69,6 +69,26 @@ namespace ProbeRequestFlood {
   void probeRequestFloodLoop();
 }
 
+namespace HiddenSsidReveal {
+  void hiddenSsidSetup();
+  void hiddenSsidLoop();
+}
+
+namespace WpsScanner {
+  void wpsScannerSetup();
+  void wpsScannerLoop();
+}
+
+namespace ArpScanner {
+  void arpScannerSetup();
+  void arpScannerLoop();
+}
+
+namespace KarmaAttack {
+  void karmaSetup();
+  void karmaLoop();
+}
+
 namespace FirmwareUpdate {
   void updateSetup();
   void updateLoop();

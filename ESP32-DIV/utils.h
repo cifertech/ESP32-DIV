@@ -10,6 +10,11 @@
 #include "Touchscreen.h"
 #include "shared.h"
 
+#ifdef TFT_GREEN
+#undef TFT_GREEN
+#endif
+#define TFT_GREEN GREEN
+
 extern TFT_eSPI tft;
 
 // Obfuscated-string helpers (XOR decode, then print).
@@ -23,12 +28,24 @@ void pauseBackgroundRadioTasks();
 float readBatteryVoltage();
 float readInternalTemperature();
 bool isSDCardAvailable();
-/** After SPI is used for another device (e.g. PN532 RFID), restore pins and remount SD. */
+/** After SPI is used for another device (nRF24 / CC1101 / PN532), restore pins,
+ *  deselect other chip-selects, and remount SD. No GPIO pin remapping. */
 void restoreSdAfterSharedSpi();
+/** Reclaim shared SPI pins for CC1101/nRF without mounting SD (SD.begin raises
+ *  the SPI clock and can leave the bus unusable for SubGHz until reboot). */
+void reclaimSharedSpiBus();
+/** Hold SD CS high and set a CC1101-safe SPI rate on the shared bus. */
+void holdSdInactiveOnSharedSpi();
 void drawStatusBar(float batteryVoltage, bool forceUpdate = false, bool bottomSeparator = false);
 void startStatusBarTask();
 /** Request a status bar pass on the next update (e.g. after SD or ward state changes). */
 void requestStatusBarRedraw();
+
+/** Init NimBLE once (releases unused Classic BT RAM first). Safe to call repeatedly. */
+bool ensureBleStackReady();
+
+/** Allow another SD mount attempt (clears v1 boot "gave up" latch). */
+void sdRetryMount();
 
 extern bool feature_exit_requested;
 

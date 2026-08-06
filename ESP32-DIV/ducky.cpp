@@ -330,23 +330,12 @@ static void updateIconAnimation() {
 }
 
 static bool mountSD() {
-  if (sd_mounted) return true;
-#ifdef SD_CD
-  pinMode(SD_CD, INPUT_PULLUP);
-#endif
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  if (SD.begin(SD_CS)) { sd_mounted = true; return true; }
-  #ifdef SD_CS_PIN
-
-  #ifdef CC1101_CS
-  if (SD_CS_PIN != CC1101_CS) {
-    if (SD.begin(SD_CS_PIN)) { sd_mounted = true; return true; }
+  if (sd_mounted) {
+    if (SD.cardType() != CARD_NONE) return true;
+    sd_mounted = false;
   }
-  #else
-  if (SD.begin(SD_CS_PIN)) { sd_mounted = true; return true; }
-  #endif
-  #endif
-  return false;
+  sd_mounted = isSDCardAvailable();
+  return sd_mounted;
 }
 static bool ensureDuckyDir() {
   if (!mountSD()) return false;

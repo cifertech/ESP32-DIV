@@ -47,7 +47,6 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 
 <!-- Features -->
 ## :dart: Features
-
 <details>
 <summary><strong>📡 Wi-Fi</strong></summary>
   
@@ -60,7 +59,11 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Deauth Detector | Monitors for incoming deauth attacks |
 | Captive Portal | AP + DNS + web server; clone networks and force sign-in pages |
 | Probe Flood | Floods probe requests to stress-test APs |
- 
+| Hidden SSID Revealer | Forces hidden networks to expose their SSID |
+| WPS Scanner | Detects access points with WPS enabled |
+| ARP Scanner | Maps all devices on a network with IP and MAC after joining |
+| Karma Attack | Listens for probe requests and impersonates saved networks to auto-connect devices |
+
 </details>
 <details>
 <summary><strong>🔵 Bluetooth</strong></summary>
@@ -73,16 +76,23 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Sour Apple | Spoof Apple BLE advertisements (e.g., AirDrop popups) |
 | BLE Jammer | Disrupts BLE and classic Bluetooth channels |
 | BLE Rubber Ducky | Acts as a BLE keyboard; executes scripts from `/ducky` on SD |
- 
+| AirTag Spoofer | Broadcasts fake AirTag signals into the Find My network |
+| AirTag Sniffer | Monitors for AirTags in range |
+| Skimmer Detect | Scans for BLE signatures matching known card skimmer profiles |
+
 </details>
 <details>
-<summary><strong>📶 2.4GHz</strong></summary>
+<summary><strong>📶 2.4GHz / NRF24</strong></summary>
   
 | Tool | Description |
 |------|-------------|
 | 2.4GHz Scanner | Spectrum analyzer across 128 channels (Zigbee, custom RF, etc.) |
 | Protokill | Disrupts Zigbee, Wi-Fi, and other 2.4GHz protocols |
- 
+| ESB Sniffer | Passively captures Enhanced ShockBurst NRF24 packets |
+| ESB Replay | Replays captured ESB packets |
+| MouseJack Scan | Detects vulnerable wireless mice and keyboards |
+| MouseJack Inject | Injects keystrokes into vulnerable wireless receivers |
+
 </details>
 <details>
 <summary><strong>📻 Sub-GHz</strong></summary>
@@ -92,7 +102,9 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Replay Attack | Captures and replays Sub-GHz commands (e.g., garage doors, remotes) |
 | Sub-GHz Jammer | Disrupts Sub-GHz communication across various bands |
 | Saved Profiles | Stores and manages captured signal profiles |
- 
+| De Bruijn / Brute Force | Cycles through all possible fixed codes for Sub-GHz remotes |
+| Jamming Detector | Receive-only monitor that detects Sub-GHz jamming attacks (e.g. car-fob jamming) |
+
 </details>
 <details>
 <summary><strong>📺 Infrared (IR)</strong></summary>
@@ -102,7 +114,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | IR Replay Attack | Captures real IR presses, visualizes, replays, and saves to SD |
 | IR Saved Profiles | Browses IR captures; preserves signal and carrier frequency |
 | Universal IR Controller | Built-in profiles, SD imports, favorites, and remote-style control |
- 
+
 </details>
 <details>
 <summary><strong>🧲 RFID / NFC</strong></summary>
@@ -117,7 +129,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Jam Reader | Impedes another reader with RF patterns |
 | Tag Disrupt | Advanced disruption flows for authorized physical tests |
 | Disrupt Emulate | Disruption combined with emulation-style flows |
- 
+
 </details>
 <details>
 <summary><strong>🛰️ GPS</strong></summary>
@@ -126,7 +138,7 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 |------|-------------|
 | Wardriver | Logs GNSS position with Wi-Fi/BLE observations to SD |
 | Satellite Scanner | Shows satellites in view, signal strength, and fix diagnostics |
- 
+
 </details>
 <details>
 <summary><strong>🧰 Device & System</strong></summary>
@@ -138,10 +150,8 @@ ESP32-DIV is an open-source, multi-band wireless toolkit built on the **ESP32-S3
 | Update Firmware | Flashes new firmware from SD |
 | Touch Calibrate | Four-corner XPT2046 touchscreen calibration |
 | Settings | Brightness, dark/light theme, NeoPixel, background auto-scan |
- 
+
 </details>
-
-
 
 <div>&nbsp;</div>
 
