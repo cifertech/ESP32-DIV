@@ -1,0 +1,116 @@
+name: Bug Report
+description: Report a bug or unexpected behaviour in ESP32-DIV
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before submitting**, please:
+        - Search [existing issues](https://github.com/cifertech/ESP32-DIV/issues) to avoid duplicates.
+        - Check the [Troubleshooting & FAQ](../../README.md#troubleshooting--faq) section.
+
+  - type: dropdown
+    id: firmware_version
+    attributes:
+      label: Firmware Version
+      description: Which version of ESP32-DIV firmware are you running?
+      options:
+        - v1.6.0 (latest)
+        - v1.5.3
+        - v1.5.0
+        - v1.4.x or older
+        - Custom / DIY build
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware_revision
+    attributes:
+      label: Hardware Revision
+      description: Which hardware are you using?
+      options:
+        - ESP32-DIV v2 (Main board + Shield)
+        - ESP32-DIV v1 (Main board + Shield)
+        - Main board only (no shield)
+        - DIY / custom build
+    validations:
+      required: true
+
+  - type: input
+    id: arduino_ide_version
+    attributes:
+      label: Arduino IDE Version
+      placeholder: "e.g. 2.3.2"
+    validations:
+      required: true
+
+  - type: input
+    id: esp32_package_version
+    attributes:
+      label: ESP32 Board Package Version
+      description: Check under Tools > Board > Boards Manager
+      placeholder: "e.g. 3.0.5 (Espressif Systems)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_feature
+    attributes:
+      label: Affected Feature / Module
+      description: Which feature is affected?
+      options:
+        - Wi-Fi (Scanner / Deauther / Beacon Spammer / Captive Portal / etc.)
+        - Bluetooth (BLE Scanner / Jammer / Spoofer / Sour Apple / etc.)
+        - 2.4GHz (Scanner / Protokill)
+        - Sub-GHz (Replay / Jammer / CC1101)
+        - Infrared (IR)
+        - RFID / NFC
+        - GPS / Wardriver
+        - Touchscreen / UI
+        - SD Card
+        - Firmware Flashing / OTA
+        - Power / Battery
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Provide a clear, numbered list of steps.
+      placeholder: |
+        1. Go to ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behaviour
+    attributes:
+      label: Expected Behaviour
+      description: What should happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behaviour
+    attributes:
+      label: Actual Behaviour
+      description: What actually happens? Include any error messages shown on screen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: serial_output
+    attributes:
+      label: Serial Output / Logs
+      description: Paste relevant serial monitor output here (if available).
+      render: text
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Photos, videos, schematic modifications, or any other useful information.

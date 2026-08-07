@@ -1,0 +1,71 @@
+name: Feature Request
+description: Suggest a new feature or improvement for ESP32-DIV
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest an improvement!
+        Please check [existing issues](https://github.com/cifertech/ESP32-DIV/issues?q=label%3Aenhancement) before submitting to avoid duplicates.
+
+  - type: dropdown
+    id: feature_category
+    attributes:
+      label: Feature Category
+      description: Which part of the project does this relate to?
+      options:
+        - Wi-Fi
+        - Bluetooth / BLE
+        - 2.4GHz (NRF24)
+        - Sub-GHz (CC1101)
+        - Infrared (IR)
+        - RFID / NFC
+        - GPS
+        - UI / Display
+        - SD Card / File Management
+        - Hardware / PCB
+        - Firmware / OTA
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Problem / Motivation
+      description: Is your feature request related to a problem? Describe it clearly.
+      placeholder: "I'm always frustrated when..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature or change you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative approaches or workarounds?
+
+  - type: dropdown
+    id: hardware_required
+    attributes:
+      label: Does this require new or additional hardware?
+      options:
+        - "No — firmware/software only"
+        - "Yes — requires new module or component"
+        - "Unsure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any sketches, references, datasheets, or links that support your request.
