@@ -715,7 +715,10 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_CYD)
 #define BATTERY_ADC_PIN -1
 #else
-#define BATTERY_ADC_PIN -1
+// V2 (ESP32-S3): battery sense on GPIO2 via a 100k/100k divider off VBAT
+// (schematic R11/R16). GPIO2 = ADC1_CH1; the /2 divider matches the x2.0
+// scale in readBatteryVoltage(). Was -1 (disabled) -> status bar showed 0%.
+#define BATTERY_ADC_PIN 2
 #endif
 #endif
 #ifndef BATTERY_VDIV_R1
