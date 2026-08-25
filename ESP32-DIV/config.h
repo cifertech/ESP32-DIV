@@ -38,6 +38,7 @@
 #include "ELECHOUSE_CC1101_SRC_DRV.h"
 #include "utils.h"
 #include "shared.h"
+#include "neopixel.h"
 
 using namespace std;
 
@@ -78,7 +79,6 @@ namespace BleSkimmer {
 }
 /** Init NimBLE once (releases unused Classic BT RAM first). Safe to call repeatedly. */
 bool ensureBleStackReady();
-
 namespace BleScan {
   void bleScanSetup();
   void bleScanLoop();
@@ -88,9 +88,6 @@ namespace BleScan {
   // Last known BLE device count from background/foreground scans.
   int  getLastCount();
 }
-
-/** One-shot NimBLE bring-up (releases Classic BT RAM first). Safe to call repeatedly. */
-bool ensureBleStackReady();
 namespace Scanner {
   void scannerSetup();
   void scannerLoop();
@@ -99,6 +96,11 @@ namespace Scanner {
 namespace ProtoKill {
   void prokillSetup();
   void prokillLoop();
+  void exit();
+}
+namespace BleSniffer {
+  void blesnifferSetup();
+  void blesnifferLoop();
   void exit();
 }
 namespace EsbSniffer {
@@ -119,11 +121,6 @@ namespace MouseJack {
 namespace MouseJackInject {
   void mouseJackInjectSetup();
   void mouseJackInjectLoop();
-  void exit();
-}
-namespace BleSniffer {
-  void blesnifferSetup();
-  void blesnifferLoop();
   void exit();
 }
 
@@ -148,15 +145,12 @@ namespace jammingdetector {
   void Setup();
   void Loop();
 }
-namespace freqscanner {
-  void Setup();
-  void Loop();
-}
 
 /* ───────────── WiFi namespaces ───────────── */
 namespace PacketMonitor {
   void ptmSetup();
   void ptmLoop();
+  void ptmExit();
 }
 namespace BeaconSpammer {
   void beaconSpamSetup();

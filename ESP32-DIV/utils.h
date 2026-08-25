@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <XPT2046_Touchscreen.h>
 #include "SettingsStore.h"
 #include "Touchscreen.h"
@@ -14,6 +15,39 @@
 #undef TFT_GREEN
 #endif
 #define TFT_GREEN GREEN
+
+// IP5306电源管理芯片驱动类
+class IP5306 {
+public:
+  static const uint8_t I2C_ADDRESS = 0x75;
+
+  IP5306();
+  ~IP5306();
+
+  bool begin();
+  bool isConnected();
+  float getBatteryVoltage();
+  int getBatteryPercentage();
+  bool isCharging();
+  bool isBatteryFull();
+
+  // 获取寄存器值（用于调试）
+  uint8_t getBatteryLevelReg();
+  uint8_t getChargeStatusReg();
+  uint8_t getFullFlagReg();
+
+private:
+  bool readRegister(uint8_t reg, uint8_t* data, uint8_t length);
+  bool writeRegister(uint8_t reg, uint8_t data);
+  uint16_t voltageToPercentage(float voltage);
+
+  bool _isConnected;
+  bool _isCharging;
+  bool _isBatteryFull;
+};
+
+// 全局IP5306实例
+extern IP5306 ip5306;
 
 extern TFT_eSPI tft;
 
@@ -28,8 +62,7 @@ void pauseBackgroundRadioTasks();
 float readBatteryVoltage();
 float readInternalTemperature();
 bool isSDCardAvailable();
-/** After SPI is used for another device (nRF24 / CC1101 / PN532), restore pins,
- *  deselect other chip-selects, and remount SD. No GPIO pin remapping. */
+/** After SPI is used for another device (e.g. PN532 RFID), restore pins and remount SD. */
 void restoreSdAfterSharedSpi();
 /** Reclaim shared SPI pins for CC1101/nRF without mounting SD (SD.begin raises
  *  the SPI clock and can leave the bus unusable for SubGHz until reboot). */
@@ -85,6 +118,15 @@ uint8_t getPcf8574Address();
 void sdSpiInit();
 bool sdMountChipSelect(uint8_t cs);
 
+/*────── SPI Bus Management ──────*/
+enum class SpiOwner : uint8_t { None = 0, SD_Card, NRF24, CC1101 };
+SpiOwner spiGetOwner();
+void spiRelease();
+void spiInitForSD();
+void spiInitForNRF24();
+void spiInitForCC1101();
+bool spiEnsureSD();  // Release & init for SD, then mount
+
 extern float currentBatteryVoltage;
 
 void initDisplay();
@@ -108,6 +150,7 @@ namespace TouchCalib{ void setup(); void loop(); }
 namespace Terminal {
   void terminalSetup();
   void terminalLoop();
+  void terminalExit();
 }
 
 namespace SdFileManager {

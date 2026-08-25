@@ -119,14 +119,13 @@ const char *nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
     "MouseJack Inject",
     "Back to Main Menu"};
 
-const int subghz_NUM_SUBMENU_ITEMS = 7;
+const int subghz_NUM_SUBMENU_ITEMS = 6;
 const char *subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
     "Replay Attack",
-    "Saved Profile",
     "SubGHz Jammer",
     "De Bruijn / Brute",
     "Jamming Detector",
-    "Freq Scanner",
+    "Saved Profile",
     "Back to Main Menu"};
 
 const int tools_NUM_SUBMENU_ITEMS = 5;
@@ -168,12 +167,11 @@ const char *gps_submenu_items[gps_NUM_SUBMENU_ITEMS] = {
     "Satellite Scanner",
     "Back to Main Menu"};
 
-const int ir_NUM_SUBMENU_ITEMS = 5;
+const int ir_NUM_SUBMENU_ITEMS = 4;
 const char *ir_submenu_items[ir_NUM_SUBMENU_ITEMS] = {
     "Record",
     "Saved Profile",
     "Universal Controller",
-    "Copy Controller",
     "Back to Main Menu"};
 
 const int about_NUM_SUBMENU_ITEMS = 1;
@@ -254,11 +252,10 @@ const unsigned char *nrf_submenu_icons[nrf_NUM_SUBMENU_ITEMS] = {
 
 const unsigned char *subghz_submenu_icons[subghz_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_antenna,
-    bitmap_icon_list,
     bitmap_icon_no_signal,
     bitmap_icon_graph_self_loop,
     bitmap_icon_Voice_Id,
-    bitmap_icon_scanner,
+    bitmap_icon_list,
     bitmap_icon_go_back
 };
 
@@ -299,7 +296,6 @@ const unsigned char *ir_submenu_icons[ir_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_led,
     bitmap_icon_list,
     bitmap_icon_remote_control,
-    bitmap_icon_follow,
     bitmap_icon_go_back
 };
 
@@ -826,9 +822,7 @@ static void runBleDuckyFeature() {
 #endif
 }
 
-// Hardware buses are initialized in setup() before the first real reading.
-// 3.9V maps to ~75% in the status bar — avoids showing 0% during boot.
-float currentBatteryVoltage = 3.9f;
+float currentBatteryVoltage = readBatteryVoltage();
 unsigned long last_interaction_time = 0;
 
 int last_menu_index = -1;
@@ -1235,6 +1229,7 @@ void handleWiFiSubmenuButtons() {
                     break;
                 }
             }
+            PacketMonitor::ptmExit();
             if (feature_exit_requested) {
                 in_sub_menu = true;
                 is_main_menu = false;
@@ -1656,6 +1651,7 @@ void handleWiFiSubmenuButtons() {
                             break;
                         }
                     }
+                    PacketMonitor::ptmExit();
                     if (feature_exit_requested) {
                         in_sub_menu = true;
                         is_main_menu = false;
@@ -3137,7 +3133,7 @@ void handleSubGHzSubmenuButtons() {
         last_interaction_time = millis();
         delay(200);
 
-        if (current_submenu_index == 6) {
+        if (current_submenu_index == 5) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
@@ -3185,11 +3181,11 @@ void handleSubGHzSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            SavedProfile::saveSetup();
+            subjammer::subjammerSetup();
             while (current_submenu_index == 1 && !feature_exit_requested) {
                 current_submenu_index = 1;
                 in_sub_menu = true;
-                SavedProfile::saveLoop();
+                subjammer::subjammerLoop();
                 if (featureExitButtonPressed()) {
                     in_sub_menu = true;
                     is_main_menu = false;
@@ -3219,11 +3215,11 @@ void handleSubGHzSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            subjammer::subjammerSetup();
+            SubBrute::subBruteSetup();
             while (current_submenu_index == 2 && !feature_exit_requested) {
                 current_submenu_index = 2;
                 in_sub_menu = true;
-                subjammer::subjammerLoop();
+                SubBrute::subBruteLoop();
                 if (featureExitButtonPressed()) {
                     in_sub_menu = true;
                     is_main_menu = false;
@@ -3253,11 +3249,11 @@ void handleSubGHzSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            SubBrute::subBruteSetup();
+            jammingdetector::Setup();
             while (current_submenu_index == 3 && !feature_exit_requested) {
                 current_submenu_index = 3;
                 in_sub_menu = true;
-                SubBrute::subBruteLoop();
+                jammingdetector::Loop();
                 if (featureExitButtonPressed()) {
                     in_sub_menu = true;
                     is_main_menu = false;
@@ -3287,45 +3283,11 @@ void handleSubGHzSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            jammingdetector::Setup();
+            SavedProfile::saveSetup();
             while (current_submenu_index == 4 && !feature_exit_requested) {
                 current_submenu_index = 4;
                 in_sub_menu = true;
-                jammingdetector::Loop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
-            }
-            if (feature_exit_requested) {
-                in_sub_menu = true;
-                is_main_menu = false;
-                submenu_initialized = false;
-                feature_active = false;
-                feature_exit_requested = false;
-                displaySubmenu();
-                delay(200);
-            }
-        }
-
-        if (current_submenu_index == 5) {
-            current_submenu_index = 5;
-            in_sub_menu = true;
-            feature_active = true;
-            feature_exit_requested = false;
-            freqscanner::Setup();
-            while (current_submenu_index == 5 && !feature_exit_requested) {
-                current_submenu_index = 5;
-                in_sub_menu = true;
-                freqscanner::Loop();
+                SavedProfile::saveLoop();
                 if (featureExitButtonPressed()) {
                     in_sub_menu = true;
                     is_main_menu = false;
@@ -3369,7 +3331,7 @@ void handleSubGHzSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (current_submenu_index == 6) {
+                if (current_submenu_index == 5) {
                     in_sub_menu = false;
                     feature_active = false;
                     feature_exit_requested = false;
@@ -3413,11 +3375,11 @@ void handleSubGHzSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    SavedProfile::saveSetup();
+                    subjammer::subjammerSetup();
                     while (current_submenu_index == 1 && !feature_exit_requested) {
                         current_submenu_index = 1;
                         in_sub_menu = true;
-                        SavedProfile::saveLoop();
+                        subjammer::subjammerLoop();
                         if (featureExitButtonPressed()) {
                             in_sub_menu = true;
                             is_main_menu = false;
@@ -3445,11 +3407,11 @@ void handleSubGHzSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    subjammer::subjammerSetup();
+                    SubBrute::subBruteSetup();
                     while (current_submenu_index == 2 && !feature_exit_requested) {
                         current_submenu_index = 2;
                         in_sub_menu = true;
-                        subjammer::subjammerLoop();
+                        SubBrute::subBruteLoop();
                         if (featureExitButtonPressed()) {
                             in_sub_menu = true;
                             is_main_menu = false;
@@ -3477,11 +3439,11 @@ void handleSubGHzSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    SubBrute::subBruteSetup();
+                    jammingdetector::Setup();
                     while (current_submenu_index == 3 && !feature_exit_requested) {
                         current_submenu_index = 3;
                         in_sub_menu = true;
-                        SubBrute::subBruteLoop();
+                        jammingdetector::Loop();
                         if (featureExitButtonPressed()) {
                             in_sub_menu = true;
                             is_main_menu = false;
@@ -3509,43 +3471,11 @@ void handleSubGHzSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    jammingdetector::Setup();
+                    SavedProfile::saveSetup();
                     while (current_submenu_index == 4 && !feature_exit_requested) {
                         current_submenu_index = 4;
                         in_sub_menu = true;
-                        jammingdetector::Loop();
-                        if (featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
-                    }
-                    if (feature_exit_requested) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                    }
-                } else if (current_submenu_index == 5) {
-                    current_submenu_index = 5;
-                    in_sub_menu = true;
-                    feature_active = true;
-                    feature_exit_requested = false;
-                    freqscanner::Setup();
-                    while (current_submenu_index == 5 && !feature_exit_requested) {
-                        current_submenu_index = 5;
-                        in_sub_menu = true;
-                        freqscanner::Loop();
+                        SavedProfile::saveLoop();
                         if (featureExitButtonPressed()) {
                             in_sub_menu = true;
                             is_main_menu = false;
@@ -3625,6 +3555,7 @@ static void launchToolsFeature(int idx) {
     switch (idx) {
         case TOOLS_IDX_TERMINAL:
             runToolsFeature(idx, Terminal::terminalSetup, Terminal::terminalLoop);
+            Terminal::terminalExit();
             break;
         case TOOLS_IDX_UPDATE:
             runToolsFeature(idx, FirmwareUpdate::updateSetup, FirmwareUpdate::updateLoop);
@@ -3755,7 +3686,7 @@ static void otherRfidReturnGuard() {
 static void otherRfidPlaceholderAction(int idx) {
     feature_active = true;
     if (!RfidNfc::begin()) {
-        showNotification("RFID/NFC", "PN532 not found. Check SPI wiring/pins.");
+        showNotification("RFID/NFC", "PN532 not found. Check UART wiring/pins.");
         otherDismissPlaceholder();
         feature_active = false;
         return;
@@ -3792,6 +3723,7 @@ static void otherRfidPlaceholderAction(int idx) {
             default:
                 feature_active = false;
                 restoreSdAfterSharedSpi();
+                RfidNfc::end();
                 return;
         }
         if (feature_exit_requested || !RfidNfc::consumeSessionRetry()) {
@@ -3800,6 +3732,7 @@ static void otherRfidPlaceholderAction(int idx) {
         feature_exit_requested = false;
     }
     restoreSdAfterSharedSpi();
+    RfidNfc::end();
     otherRfidReturnGuard();
     submenu_initialized = false;
     displaySubmenu();
@@ -4050,38 +3983,6 @@ void handleOtherSubmenuButtons() {
                     displaySubmenu();
                     delay(200);
                 }
-            } else if (current_submenu_index == 3) {
-                current_submenu_index = 3;
-                in_sub_menu = true;
-                feature_active = true;
-                feature_exit_requested = false;
-                IRCopyController::setup();
-                while (current_submenu_index == 3 && !feature_exit_requested) {
-                    current_submenu_index = 3;
-                    in_sub_menu = true;
-                    IRCopyController::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
-                }
-                if (feature_exit_requested) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                }
             }
         } else if (other_layer == OTHER_LAYER_RFID) {
             if (current_submenu_index == rfid_NUM_SUBMENU_ITEMS - 1) {
@@ -4299,38 +4200,6 @@ void handleOtherSubmenuButtons() {
                     displaySubmenu();
                     delay(200);
                 }
-            } else if (current_submenu_index == 3) {
-                current_submenu_index = 3;
-                in_sub_menu = true;
-                feature_active = true;
-                feature_exit_requested = false;
-                IRCopyController::setup();
-                while (current_submenu_index == 3 && !feature_exit_requested) {
-                    current_submenu_index = 3;
-                    in_sub_menu = true;
-                    IRCopyController::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
-                }
-                if (feature_exit_requested) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                }
             }
         } else if (other_layer == OTHER_LAYER_RFID) {
             if (current_submenu_index == rfid_NUM_SUBMENU_ITEMS - 1) {
@@ -4419,10 +4288,18 @@ void handleAboutPage() {
 
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(xLabel, y);
-  tft.print("Web");
+  tft.print("Modified");
   tft.setTextColor(UI_TEXT, UI_BG);
   tft.setCursor(xValue, y);
   tftPrintObf(OBF_WB, sizeof(OBF_WB));
+  y += step;
+
+  tft.setTextColor(UI_DIM_TEXT, UI_BG);
+  tft.setCursor(xLabel, y);
+  tft.print("Website");
+  tft.setTextColor(UI_TEXT, UI_BG);
+  tft.setCursor(xValue, y);
+  tftPrintObf(OBF_WS, sizeof(OBF_WS));
 
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(16, 300);
@@ -4576,9 +4453,9 @@ void handleButtons() {
         }
 
         static unsigned long lastTouchTime = 0;
-        const unsigned long touchCooldownMs = 280;
+        const unsigned long touchFeedbackDelay = 100;
 
-        if (!feature_active && (millis() - lastTouchTime >= touchCooldownMs)) {
+        if (!feature_active && (millis() - lastTouchTime >= touchFeedbackDelay)) {
             int x, y;
             if (!readTouchXY(x, y)) { return; }
             delay(10);
@@ -4596,50 +4473,236 @@ void handleButtons() {
                 if (x >= button_x1 && x <= button_x2 && y >= button_y1 && y <= button_y2) {
                     current_menu_index = i;
                     last_interaction_time = millis();
-                    lastTouchTime = millis();
                     displayMenu();
 
-                    // Quick taps used to only highlight: old code required the
-                    // finger to still be down after 100 ms. Wait for lift (bounded),
-                    // then always enter — same as submenu tiles.
                     unsigned long startTime = millis();
-                    while (isTouchDownDismiss() && (millis() - startTime < 600)) {
-                        delay(5);
+                    while (isTouchDownDismiss() && (millis() - startTime < touchFeedbackDelay)) {
+                        delay(10);
                     }
 
-                    if (current_menu_index == 3) {
-                        handleSettingsSubmenuButtons();
-                    } else if (current_menu_index == 7) {
-                        handleAboutPage();
-                    } else {
-                        updateActiveSubmenu();
+                    if (isTouchDownDismiss()) {
 
-                        if (active_submenu_items && active_submenu_size > 0) {
-                            current_submenu_index = 0;
-                            if (current_menu_index == 2) {
-                                other_layer = OTHER_LAYER_HOME;
-                                other_menu_grid_initialized = false;
-                                last_other_menu_index = -1;
-                            }
-                            in_sub_menu = true;
-                            submenu_initialized = false;
-                            displaySubmenu();
+                        if (current_menu_index == 3) {
+                            handleSettingsSubmenuButtons();
+                        } else if (current_menu_index == 7) {
+                            handleAboutPage();
                         } else {
-                            if (is_main_menu) {
-                                is_main_menu = false;
-                                displayMenu();
+                            updateActiveSubmenu();
+
+                            if (active_submenu_items && active_submenu_size > 0) {
+                                current_submenu_index = 0;
+                                if (current_menu_index == 2) {
+                                    other_layer = OTHER_LAYER_HOME;
+                                    other_menu_grid_initialized = false;
+                                    last_other_menu_index = -1;
+                                }
+                                in_sub_menu = true;
+                                submenu_initialized = false;
+                                displaySubmenu();
                             } else {
-                                is_main_menu = true;
+                                if (is_main_menu) {
+                                    is_main_menu = false;
+                                    displayMenu();
+                                } else {
+                                    is_main_menu = true;
+                                }
                             }
                         }
                     }
-                    lastTouchTime = millis();
                     delay(200);
                     break;
                 }
             }
         }
     }
+}
+
+void echoModuleStatus() {
+  static bool hasEchoed = false;
+  if (hasEchoed) return;
+  hasEchoed = true;
+
+  Serial.println("\n========== 模块详细状态回显 ==========");
+
+  // Wait for CC1101 MISO to go LOW with a timeout. When the CC1101 chip is
+  // not soldered, MISO floats and can read HIGH forever, causing the boot
+  // process to hang right after the logo screen.
+  auto waitMisoLow = [](uint32_t timeoutUs = 5000UL) -> bool {
+    const uint32_t t0 = micros();
+    while (digitalRead(CC1101_MISO) == HIGH) {
+      if ((uint32_t)(micros() - t0) >= timeoutUs) return false;
+      delayMicroseconds(5);
+    }
+    return true;
+  };
+
+  auto checkNRF24 = [](const char* name, int csnPin, int cePin) {
+    // Enable internal pull-downs on the shared MISO pin (GPIO 12) so a
+    // missing nRF24L01+ doesn't leave the bus floating mid-transaction.
+    pinMode(12, INPUT_PULLDOWN);
+
+    SPI.begin(13, 11, 12, csnPin);
+    SPI.setDataMode(SPI_MODE0);
+    SPI.setFrequency(8000000);
+    SPI.setBitOrder(MSBFIRST);
+
+    pinMode(csnPin, OUTPUT);
+    pinMode(cePin, OUTPUT);
+    digitalWrite(csnPin, HIGH);
+    digitalWrite(cePin, LOW);
+    delayMicroseconds(10);
+
+    digitalWrite(csnPin, LOW);
+    uint8_t status = SPI.transfer(0x07);
+    (void)status;  // NOP read clocks the bus; status byte not displayed
+    SPI.transfer(0xFF);
+    digitalWrite(csnPin, HIGH);
+
+    delayMicroseconds(10);
+
+    digitalWrite(csnPin, LOW);
+    uint8_t config = SPI.transfer(0x00);
+    SPI.transfer(0xFF);
+    digitalWrite(csnPin, HIGH);
+
+    Serial.print("[NRF24 ");
+    Serial.print(name);
+    Serial.println("] 状态:");
+
+    if (config != 0xFF && config != 0x00) {
+      Serial.println("  模块状态: 已连接");
+      Serial.println("  功能:     仅发射");
+
+      delayMicroseconds(10);
+
+      digitalWrite(csnPin, LOW);
+      SPI.transfer(0x06 & 0x1F);
+      uint8_t rfSetup = SPI.transfer(0xFF);
+      digitalWrite(csnPin, HIGH);
+
+      uint8_t paLevel = (rfSetup >> 1) & 0x03;
+      Serial.print("  发射功率:  ");
+      switch(paLevel) {
+        case 0: Serial.println("-18 dBm"); break;
+        case 1: Serial.println("-12 dBm"); break;
+        case 2: Serial.println("-6 dBm"); break;
+        case 3: Serial.println("0 dBm (最大)"); break;
+        default: Serial.println("未知"); break;
+      }
+
+      uint8_t dataRate = (rfSetup >> 3) & 0x03;
+      Serial.print("  数据速率:  ");
+      if (dataRate <= 2) {
+        switch(dataRate) {
+          case 0: Serial.println("1 Mbps"); break;
+          case 1: Serial.println("2 Mbps"); break;
+          case 2: Serial.println("250 kbps"); break;
+        }
+      } else {
+        Serial.println("1 Mbps (默认值)");
+      }
+
+      digitalWrite(csnPin, HIGH);
+    } else {
+      Serial.println("  模块状态: 未连接");
+      digitalWrite(csnPin, HIGH);
+    }
+    pinMode(csnPin, INPUT);
+    pinMode(cePin, INPUT);
+  };
+
+  checkNRF24("#1", CSN_PIN_1, CE_PIN_1);
+  checkNRF24("#2", CSN_PIN_2, CE_PIN_2);
+  checkNRF24("#3", CSN_PIN_3, CE_PIN_3);
+
+  // Drive the CC1101 shared SPI pins with a safe state before probing.
+  // MISO in particular must be pulled down: without a soldered CC1101 the
+  // pin floats and `while (MISO == HIGH)` below used to stall boot forever.
+  pinMode(CC1101_MISO, INPUT_PULLDOWN);
+  pinMode(CC1101_MOSI, INPUT_PULLDOWN);
+  pinMode(CC1101_SCK,  INPUT_PULLDOWN);
+
+  SPI.begin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+  SPI.setDataMode(SPI_MODE0);
+  SPI.setFrequency(4000000);
+  SPI.setBitOrder(MSBFIRST);
+
+  pinMode(CC1101_CS, OUTPUT);
+  digitalWrite(CC1101_CS, HIGH);
+  delayMicroseconds(10);
+
+  bool ccPresent = false;
+  uint8_t ccPartnum = 0xFF;
+  uint8_t ccVersion = 0xFF;
+
+  digitalWrite(CC1101_CS, LOW);
+  if (waitMisoLow()) {
+    SPI.transfer(0x30 | 0x80);
+    ccPartnum = SPI.transfer(0xFF);
+  } else {
+    Serial.println("[CC1101] 警告: PARTNUM 读超时 (MISO 未拉低，模块可能未焊接)");
+  }
+  digitalWrite(CC1101_CS, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(CC1101_CS, LOW);
+  if (waitMisoLow()) {
+    SPI.transfer(0x31 | 0x80);
+    ccVersion = SPI.transfer(0xFF);
+    ccPresent = (ccVersion == 0x14 || ccVersion == 0x04);
+  } else {
+    Serial.println("[CC1101] 警告: VERSION 读超时 (MISO 未拉低，模块可能未焊接)");
+  }
+  digitalWrite(CC1101_CS, HIGH);
+
+  Serial.println("\n[CC1101] 状态:");
+  Serial.print("  PARTNUM:  0x");
+  Serial.println(ccPartnum, HEX);
+  Serial.print("  VERSION:  0x");
+  Serial.println(ccVersion, HEX);
+
+  if (ccPresent) {
+    Serial.println("  模块状态: 已连接");
+    Serial.println("  功能:     收发一体");
+  } else {
+    Serial.println("  模块状态: 未连接");
+    Serial.println("  (CC1101 需要在 SubGHz 菜单中才会初始化)");
+  }
+
+  // 让CC1101进入idle并power down，避免模块持续发热
+  // (only if we actually talked to the chip, otherwise skip to avoid
+  //  another infinite wait on floating MISO).
+  if (ccPresent) {
+    digitalWrite(CC1101_CS, LOW);
+    if (waitMisoLow()) {
+      SPI.transfer(0x36);  // SIDLE - 进入idle状态
+    }
+    digitalWrite(CC1101_CS, HIGH);
+    delayMicroseconds(10);
+
+    digitalWrite(CC1101_CS, LOW);
+    if (waitMisoLow()) {
+      SPI.transfer(0x39);  // SPWD - 进入power down模式
+    }
+    digitalWrite(CC1101_CS, HIGH);
+    delayMicroseconds(10);
+  }
+
+  SPI.end();
+  pinMode(CC1101_SCK, INPUT);
+  pinMode(CC1101_MISO, INPUT);
+  pinMode(CC1101_MOSI, INPUT);
+  // 保持CC1101_CS为OUTPUT HIGH，避免CS浮空导致CC1101误进入工作状态发热
+  pinMode(CC1101_CS, OUTPUT);
+  digitalWrite(CC1101_CS, HIGH);
+  pinMode(CSN_PIN_1, INPUT);
+  pinMode(CE_PIN_1, INPUT);
+  pinMode(CSN_PIN_2, INPUT);
+  pinMode(CE_PIN_2, INPUT);
+  pinMode(CSN_PIN_3, INPUT);
+  pinMode(CE_PIN_3, INPUT);
+
+  Serial.println("==========================================");
 }
 
 void setup() {
@@ -4680,6 +4743,9 @@ void setup() {
   applyThemeToPalette(settings().theme);
   setBrightness(settings().brightness);
 
+  // 初始化NeoPixel
+  initNeoPixel();
+
 #if HAS_PCF8574_BUTTONS
   if (!initPcf8574Buttons()) {
     Serial.println("PCF8574 buttons unavailable");
@@ -4707,6 +4773,9 @@ void setup() {
   // Keep boot lightweight on ESP32 — status bar updates from loop() instead.
 #endif
 
+  // 输出模块状态回显
+  echoModuleStatus();
+
   menu_initialized = false;
   currentBatteryVoltage = readBatteryVoltage();
   displayMenu();
@@ -4722,4 +4791,9 @@ void loop() {
   applyThemeToPalette(settings().theme);
   handleButtons();
   updateStatusBar();
+  // 回显模块状态
+  echoModuleStatus();
+  // 更新NeoPixel颜色
+  updateNeoPixel();
+  delay(50); // 控制颜色变化速度
 }

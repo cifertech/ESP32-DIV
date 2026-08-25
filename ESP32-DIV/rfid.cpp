@@ -1,7 +1,7 @@
 #include "rfid.h"
 
 #include <Adafruit_PN532.h>
-#include <SPI.h>
+#include <HardwareSerial.h>
 #include <Arduino.h>
 #include <cstdio>
 #include <cstring>
@@ -29,7 +29,9 @@
 #define RFID_TARGET_WAIT_TIMEOUT_MS 120000
 #endif
 
-static Adafruit_PN532 s_nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
+/* PN532 on a dedicated HardwareSerial (UART mode). UART1 with RX=41, TX=42. */
+static HardwareSerial pn532Serial(PN532_UART_NUM);
+static Adafruit_PN532 s_nfc((uint8_t)-1, &pn532Serial);
 static bool s_hwOk = false;
 static char s_pn532VerStr[28] = "";
 static bool s_rfidRetrySession = false;
@@ -41,10 +43,9 @@ enum CardType { UNKNOWN, MIFARE_CLASSIC, MIFARE_ULTRALIGHT, NTAG, MIFARE_DESFIRE
 enum class RfidUiEvt { None, Back, Primary };
 
 static void rfidAttachBus() {
-  // Adafruit_PN532 is constructed for software SPI (bitbang). Do NOT call
-  // SPI.begin(PN532_*) here: on DIV V2 the PN532 MOSI/MISO pins are swapped
-  // vs the SD/CC1101 bus, and remapping hardware SPI that way leaves the SD
-  // card dead until something else (e.g. SubGHz) re-inits the bus correctly.
+  /* UART is dedicated (not shared with SD), so just ensure the link is up.
+   * Pins/baud are re-applied in case the SDK reset them. */
+  pn532Serial.begin(PN532_UART_BAUD, SERIAL_8N1, PN532_UART_RX, PN532_UART_TX);
   if (s_hwOk) {
     s_nfc.begin();
     s_nfc.SAMConfig();
@@ -52,9 +53,9 @@ static void rfidAttachBus() {
   }
 }
 
-/** Release PN532 bitbang pins and remount SD on the shared SPI bus. */
+/** UART mode does not share pins with SD SPI, so nothing to restore. Kept as a no-op
+ *  so existing session code (which calls rfidRestoreBus() before returning) compiles unchanged. */
 static void rfidRestoreBus() {
-  restoreSdAfterSharedSpi();
 }
 
 static void rfidPn532VerStr(uint32_t ver) {
@@ -1567,6 +1568,9 @@ bool begin() {
   }
   rfidAttachBus();
   s_nfc.begin();
+  /* s_nfc.begin() calls ser_dev->begin(115200) internally; re-apply our RX/TX pins
+   * in case the underlying UART was reset to defaults. Baud already matches (115200). */
+  pn532Serial.begin(PN532_UART_BAUD, SERIAL_8N1, PN532_UART_RX, PN532_UART_TX);
   uint32_t ver = s_nfc.getFirmwareVersion();
   if (!ver) {
     rfidPn532VerStr(0);
@@ -1577,11 +1581,29 @@ bool begin() {
   s_nfc.SAMConfig();
   s_nfc.setPassiveActivationRetries(0xFF);
   s_hwOk = true;
-  restoreSdAfterSharedSpi();
+  rfidRestoreBus();
   return true;
 }
 
 bool hardwareOk() { return s_hwOk; }
+
+void end() {
+  if (!s_hwOk) {
+    return;
+  }
+  /* 发送 PowerDown 命令让 PN532 进入低功耗模式，关闭 RF 场，避免模块退出菜单后持续发热。
+   * PowerDown 命令格式: D4 16 [WakeUpEnable] 0x00 0x00
+   * WakeUpEnable=0x02 启用 UART 唤醒，下次 begin() 通过 0x55 唤醒即可。 */
+  uint8_t cmd[4] = {PN532_COMMAND_POWERDOWN, 0x02, 0x00, 0x00};
+  s_nfc.sendCommandCheckAck(cmd, 4);
+  delay(2);
+
+  /* 关闭 UART 串口，释放资源。下次 begin() 时 rfidAttachBus() 会重新 begin()。 */
+  pn532Serial.end();
+
+  s_hwOk = false;
+  rfidPn532VerStr(0);
+}
 
 /** Clear retry flag before starting a session (menu loop). */
 void clearSessionRetry() { s_rfidRetrySession = false; }
@@ -2221,7 +2243,7 @@ void sessionCardReader() {
 }
 
 static uint8_t s_srcData[16][3][16];
-static uint8_t s_srcPages[ESP32DIV_RFID_SRC_PAGES][4];
+static uint8_t s_srcPages[256][4];
 
 void sessionClone() {
   uint8_t uid[7] = {0};

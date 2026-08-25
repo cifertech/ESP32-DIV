@@ -18,8 +18,6 @@ struct AppSettings {
   bool     autoWifiScan    = true;
   bool     autoBleScan     = true;
 
-  bool     showBatteryPercent = true;
-
   uint16_t touchXMin = TOUCH_X_MIN;
   uint16_t touchXMax = TOUCH_X_MAX;
   uint16_t touchYMin = TOUCH_Y_MIN;

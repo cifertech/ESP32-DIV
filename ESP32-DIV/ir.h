@@ -14,8 +14,3 @@ namespace IRUniversalController {
   void setup();
   void loop();
 }
-
-namespace IRCopyController {
-  void setup();
-  void loop();
-}

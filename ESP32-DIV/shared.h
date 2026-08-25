@@ -5,12 +5,12 @@
 
 /*──────────────────── Colors ────────────────────*/
 const uint16_t GRAY = 0x8410, BLUE = 0x001F, RED = 0xF800,
-               GREEN  = 0xB721, BLACK = 0x0000, WHITE = 0xFFFF,
+               GREEN  = 0x07E0, BLACK = 0x0000, WHITE = 0xFFFF,
                LIGHT_GRAY = 0xC618, DARK_GRAY = 0x4208;
 
 uint16_t uiUniversalColor();
 #define ORANGE uiUniversalColor()
-               
+
 #define TFT_DARKBLUE   0x3166
 #define TFT_LIGHTBLUE  0x051F
 #define TFTWHITE       0xFFFF
@@ -82,17 +82,18 @@ uint16_t uiUniversalColor();
 #define ESP32DIV_NAME "ESP32-DIV"
 #endif
 #ifndef ESP32DIV_VERSION
-#define ESP32DIV_VERSION "v1.7.2"
+#define ESP32DIV_VERSION "v1.7.3"
 #endif
 
 
 static inline constexpr uint8_t k0() { return (uint8_t)('h' - '`'); }
 
-static const uint8_t OBF_PN[]   = {77, 91, 88, 59, 58, 37, 76, 65, 94};                              
-static const uint8_t OBF_DN[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96};                           
-static const uint8_t OBF_EM[]   = {107, 97, 110, 109, 122, 124, 109, 107, 96, 72, 111, 101, 105, 97, 100, 38, 107, 103, 101};  
-static const uint8_t OBF_GH[]   = {111, 97, 124, 96, 125, 106, 38, 107, 103, 101, 39, 107, 97, 110, 109, 122, 124, 109, 107, 96}; 
-static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 102, 109, 124};       
+static const uint8_t OBF_PN[]   = {77, 91, 88, 59, 58, 37, 76, 65, 94};                               
+static const uint8_t OBF_DN[]   = {107, 97, 110, 109, 122, 124, 109, 107, 96};                            
+static const uint8_t OBF_EM[]   = {106, 124, 106, 124, 61, 58, 56, 72, 111, 101, 105, 97, 100, 38, 107, 103, 101};  
+static const uint8_t OBF_GH[]   = {111, 97, 124, 96, 125, 106, 38, 107, 103, 101, 39, 123, 97, 100, 109, 102, 124, 110, 103, 112, 58, 56, 58, 59};
+static const uint8_t OBF_WB[]   = {91, 97, 100, 109, 102, 124, 78, 71, 80};
+static const uint8_t OBF_WS[]   = {108, 114, 37, 122, 110, 38, 107, 103, 101};
 
 /*──────────────────── Board Selection ────────────────────*/
 // Default is selected in BoardConfig.h. You can also pass a BOARD_* define
@@ -290,7 +291,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 /* Buzzer */
 #ifndef BUZZER_PIN
 // User hardware: buzzer on IO2
-#define BUZZER_PIN -1
+#define BUZZER_PIN 2
 #endif
 
 /* Backlight / PWM */
@@ -321,7 +322,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_MOSI 32
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_MOSI 32
+#define XPT2046_MOSI 23
 #else
 #define XPT2046_MOSI 35
 #endif
@@ -330,7 +331,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_MISO 39
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_MISO 35
+#define XPT2046_MISO 19
 #else
 #define XPT2046_MISO 37
 #endif
@@ -339,7 +340,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define XPT2046_CLK  25
 #elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_CLK  25
+#define XPT2046_CLK  18
 #else
 #define XPT2046_CLK  36
 #endif
@@ -347,8 +348,6 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #ifndef XPT2046_IRQ
 #if defined(BOARD_CYD)
 #define XPT2046_IRQ  36
-#elif defined(BOARD_ESP32_DIV_V1)
-#define XPT2046_IRQ  34
 #else
 #define XPT2046_IRQ  255
 #endif
@@ -398,36 +397,19 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #define SD_CS_PIN 5
 #endif
 
-/* PN532 RFID/NFC (SPI).
- * CYD has few spare GPIOs; these are suggested external wiring defaults.
- * Override any pin below if your wiring differs. Requires Adafruit PN532 library. */
-#ifndef PN532_SCK
-#if defined(BOARD_CYD)
-#define PN532_SCK  18
-#else
-#define PN532_SCK  12
+/* PN532 RFID/NFC (UART mode). Requires Adafruit PN532 library.
+ * Override any pin below if your wiring differs. */
+#ifndef PN532_UART_NUM
+#define PN532_UART_NUM 1
 #endif
+#ifndef PN532_UART_BAUD
+#define PN532_UART_BAUD 115200
 #endif
-#ifndef PN532_MISO
-#if defined(BOARD_CYD)
-#define PN532_MISO 19
-#else
-#define PN532_MISO 11
+#ifndef PN532_UART_RX
+#define PN532_UART_RX 42
 #endif
-#endif
-#ifndef PN532_MOSI
-#if defined(BOARD_CYD)
-#define PN532_MOSI 23
-#else
-#define PN532_MOSI 13
-#endif
-#endif
-#ifndef PN532_SS
-#if defined(BOARD_CYD)
-#define PN532_SS   25
-#else
-#define PN532_SS   5
-#endif
+#ifndef PN532_UART_TX
+#define PN532_UART_TX 41
 #endif
 
 /* UART (if you use hardware serial on external pins) */
@@ -450,14 +432,20 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #endif
 #endif
 
-/* Neo-6M GPS — GPS module TX → ESP RX, GPS RX → ESP TX (optional). Uses UART2 by default. */
+/* Neo-6M GPS — GPS module TX → ESP RX, GPS RX → ESP TX. Uses UART2. */
+#ifndef GPS_UART_NUM
+#define GPS_UART_NUM 2
+#endif
+#ifndef GPS_UART_BAUD
+#define GPS_UART_BAUD 9600
+#endif
 #ifndef GPS_UART_RX
 #if defined(BOARD_CYD)
 #define GPS_UART_RX 35
 #elif defined(BOARD_ESP32_DIV_V1)
 #define GPS_UART_RX 3
 #else
-#define GPS_UART_RX 5
+#define GPS_UART_RX 40
 #endif
 #endif
 #ifndef GPS_UART_TX
@@ -466,7 +454,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_ESP32_DIV_V1)
 #define GPS_UART_TX 1
 #else
-#define GPS_UART_TX 6
+#define GPS_UART_TX 39
 #endif
 #endif
 
@@ -710,13 +698,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 
 /*──────────────────── Battery ────────────────────*/
 #ifndef BATTERY_ADC_PIN
-#if defined(BOARD_ESP32_DIV_V1)
-#define BATTERY_ADC_PIN 36
-#elif defined(BOARD_CYD)
 #define BATTERY_ADC_PIN -1
-#else
-#define BATTERY_ADC_PIN -1
-#endif
 #endif
 #ifndef BATTERY_VDIV_R1
 #define BATTERY_VDIV_R1 200000.0f
@@ -727,8 +709,6 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #ifndef BATTERY_LOW_VOLT
 #define BATTERY_LOW_VOLT 3.40f
 #endif
-/* DIV v2 battery is read from IP5306 over I2C (see readBatteryVoltage in utils.cpp).
- * V1 still uses BATTERY_ADC_PIN voltage divider. */
 
 /*──────────────────── Wi-Fi ────────────────────*/
 #ifndef WIFI_SCAN_ACTIVE_MS
@@ -823,5 +803,6 @@ extern bool feature_active;
 extern bool submenu_initialized;
 extern bool is_main_menu;
 extern bool feature_exit_requested;
+extern bool sd_mounted;
 
 #endif

@@ -3295,7 +3295,6 @@ static void wardEnsureBleScan() {
   if (s_wardBleScanReady) {
     return;
   }
-  ensureBleStackReady();
   BLEScan* s = BLEDevice::getScan();
   if (!s) {
     return;

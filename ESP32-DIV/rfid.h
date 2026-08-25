@@ -11,6 +11,9 @@ bool begin();
 /** True after successful begin(). */
 bool hardwareOk();
 
+/** Power down PN532 and release UART to stop RF field and reduce heat when NFC menu exits. */
+void end();
+
 /** Clear cached clone source (optional). */
 void resetCloneBuffer();
 

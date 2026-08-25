@@ -4,8 +4,7 @@
 
 extern TFT_eSPI tft;
 
-#if defined(BOARD_CYD) || defined(BOARD_ESP32_DIV_V1)
-// Dedicated VSPI bus for XPT2046 — must not share HSPI with TFT_eSPI on classic ESP32.
+#if defined(BOARD_CYD)
 SPIClass touchscreenSPI = SPIClass(VSPI);
 #else
 SPIClass touchscreenSPI = SPIClass(HSPI);

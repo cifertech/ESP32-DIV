@@ -1,20 +1,21 @@
 #include <SD.h>
 #include <SPI.h>
-#include <Wire.h>
 #include <algorithm>
 #include <cmath>
 #include <vector>
-#include "driver/gpio.h"
 #include "Touchscreen.h"
 #include "config.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "icon.h"
 #include "gps.h"
 #include "shared.h"
 #include "utils.h"
+#include "neopixel.h"
 
 
+bool sd_mounted = false;  // Global SD mount status
 bool notificationVisible = false;
 static bool notificationHasSave = false;
 static int notifX, notifY, notifWidth, notifHeight;
@@ -474,70 +475,326 @@ void requestStatusBarRedraw() {
 const float R1 = 100000.0;
 const float R2 = 100000.0;
 
-#if defined(BOARD_ESP32_DIV_V2)
-/* DIV v2: IP5306 PMIC reports 4 coarse levels on I2C (no usable battery ADC). */
-static constexpr uint8_t kIp5306Addr = 0x75;
-static constexpr uint8_t kIp5306BattReg = 0x78;
+// IP5306类实现
+IP5306::IP5306() : _isConnected(false), _isCharging(false), _isBatteryFull(false) {
+}
 
-static int readIp5306Register(uint8_t reg) {
-  Wire.beginTransmission(kIp5306Addr);
+IP5306::~IP5306() {
+}
+
+bool IP5306::begin() {
+  Wire.beginTransmission(I2C_ADDRESS);
+  _isConnected = (Wire.endTransmission() == 0);
+
+  Serial.print("[IP5306] Initialized, connected: ");
+  Serial.println(_isConnected ? "true" : "false");
+  Serial.print("[IP5306] Address 0x75: ");
+  Serial.println(_isConnected ? "found" : "not found");
+
+  return _isConnected;
+}
+
+bool IP5306::isConnected() {
+  return _isConnected;
+}
+
+bool IP5306::readRegister(uint8_t reg, uint8_t* data, uint8_t length) {
+  Wire.beginTransmission(I2C_ADDRESS);
   Wire.write(reg);
+
+  int result = Wire.endTransmission(false);
+  if (result != 0) {
+    return false;
+  }
+
+  Wire.requestFrom(I2C_ADDRESS, length);
+  if (Wire.available() != length) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < length; i++) {
+    data[i] = Wire.read();
+  }
+
+  return true;
+}
+
+bool IP5306::writeRegister(uint8_t reg, uint8_t data) {
+  Wire.beginTransmission(I2C_ADDRESS);
+  Wire.write(reg);
+  Wire.write(data);
+  return (Wire.endTransmission() == 0);
+}
+
+float IP5306::getBatteryVoltage() {
+  // 根据IP5306数据手册：
+  // - IP5306内部没有电压检测功能，只能通过电量等级寄存器估算
+  // - 寄存器0x70 bit3: 充电状态 (1=充电中, 0=放电中)
+  // - 寄存器0x71 bit3: 充满状态 (1=已充满, 0=未充满)
+  // - 寄存器0x72 bit1-0: 电量等级 (0-3)
+
+  uint8_t chgStatus = 0, fullFlag = 0, batLevel = 0;
+  bool readChgStatus = readRegister(0x70, &chgStatus, 1);
+  bool readFullFlag = readRegister(0x71, &fullFlag, 1);
+  bool readBatLevel = readRegister(0x72, &batLevel, 1);
+
+  _isCharging = (readChgStatus && (chgStatus & 0x08) != 0);
+  _isBatteryFull = (readFullFlag && (fullFlag & 0x08) != 0);
+
+  float batteryVoltage = 3.8f; // 默认值
+
+  // 如果充满，返回满电电压
+  if (_isBatteryFull) {
+    batteryVoltage = 4.20f;
+  }
+  // 如果正在充电，充电时电压会略高于放电状态
+  else if (_isCharging) {
+    if (readBatLevel) {
+      uint8_t level = batLevel & 0x03;
+      switch(level) {
+        case 0: batteryVoltage = 3.80f;  break; // <25%
+        case 1: batteryVoltage = 3.95f;  break; // 25-50%
+        case 2: batteryVoltage = 4.10f;  break; // 50-75%
+        case 3: batteryVoltage = 4.18f;  break; // 75-100%
+        default: batteryVoltage = 4.00f; break;
+      }
+    } else {
+      batteryVoltage = 4.00f;
+    }
+  }
+  // 放电状态，根据电量等级估算
+  else if (readBatLevel) {
+    uint8_t level = batLevel & 0x03;
+    switch(level) {
+      case 0: batteryVoltage = 3.65f;  break; // <25% (低电量)
+      case 1: batteryVoltage = 3.80f;  break; // 25-50% (中等偏低)
+      case 2: batteryVoltage = 3.95f;  break; // 50-75% (中等偏高)
+      case 3: batteryVoltage = 4.10f;  break; // 75-100% (高电量)
+      default: batteryVoltage = 3.85f; break;
+    }
+  }
+
+  // 确保电压在合理范围内
+  batteryVoltage = constrain(batteryVoltage, 3.0f, 4.3f);
+
+  return batteryVoltage;
+}
+
+int IP5306::getBatteryPercentage() {
+  // IP5306关键寄存器地址（来自官方示例）
+  #define REG_BAT_LEVEL    0x72    // 电池电量等级寄存器
+  #define REG_CHG_STATUS   0x70    // 充电状态寄存器
+  #define REG_FULL_FLAG    0x71    // 充满标志寄存器
+
+  uint8_t batLevel = 0, chgStatus = 0, fullFlag = 0;
+  bool readBatLevel = false;
+  bool readChgStatus = false;
+  bool readFullFlag = false;
+
+  // 多次读取，提高稳定性
+  int attempts = 0;
+  while (attempts < 3 && (!readBatLevel || !readChgStatus || !readFullFlag)) {
+    if (!readBatLevel) readBatLevel = readRegister(REG_BAT_LEVEL, &batLevel, 1);
+    if (!readChgStatus) readChgStatus = readRegister(REG_CHG_STATUS, &chgStatus, 1);
+    if (!readFullFlag) readFullFlag = readRegister(REG_FULL_FLAG, &fullFlag, 1);
+    attempts++;
+    delay(5);
+  }
+
+  // 先检查是否充满（优先于电量等级）
+  _isBatteryFull = (readFullFlag && (fullFlag & 0x08) != 0);
+  int percentage = 50; // 默认值
+  if (_isBatteryFull) {
+    percentage = 100;
+  }
+
+  // 如果未充满，读取电量等级
+  if (!_isBatteryFull) {
+    if (readBatLevel) {
+      uint8_t level = batLevel & 0x03;
+      switch(level) {
+        case 0: percentage = 0;   break;
+        case 1: percentage = 25;  break;
+        case 2: percentage = 50;  break;
+        case 3: percentage = 75;  break;
+        default: percentage = 50; break;
+      }
+    } else {
+      float voltage = getBatteryVoltage();
+      if (voltage >= 4.2) {
+        percentage = 100;
+      } else if (voltage >= 3.7) {
+        percentage = ::map(voltage * 1000, 3700, 4200, 20, 100);
+      } else if (voltage >= 3.3) {
+        percentage = ::map(voltage * 1000, 3300, 3700, 0, 20);
+      } else {
+        percentage = 0;
+      }
+      percentage = constrain(percentage, 0, 100);
+    }
+  }
+
+  // 检查充电状态
+  _isCharging = (readChgStatus && (chgStatus & 0x08) != 0);
+
+  // 如果正在充电，返回适当的百分比
+  if (_isCharging) {
+    if (_isBatteryFull) {
+      percentage = 100;
+    } else {
+      if (readBatLevel) {
+        uint8_t level = batLevel & 0x03;
+        switch(level) {
+          case 0: percentage = 10;  break;
+          case 1: percentage = 35;  break;
+          case 2: percentage = 60;  break;
+          case 3: percentage = 85;  break;
+          default: percentage = 50; break;
+        }
+      } else {
+        static int chargingPercentage = 20;
+        chargingPercentage = min(95, chargingPercentage + 1);
+        percentage = chargingPercentage;
+      }
+      percentage = constrain(percentage, 10, 95);
+    }
+  }
+
+  // 百分比平滑处理
+  static int smoothedPercentage = 50;
+  static bool firstReading = true;
+
+  if (firstReading) {
+    smoothedPercentage = percentage;
+    firstReading = false;
+  } else {
+    const float alpha = 0.3f;
+    smoothedPercentage = alpha * percentage + (1.0f - alpha) * smoothedPercentage;
+  }
+
+  smoothedPercentage = constrain(smoothedPercentage, 0, 100);
+
+  // 每5秒打印一次调试信息
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 5000) {
+    Serial.print("[IP5306] Battery - Level:");
+    Serial.print(readBatLevel ? (int)(batLevel & 0x03) : -1);
+    Serial.print(", Chg:");
+    Serial.print(_isCharging ? "Y" : "N");
+    Serial.print(", Full:");
+    Serial.print(_isBatteryFull ? "Y" : "N");
+    Serial.print(", %:");
+    Serial.println(smoothedPercentage);
+    lastPrint = millis();
+  }
+
+  return smoothedPercentage;
+}
+
+bool IP5306::isCharging() {
+  uint8_t data;
+  if (readRegister(0x70, &data, 1)) {
+    _isCharging = (data & 0x08) != 0;
+  }
+  return _isCharging;
+}
+
+bool IP5306::isBatteryFull() {
+  uint8_t data;
+  if (readRegister(0x71, &data, 1)) {
+    _isBatteryFull = (data & 0x08) != 0;
+  }
+  return _isBatteryFull;
+}
+
+uint8_t IP5306::getBatteryLevelReg() {
+  uint8_t data = 0;
+  readRegister(0x72, &data, 1);
+  return data & 0x03;
+}
+
+uint8_t IP5306::getChargeStatusReg() {
+  uint8_t data = 0;
+  readRegister(0x70, &data, 1);
+  return data;
+}
+
+uint8_t IP5306::getFullFlagReg() {
+  uint8_t data = 0;
+  readRegister(0x71, &data, 1);
+  return data;
+}
+
+uint16_t IP5306::voltageToPercentage(float voltage) {
+  if (voltage >= 4.15f) return 100;
+  if (voltage >= 3.6f)  return ::map((long)(voltage * 1000), 3600L, 4150L, 20L, 100L);
+  if (voltage >= 3.2f)  return ::map((long)(voltage * 1000), 3200L, 3600L, 0L, 20L);
+  return 0;
+}
+
+// 全局IP5306实例
+IP5306 ip5306;
+
+static constexpr uint8_t IP5306_ADDRESS = 0x75;
+static constexpr uint8_t IP5306_BATTERY_LEVEL_REGISTER = 0x78;
+
+static int readIP5306Register(uint8_t reg) {
+  Wire.beginTransmission(IP5306_ADDRESS);
+  Wire.write(reg);
+
   if (Wire.endTransmission(false) != 0) {
     return -1;
   }
-  if (Wire.requestFrom(kIp5306Addr, static_cast<uint8_t>(1)) != 1) {
+
+  if (Wire.requestFrom(IP5306_ADDRESS, (uint8_t)1) != 1) {
     return -1;
   }
+
   return Wire.read();
 }
 
-static float readBatteryVoltageIp5306() {
-  static float lastValidVoltage = 3.9f;
+float readBatteryVoltage() {
+  static float lastValidVoltage = 3.0f;
 
-  const int value = readIp5306Register(kIp5306BattReg);
+  const int value =
+      readIP5306Register(IP5306_BATTERY_LEVEL_REGISTER);
+
   if (value < 0) {
+    Serial.println("IP5306 battery read failed");
     return lastValidVoltage;
   }
 
-  int pct;
+  int batteryPercentage;
+
   switch (value & 0xF0) {
-    case 0xE0: pct = 25; break;
-    case 0xC0: pct = 50; break;
-    case 0x80: pct = 75; break;
-    case 0x00: pct = 100; break;
+    case 0xE0:
+      batteryPercentage = 25;
+      break;
+
+    case 0xC0:
+      batteryPercentage = 50;
+      break;
+
+    case 0x80:
+      batteryPercentage = 75;
+      break;
+
+    case 0x00:
+      batteryPercentage = 100;
+      break;
+
     default:
+      Serial.printf(
+          "Unexpected IP5306 battery value: 0x%02X\n",
+          value);
       return lastValidVoltage;
   }
 
-  // Synthetic volts so status-bar map(v*100, 300, 420, 0, 100) hits exact steps.
-  lastValidVoltage = 3.0f + (static_cast<float>(pct) * 1.2f / 100.0f);
+  lastValidVoltage =
+      3.0f +
+      (static_cast<float>(batteryPercentage) * 1.2f / 100.0f);
+
   return lastValidVoltage;
-}
-#endif
-
-float readBatteryVoltage() {
-#if defined(BOARD_ESP32_DIV_V2)
-  return readBatteryVoltageIp5306();
-#elif BATTERY_ADC_PIN >= 0
-  static bool adcInitialized = false;
-  if (!adcInitialized) {
-    analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
-    adcInitialized = true;
-  }
-
-  const int sampleCount = 16;
-  uint32_t sum = 0;
-  for (int i = 0; i < sampleCount; i++) {
-    sum += analogReadMilliVolts(BATTERY_ADC_PIN);
-    delayMicroseconds(500);
-  }
-
-  const float avgMv = sum / (float)sampleCount;
-  return (avgMv / 1000.0f) * 2.0f;
-#else
-  // Boards without battery measurement (e.g. CYD) — show ~75% as "powered".
-  return 3.9f;
-#endif
 }
 
 float readInternalTemperature() {
@@ -590,10 +847,48 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
   static int lastTempBand          = -100;
   static int lastSdSnap            = -1;
   static bool lastWardGpsIcon      = false;
-  static bool lastShowBatteryPercent = true;
   static uint32_t lastWardBlinkPhase = 0;
+  static bool lastChargingState   = false;
+  static bool lastFullState       = false;
 
-  int batteryPercentage = ::map(lroundf(batteryVoltage * 100.0f), 300L, 420L, 0L, 100L);
+  // 获取IP5306充电状态
+  bool isCharging = ip5306.isCharging();
+  bool isFull = ip5306.isBatteryFull();
+
+  // 每30秒打印详细的电量检测信息
+  static unsigned long lastStatusDebug = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastStatusDebug > 30000) {
+    Serial.println("==================================");
+    Serial.println("[Battery Monitor] Detailed Status");
+    Serial.println("==================================");
+    Serial.print("  Voltage:          ");
+    Serial.print(batteryVoltage);
+    Serial.println(" V");
+
+    uint8_t batLevel = ip5306.getBatteryLevelReg();
+    Serial.print("  Battery Level Reg: ");
+    Serial.println(batLevel);
+
+    uint8_t chgStatus = ip5306.getChargeStatusReg();
+    Serial.print("  Charge Status Reg: ");
+    Serial.println(chgStatus, BIN);
+
+    uint8_t fullFlag = ip5306.getFullFlagReg();
+    Serial.print("  Full Flag Reg:     ");
+    Serial.println(fullFlag, BIN);
+
+    Serial.print("  Charging:          ");
+    Serial.println(isCharging ? "YES" : "NO");
+
+    Serial.print("  Battery Full:      ");
+    Serial.println(isFull ? "YES" : "NO");
+    Serial.println("==================================");
+    lastStatusDebug = currentMillis;
+  }
+
+  int batteryPercentage =
+      ::map(lroundf(batteryVoltage * 100.0f), 300L, 420L, 0L, 100L);
   batteryPercentage = constrain(batteryPercentage, 0, 100);
 
   int wifiDevices = 0;
@@ -614,7 +909,6 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
   const float internalTemp = readInternalTemperature();
   const int tempBand         = statusBarTempBand(internalTemp);
   const int sdSnap           = sdCardPresent ? 1 : 0;
-  const bool showBatteryPct  = settings().showBatteryPercent;
 
   const bool battCh =
       statusBarBatteryMeaningfulChange(batteryPercentage, lastBatteryPercentage, forceUpdate);
@@ -646,8 +940,8 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
 
   if (battCh || wifiHalf != lastWifiHalf || bleHalf != lastBleHalf || tempBand != lastTempBand ||
       sdSnap != lastSdSnap || wardGpsIcon != lastWardGpsIcon ||
-      showBatteryPct != lastShowBatteryPercent ||
-      (wardGpsIcon && wardBlinkPhase != lastWardBlinkPhase) || forceUpdate) {
+      (wardGpsIcon && wardBlinkPhase != lastWardBlinkPhase) ||
+      isCharging != lastChargingState || isFull != lastFullState || forceUpdate) {
     int barHeight = 20;
     int x = 7;
     int y = 4;
@@ -658,15 +952,37 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     tft.fillRect(x + 22, y + 3, 2, 4, TFT_WHITE);
 
     int batteryLevelWidth = ::map(batteryPercentage, 0, 100, 0, 20);
-    uint16_t batteryColor = (batteryPercentage > 20) ? GREEN : TFT_RED;
+    // 根据充电状态设置电池颜色
+    uint16_t batteryColor;
+    if (isFull) {
+      batteryColor = TFT_GREEN;
+    } else if (isCharging) {
+      batteryColor = TFT_CYAN;
+    } else if (batteryPercentage > 20) {
+      batteryColor = TFT_GREEN;
+    } else {
+      batteryColor = TFT_RED;
+    }
     tft.fillRoundRect(x + 2, y + 2, batteryLevelWidth, 6, 1, batteryColor);
 
-    if (showBatteryPct) {
-      tft.setCursor(x + 30, y + 2);
-      tft.setTextColor(GREEN, UI_LABLE);
-      tft.setTextFont(1);
-      tft.setTextSize(1);
-      tft.print(String(batteryPercentage) + "%");
+    tft.setCursor(x + 30, y + 2);
+    tft.setTextColor(batteryColor, UI_LABLE);
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    tft.print(String(batteryPercentage) + "%");
+
+    // 显示充放电状态
+    int statusX = x + 55;
+    tft.setCursor(statusX, y + 2);
+    if (isFull) {
+      tft.setTextColor(TFT_GREEN, UI_LABLE);
+      tft.print("FULL");
+    } else if (isCharging) {
+      tft.setTextColor(TFT_CYAN, UI_LABLE);
+      tft.print("CHG");
+    } else {
+      tft.setTextColor(TFT_YELLOW, UI_LABLE);
+      tft.print("DIS");
     }
 
     const int iconW         = 16;
@@ -689,7 +1005,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       tft.drawBitmap(wardGpsX, iconY, bitmap_icon_satellite, iconW, iconW, TFT_ORANGE);
     }
 
-    uint16_t wifiColor = (wifiDevices > 0) ? GREEN : TFT_WHITE;
+    uint16_t wifiColor = (wifiDevices > 0) ? TFT_GREEN : TFT_WHITE;
     uint16_t bleColor  = (bleDevices  > 0) ? TFT_CYAN  : TFT_WHITE;
 
     int wifiStrength = 0;
@@ -707,7 +1023,7 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
       const int barX      = wifiX + i * 6;
 
       if (wifiStrength > i * 25) {
-        tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, GREEN);
+        tft.fillRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_GREEN);
       } else {
         tft.drawRoundRect(barX, wifiY - sigBarH, barWidth, sigBarH, 1, TFT_WHITE);
       }
@@ -721,11 +1037,11 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     } else if (internalTemp > 55) {
       tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, TFT_RED);
     } else {
-      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, GREEN);
+      tft.drawBitmap(tempIconX + 10, y - 2, bitmap_icon_temp, 16, 16, TFT_GREEN);
     }
 
     if (sdCardPresent) {
-      tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_sdcard, 16, 16, GREEN);
+      tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_sdcard, 16, 16, TFT_GREEN);
     } else {
       tft.drawBitmap(sdIconX + 10, y - 2, bitmap_icon_nullsdcard, 16, 16, TFT_RED);
     }
@@ -741,7 +1057,8 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     lastSdSnap            = sdSnap;
     lastWardGpsIcon       = wardGpsIcon;
     lastWardBlinkPhase    = wardGpsIcon ? wardBlinkPhase : 0u;
-    lastShowBatteryPercent = showBatteryPct;
+    lastChargingState     = isCharging;
+    lastFullState         = isFull;
   }
 }
 
@@ -759,7 +1076,7 @@ static void statusBarTask(void* ) {
     const float v = readBatteryVoltage();
     currentBatteryVoltage = v;
 
-    const int pct = constrain(::map((int)(v * 100.f), 300, 420, 0, 100), 0, 100);
+    const int pct = constrain(::map(lroundf(v * 100.0f), 300L, 420L, 0L, 100L), 0, 100);
     const int wifi  = WifiScan::getLastCount();
     const int ble   = BleScan::getLastCount();
     const int wifiH = wifi / 2;
@@ -859,11 +1176,6 @@ uint8_t getPcf8574Address() {
 }
 
 bool initPcf8574Buttons() {
-  // Prevent I2C bus hangs (no ACK / missing pull-ups) from tripping the task WDT
-  // and rebooting right after the intro on classic ESP32.
-  Wire.begin();
-  Wire.setTimeOut(50);
-
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
   pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
@@ -872,7 +1184,6 @@ bool initPcf8574Buttons() {
 
 #if PCF8574_AUTO_DETECT
   for (uint8_t addr = PCF8574_ADDR_MIN; addr <= PCF8574_ADDR_MAX; addr++) {
-    yield();
     if (pcf.begin(addr)) {
       s_pcf8574Addr = addr;
       Serial.printf("[PCF8574] auto-detected at 0x%02X\n", addr);
@@ -892,6 +1203,12 @@ bool initPcf8574Buttons() {
   Serial.printf("[PCF8574] using fixed address 0x%02X\n", s_pcf8574Addr);
 #endif
 
+  for (int pin = 0; pin < 8; pin++) {
+    Serial.print("Button ");
+    Serial.print(pin);
+    Serial.print(": ");
+    Serial.println(pcf.digitalRead(pin) ? "Released" : "Pressed");
+  }
   return true;
 }
 #else
@@ -914,78 +1231,91 @@ static SPIClass s_sdSpi(FSPI);
 #endif
 #endif
 
-/** Tracks whether SD.begin() currently owns a live mount on the shared SPI bus. */
-static bool s_sdFsMounted = false;
-
-/** GPIO CS that last mounted SD (-1 = unknown). Tried first to avoid long SD.begin on wrong CS. */
-static int8_t s_sdLastGoodCs = -1;
-
-/** After a failed mount on classic ESP32, do not keep retrying (SD.begin can WDT). */
-static bool s_sdMountGaveUp = false;
-
-void sdRetryMount() {
-  s_sdMountGaveUp = false;
-}
-
-/** Deselect every other SPI slave that shares the SD bus so none holds MISO. */
-static void sdRaiseCsPin(int pin) {
-  if (pin < 0) {
-    return;
-  }
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, HIGH);
-}
-
-static void sdReleaseOtherChipSelects() {
-#if defined(CC1101_CS)
-  sdRaiseCsPin(CC1101_CS);
-#endif
-#if defined(PN532_SS)
-  sdRaiseCsPin(PN532_SS);
-#endif
-#if defined(CSN_PIN_1)
-  sdRaiseCsPin(CSN_PIN_1);
-#endif
-#if defined(CSN_PIN_2)
-  sdRaiseCsPin(CSN_PIN_2);
-#endif
-#if defined(CSN_PIN_3)
-  sdRaiseCsPin(CSN_PIN_3);
-#endif
-  // Scanner bit-bangs CE/CSN on these pins; keep CE low / CSN high after leaving.
-#if defined(CE_PIN_3)
-  pinMode(CE_PIN_3, OUTPUT);
-  digitalWrite(CE_PIN_3, LOW);
-#endif
-}
-
 void sdSpiInit() {
 #if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
 #if TOUCH_SHARES_TFT_SPI
   s_sdSpi.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
 #else
-  // On ESP32-S3 (v2), RFID bitbang remaps these pins — reset before reclaim.
-  // On classic ESP32 (v1), SD often shares SPI with TFT_eSPI; gpio_reset_pin
-  // after tft.init() can WDT/reboot during boot SD mount.
-#if BOARD_HAS_ESP32S3
-  gpio_reset_pin((gpio_num_t)SD_SCLK);
-  gpio_reset_pin((gpio_num_t)SD_MISO);
-  gpio_reset_pin((gpio_num_t)SD_MOSI);
-  gpio_reset_pin((gpio_num_t)SD_CS);
-#endif
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  SPI.setDataMode(SPI_MODE0);
-  SPI.setBitOrder(MSBFIRST);
-  SPI.setFrequency(4000000);
 #endif
 #endif
 }
 
+/*────── SPI Bus Management Implementation ──────*/
+/* Note: Do NOT call SPI.end() between switches. ESP32 allows reconfiguring
+   SPI pins by calling SPI.begin() with new pins directly. */
+static SpiOwner s_spiOwner = SpiOwner::None;
+
+SpiOwner spiGetOwner() {
+  return s_spiOwner;
+}
+
+void spiRelease() {
+  // Don't call SPI.end() - just reset the owner flag
+  s_spiOwner = SpiOwner::None;
+}
+
+void spiInitForSD() {
+  // Always reconfigure - can't trust owner tracking
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  s_spiOwner = SpiOwner::SD_Card;
+}
+
+void spiInitForNRF24() {
+  if (s_spiOwner != SpiOwner::NRF24) {
+    // NRF24 is managed by RF24 library - we don't reconfigure SPI pins here
+    // Just mark the owner
+    s_spiOwner = SpiOwner::NRF24;
+  }
+}
+
+void spiInitForCC1101() {
+  if (s_spiOwner != SpiOwner::CC1101) {
+    // Just reconfigure SPI pins - don't call SPI.end()
+    SPI.begin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+    s_spiOwner = SpiOwner::CC1101;
+  }
+}
+
+bool spiEnsureSD() {
+  // Always reconfigure SPI for SD - can't trust owner tracking because
+  // RF24 library manages SPI internally without going through our management
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  s_spiOwner = SpiOwner::SD_Card;
+  
+  // First try to end any previous SD mount
+  if (sd_mounted) {
+    SD.end();
+    sd_mounted = false;
+  }
+  
+  // Try to mount SD with retries
+  for (int attempt = 0; attempt < 3; attempt++) {
+#ifdef SD_CS
+    if (SD.begin(SD_CS)) { sd_mounted = true; return true; }
+#endif
+#ifdef SD_CS_PIN
+#ifndef CC1101_CS
+    if (SD.begin(SD_CS_PIN)) { sd_mounted = true; return true; }
+#else
+    if (SD_CS_PIN != CC1101_CS) {
+      if (SD.begin(SD_CS_PIN)) { sd_mounted = true; return true; }
+    }
+#endif
+#endif
+    // Small delay before retry
+    if (attempt < 2) {
+      delay(50);
+    }
+  }
+  return false;
+}
+
 bool sdMountChipSelect(uint8_t cs) {
 #if TOUCH_SHARES_TFT_SPI
-  return SD.begin(cs, s_sdSpi, 4000000);
+  return SD.begin(cs, s_sdSpi);
 #else
-  return SD.begin(cs, SPI, 4000000);
+  return SD.begin(cs);
 #endif
 }
 
@@ -995,23 +1325,14 @@ void initSDCard() {
   pinMode(SD_CD, INPUT_PULLUP);
 #endif
 
-#if !BOARD_HAS_ESP32S3
-  // Classic ESP32: raise CS only. Full SD.begin is deferred — boot mount was
-  // rebooting right after the intro ("3 sd").
-#if defined(SD_CS)
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
-#endif
-  sdReleaseOtherChipSelects();
-  // Block auto-mount from settingsLoad / status bar until an SD feature asks.
-  s_sdMountGaveUp = true;
+  // Use unified SPI management
+  spiInitForSD();
+
   updateSdCardStatus();
-  return;
-#else
-  restoreSdAfterSharedSpi();
-  updateSdCardStatus();
-#endif
 }
+
+/** GPIO CS that last mounted SD (-1 = unknown). Tried first to avoid long SD.begin on wrong CS. */
+static int8_t s_sdLastGoodCs = -1;
 
 static bool sdPinIsOkForSdMount(uint8_t pin) {
 #if defined(SD_CS)
@@ -1076,80 +1397,39 @@ static bool sdTryBeginOrder() {
   return false;
 }
 
-/** Soft remount: keep current SPI pinmux. Safe while CC1101/nRF24 still need the bus
- *  (same SCK/MISO/MOSI as SD on DIV V2). Only raises other chip-selects and remounts FatFS. */
-static bool sdRemountSoft() {
-  sdReleaseOtherChipSelects();
-
-#if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
-#if TOUCH_SHARES_TFT_SPI
-  s_sdSpi.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-#else
-  // Do not SPI.end()/gpio_reset here — that tears down CC1101 after SubGHz Init.
-  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  SPI.setDataMode(SPI_MODE0);
-  SPI.setBitOrder(MSBFIRST);
-#endif
-#endif
-
-  SD.end();
-  s_sdFsMounted = false;
-  delay(2);
-  if (sdTryBeginOrder()) {
-    s_sdFsMounted = true;
-#if !TOUCH_SHARES_TFT_SPI
-    // SD.begin() often leaves the bus at 16–40 MHz; CC1101 cannot use that.
-    SPI.setFrequency(4000000);
-#endif
-    return true;
-  }
-  return false;
-}
-
 bool isSDCardAvailable() {
-#ifdef SD_CD
+
+  #ifdef SD_CD
   updateSdCardStatus();
-  if (!sdCardPresent) {
-    return false;
-  }
-#endif
+  if (!sdCardPresent) return false;
+  #endif
 
-  // FatFS "exists(/)" can stay true after another feature stole the SPI bus.
-  // cardType() actually talks to the card and catches a dead mount.
-  if (s_sdFsMounted) {
-    if (SD.cardType() != CARD_NONE) {
-      return true;
-    }
-    s_sdFsMounted = false;
-    SD.end();
+  // If already mounted, verify it's still valid
+  if (sd_mounted) {
+    if (SD.exists("/")) return true;
+    sd_mounted = false;
   }
 
-#if !BOARD_HAS_ESP32S3
-  if (s_sdMountGaveUp) {
-    return false;
-  }
-#endif
-
-  // Prefer a soft remount so SubGHz (CC1101 on the same SPI pins) stays alive.
-  if (sdRemountSoft()) {
+  // Use unified SPI management - always reconfigures SPI for SD
+  if (spiEnsureSD()) {
     return true;
-  }
-
-  // Soft failed — pins may still be in RFID bitbang / Scanner remapped state.
-  // Only do the destructive reclaim when no radio feature owns the bus.
-  if (!feature_active) {
-    restoreSdAfterSharedSpi();
-#if !BOARD_HAS_ESP32S3
-    if (!s_sdFsMounted) {
-      s_sdMountGaveUp = true;
-      Serial.println("[sd] mount failed — will not retry until reboot");
-    }
-#endif
-    return s_sdFsMounted;
   }
   return false;
 }
 
+void restoreSdAfterSharedSpi() {
+  // Use unified SPI management
+  if (spiEnsureSD()) {
+    return;
+  }
+}
+
+/** Allow another SD mount attempt (no-op on 1.7.1; kept for 1.7.2 compatibility). */
+void sdRetryMount() {
+  // 1.7.1 uses spiEnsureSD() which always retries; nothing to clear.
+}
+
+/** Hold SD CS high and set a CC1101-safe SPI rate on the shared bus. */
 void holdSdInactiveOnSharedSpi() {
 #if defined(SD_CS)
   pinMode(SD_CS, OUTPUT);
@@ -1162,11 +1442,38 @@ void holdSdInactiveOnSharedSpi() {
 #endif
 }
 
+/** Deselect every other SPI slave that shares the SD bus so none holds MISO. */
+static void sdRaiseCsPinCompat(int pin) {
+  if (pin < 0) return;
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);
+}
+
+static void sdReleaseOtherChipSelectsCompat() {
+#if defined(CC1101_CS)
+  sdRaiseCsPinCompat(CC1101_CS);
+#endif
+#if defined(CSN_PIN_1)
+  sdRaiseCsPinCompat(CSN_PIN_1);
+#endif
+#if defined(CSN_PIN_2)
+  sdRaiseCsPinCompat(CSN_PIN_2);
+#endif
+#if defined(CSN_PIN_3)
+  sdRaiseCsPinCompat(CSN_PIN_3);
+#endif
+#if defined(CE_PIN_3)
+  pinMode(CE_PIN_3, OUTPUT);
+  digitalWrite(CE_PIN_3, LOW);
+#endif
+}
+
+/** Reclaim shared SPI pins for CC1101/nRF without mounting SD.
+ *  Reset pinmux after RFID bitbang / Scanner remaps, then configure SPI for
+ *  CC1101-safe rate. Does NOT call SD.begin() (that raises SPI clock and can
+ *  leave the bus unusable for SubGHz until reboot). */
 void reclaimSharedSpiBus() {
-  // Reset pinmux after RFID bitbang / Scanner remaps, but do NOT SD.begin().
-  // Mounting SD here is what broke SubGHz: SD.begin raises SPI clock and parks
-  // the card on the same MISO line CC1101 needs.
-  sdReleaseOtherChipSelects();
+  sdReleaseOtherChipSelectsCompat();
 #if defined(SD_CS)
   pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
@@ -1175,13 +1482,11 @@ void reclaimSharedSpiBus() {
   pinMode(CC1101_CS, OUTPUT);
   digitalWrite(CC1101_CS, HIGH);
 #endif
-#if defined(PN532_SS)
-  pinMode(PN532_SS, OUTPUT);
-  digitalWrite(PN532_SS, HIGH);
-#endif
 
-  SD.end();
-  s_sdFsMounted = false;
+  if (sd_mounted) {
+    SD.end();
+    sd_mounted = false;
+  }
 
 #if !TOUCH_SHARES_TFT_SPI
   SPI.end();
@@ -1191,37 +1496,9 @@ void reclaimSharedSpiBus() {
   gpio_reset_pin((gpio_num_t)SD_MISO);
   gpio_reset_pin((gpio_num_t)SD_MOSI);
 #endif
-  // PN532 software-SPI may have bitbanged these (on DIV V2 MOSI/MISO are
-  // swapped vs SD/CC1101). Reset them even when they overlap SD pins.
-#if defined(PN532_SCK)
-  gpio_reset_pin((gpio_num_t)PN532_SCK);
 #endif
-#if defined(PN532_MISO)
-  gpio_reset_pin((gpio_num_t)PN532_MISO);
-#endif
-#if defined(PN532_MOSI)
-  gpio_reset_pin((gpio_num_t)PN532_MOSI);
-#endif
-#if defined(PN532_SS)
-  gpio_reset_pin((gpio_num_t)PN532_SS);
-  pinMode(PN532_SS, OUTPUT);
-  digitalWrite(PN532_SS, HIGH);
-#endif
-#if defined(SD_CS)
-  gpio_reset_pin((gpio_num_t)SD_CS);
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
-#endif
-#if defined(CC1101_CS)
-  gpio_reset_pin((gpio_num_t)CC1101_CS);
-  pinMode(CC1101_CS, OUTPUT);
-  digitalWrite(CC1101_CS, HIGH);
-#endif
-#endif // BOARD_HAS_ESP32S3
 #if defined(SD_SCLK) && defined(SD_MISO) && defined(SD_MOSI) && defined(SD_CS)
 #if defined(CC1101_SCK) && defined(CC1101_MISO) && defined(CC1101_MOSI) && defined(CC1101_CS)
-  // Prefer CC1101 CS as SPI SS — same data pins as SD on DIV V2, but matches
-  // what ELECHOUSE SpiStart() will bind on the next Init().
   SPI.begin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 #else
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
@@ -1236,19 +1513,6 @@ void reclaimSharedSpiBus() {
 #endif
 #endif
   delay(2);
-}
-
-void restoreSdAfterSharedSpi() {
-  // Full reclaim + remount for menu/SD features after leaving SPI radios.
-  reclaimSharedSpiBus();
-  delay(5);
-  if (sdTryBeginOrder()) {
-    s_sdFsMounted = true;
-#if !TOUCH_SHARES_TFT_SPI
-    SPI.setFrequency(4000000);
-#endif
-  }
-  requestStatusBarRedraw();
 }
 
 void loading(int frameDelay, uint16_t color, int16_t x, int16_t y, int repeats, bool center) {
@@ -1314,8 +1578,16 @@ void displayLogo(uint16_t color, int displayTime) {
   tft.print("by ");
   tftPrintObf(OBF_DN, sizeof(OBF_DN));
 
+  // Made By Cirket - centered between "by cifertech" and version
+  textY += 25;
+  const char* madeBy = "Made By Cirket";
+  int16_t mbWidth = tft.textWidth(madeBy, 1);
+  textX = (screenWidth - mbWidth) / 2;
+  tft.setCursor(textX, textY);
+  tft.print(madeBy);
+
   textX = screenWidth / 2.5;
-  textY += 50;
+  textY += 25;
   tft.setCursor(textX, textY);
   // Version is intentionally NOT obfuscated.
   tft.print(ESP32DIV_VERSION);
@@ -1327,7 +1599,7 @@ void displayLogo(uint16_t color, int displayTime) {
   Serial.print("Version:      "); Serial.println(ESP32DIV_VERSION);
   Serial.print("Contact:      "); serialPrintObf(OBF_EM, sizeof(OBF_EM), true);
   Serial.print("GitHub:       "); serialPrintObf(OBF_GH, sizeof(OBF_GH), true);
-  Serial.print("Website:      "); serialPrintObf(OBF_WB, sizeof(OBF_WB), true);
+  Serial.print("Modified:     "); serialPrintObf(OBF_WB, sizeof(OBF_WB), true);
   Serial.println("==================================");
 
   delay(displayTime);
@@ -1607,6 +1879,20 @@ void terminalLoop() {
       }
     }
   }
+
+void terminalExit() {
+  // The Serial Terminal uses ILI9341 Vertical Scroll Definition (VSCRDEF) to
+  // create a scrollable content region. When exiting without restoring both
+  // the scroll area and the scroll start address, the following menu is
+  // rendered at a shifted Y offset (part of the framebuffer appears cut off or
+  // duplicated). Reset both registers here so the display returns to normal.
+  Serial.end();
+  setupScrollArea(0, 0);
+  scrollAddress(0);
+  tft.setCursor(0, 0);
+  yStart = TOP_FIXED_AREA;
+  xPos = 0;
+}
 }
 
 namespace AppSettingsUI {
@@ -1652,7 +1938,7 @@ static int  sel = 0;
 static bool dirtySettings = false;
 static bool uiDirty = false;
 
-static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan", "Battery %"};
+static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan"};
 static const int N = sizeof(items)/sizeof(items[0]);
 
 static uint8_t  last_brightness;
@@ -1660,7 +1946,6 @@ static Theme    last_theme;
 static uint8_t  last_accent;
 static bool     last_neopixel;
 static bool     last_autoScan;
-static bool     last_showBatteryPercent;
 static int      last_sel;
 
 static bool dragging = false;
@@ -1898,7 +2183,6 @@ static void drawSwitchRow(bool on, bool selected, int row) {
 
 static void drawNeoPixel(bool on, bool selected) { drawSwitchRow(on, selected, 3); }
 static void drawAutoScan(bool on, bool selected) { drawSwitchRow(on, selected, 4); }
-static void drawBatteryPercent(bool on, bool selected) { drawSwitchRow(on, selected, 5); }
 
 static Rect backRect(){
   int h = tft.height();
@@ -1965,7 +2249,6 @@ static void drawAll() {
   drawNeoPixel(s.neopixelEnabled, sel==3);
   bool autoScan = (s.autoWifiScan || s.autoBleScan);
   drawAutoScan(autoScan, sel==4);
-  drawBatteryPercent(s.showBatteryPercent, sel==5);
 
   drawFooter(false, false);
 
@@ -1975,7 +2258,6 @@ static void drawAll() {
   last_accent     = s.accentColor;
   last_neopixel   = s.neopixelEnabled;
   last_autoScan     = autoScan;
-  last_showBatteryPercent = s.showBatteryPercent;
   uiDirty = false;
 }
 
@@ -1996,7 +2278,6 @@ static void redrawIfChanged() {
     drawCardStatic(3, sel==3);  drawSwitchWidgetRow(s.neopixelEnabled, sel==3, 3);
     bool autoScan = (s.autoWifiScan || s.autoBleScan);
     drawCardStatic(4, sel==4);  drawSwitchWidgetRow(autoScan, sel==4, 4);
-    drawCardStatic(5, sel==5);  drawSwitchWidgetRow(s.showBatteryPercent, sel==5, 5);
     last_sel = sel;
   } else {
     if (s.brightness != last_brightness) {
@@ -2011,10 +2292,6 @@ static void redrawIfChanged() {
     if (autoScan != last_autoScan) {
       drawSwitchWidgetRow(autoScan, sel==4, 4);
       last_autoScan = autoScan;
-    }
-    if (s.showBatteryPercent != last_showBatteryPercent) {
-      drawSwitchWidgetRow(s.showBatteryPercent, sel==5, 5);
-      last_showBatteryPercent = s.showBatteryPercent;
     }
     if (s.theme != last_theme) {
       drawThemeWidget(s.theme, sel==1);
@@ -2063,6 +2340,7 @@ static bool applyNeoPixel(bool en){
   auto& s = settings();
   if (s.neopixelEnabled == en) return false;
   s.neopixelEnabled = en;
+  toggleNeoPixel(en);
   dirtySettings = true;
   uiDirty = true;
   lastChangeMs = millis();
@@ -2080,40 +2358,10 @@ static bool applyAutoScan(bool en){
   return true;
 }
 
-static bool applyShowBatteryPercent(bool en){
-  auto& s = settings();
-  if (s.showBatteryPercent == en) return false;
-  s.showBatteryPercent = en;
-  dirtySettings = true;
-  uiDirty = true;
-  requestStatusBarRedraw();
-  drawStatusBar(currentBatteryVoltage, true);
-  lastChangeMs = millis();
-  return true;
-}
-
 static void handleTouch() {
   int tx, ty;
-  static uint32_t lastActionMs = 0;
-  static uint32_t touchUpSinceMs = 0;
-  static bool switchArmed = true;
-  constexpr uint32_t kReleaseArmMs = 160;
-  constexpr uint32_t kCooldownMs   = 220;
-
-  const uint32_t now = millis();
-
-  if (!readTouchXY(tx, ty)) {
-    dragging = false;
-    if (touchUpSinceMs == 0) {
-      touchUpSinceMs = now;
-    }
-    if ((now - touchUpSinceMs) >= kReleaseArmMs) {
-      switchArmed = true;
-    }
-    return;
-  }
-
-  touchUpSinceMs = 0;
+  static uint32_t lastToggleMs = 0;
+  if (!readTouchXY(tx, ty)) { dragging = false; return; }
 
   Rect br = backRect();
   Rect sr = saveRect();
@@ -2153,7 +2401,6 @@ static void handleTouch() {
   }
 
   auto& s = settings();
-  const bool canFire = switchArmed && ((now - lastActionMs) >= kCooldownMs);
 
   if (sel == 0) {
     Rect tr = rBrightTrack();
@@ -2174,53 +2421,33 @@ static void handleTouch() {
     Rect d = rThemeDark();
     Rect l = rThemeLight();
     if (tx >= d.x && tx <= d.x+d.w && ty >= d.y && ty <= d.y+d.h) {
-      if (canFire) {
-        applyTheme(Theme::Dark);
-        lastActionMs = now;
-        switchArmed = false;
-      }
+      applyTheme(Theme::Dark);
     } else if (tx >= l.x && tx <= l.x+l.w && ty >= l.y && ty <= l.y+l.h) {
-      if (canFire) {
-        applyTheme(Theme::Light);
-        lastActionMs = now;
-        switchArmed = false;
-      }
+      applyTheme(Theme::Light);
     }
   } else if (sel == 2) {
     Rect sw = rAccentSwatch();
-    const bool onSwatch =
-        (tx >= sw.x - 80 && tx <= sw.x + sw.w && ty >= sw.y - 8 && ty <= sw.y + sw.h + 8);
-    if (onSwatch && canFire) {
-      applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT);
-      lastActionMs = now;
-      switchArmed = false;
+    if (tx >= sw.x - 80 && tx <= sw.x + sw.w && ty >= sw.y - 8 && ty <= sw.y + sw.h + 8) {
+      uint8_t next = (s.accentColor + 1) % ACCENT_PRESET_COUNT;
+      applyAccent(next);
     }
   } else if (sel == 3) {
     Rect tr = rSwitchTrack(3);
     if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
-      if (canFire) {
+      uint32_t now = millis();
+      if (now - lastToggleMs > 120) {
         applyNeoPixel(!s.neopixelEnabled);
-        lastActionMs = now;
-        switchArmed = false;
+        lastToggleMs = now;
       }
     }
   } else if (sel == 4) {
     Rect tr = rSwitchTrack(4);
     if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
-      if (canFire) {
+      uint32_t now = millis();
+      if (now - lastToggleMs > 120) {
         bool autoScan = (s.autoWifiScan || s.autoBleScan);
         applyAutoScan(!autoScan);
-        lastActionMs = now;
-        switchArmed = false;
-      }
-    }
-  } else if (sel == 5) {
-    Rect tr = rSwitchTrack(5);
-    if (tx >= tr.x && tx <= tr.x+tr.w && ty >= tr.y-10 && ty <= tr.y+tr.h+10) {
-      if (canFire) {
-        applyShowBatteryPercent(!s.showBatteryPercent);
-        lastActionMs = now;
-        switchArmed = false;
+        lastToggleMs = now;
       }
     }
   }
@@ -2278,7 +2505,6 @@ void loop(){
     else if (sel==2)                   { applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT); }
     else if (sel==3)                   { applyNeoPixel(false); }
     else if (sel==4)                   { applyAutoScan(false); }
-    else if (sel==5)                   { applyShowBatteryPercent(false); }
     changedByButtons=true;
     lastActionMs = now;
   }
@@ -2289,7 +2515,6 @@ void loop(){
     else if (sel==2)                   { applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT); }
     else if (sel==3)                   { applyNeoPixel(true); }
     else if (sel==4)                   { applyAutoScan(true); }
-    else if (sel==5)                   { applyShowBatteryPercent(true); }
     changedByButtons=true;
     lastActionMs = now;
   }
@@ -3086,7 +3311,6 @@ static void handleTap(int x, int y) {
 }
 
 void setup() {
-  sdRetryMount();
   sdFmResetNavLabelCache();
   page = Page::Browser;
   cwd = "/";
@@ -3115,16 +3339,50 @@ void loop() {
     }
   }
 
-  // Physical navigation (kept for devices without touch nav bar).
-  if (!featureHasTouchNavBar() && isButtonPressed(BTN_UP)) {
+  // Physical button navigation (works with or without touch nav bar).
+  if (isButtonPressed(BTN_UP)) {
     if (page == Page::Browser && !entries.empty()) { sel--; clampSel(); drawBrowserPage(false); }
+    else if (page == Page::Info) { drawBrowserPage(); }
+    else if (page == Page::ConfirmDelete) { drawBrowserPage(); }
     delay(160);
     return;
   }
-  if (!featureHasTouchNavBar() && isButtonPressed(BTN_DOWN)) {
+  if (isButtonPressed(BTN_DOWN)) {
     if (page == Page::Browser && !entries.empty()) { sel++; clampSel(); drawBrowserPage(false); }
     delay(160);
     return;
+  }
+  if (isButtonPressed(BTN_RIGHT)) {
+    if (page == Page::Browser) { openSelected(); delay(160); return; }
+  }
+  if (isButtonPressed(BTN_LEFT)) {
+    if (page == Page::Browser) {
+      if (cwd != "/") {
+        String err;
+        if (reloadDir(parentPath(cwd), &err)) {
+          sel = 0; listStart = 0;
+          drawBrowserPage();
+        }
+      } else {
+        feature_exit_requested = true;
+      }
+      delay(160); return;
+    }
+    else if (page == Page::Info) { drawBrowserPage(); delay(160); return; }
+    else if (page == Page::ConfirmDelete) { drawBrowserPage(); delay(160); return; }
+  }
+  if (isButtonPressed(BTN_SELECT)) {
+    if (page == Page::Browser) { reloadDir(cwd, nullptr); drawBrowserPage(true); delay(160); return; }
+    else if (page == Page::Info) { drawConfirmDeletePage(); delay(160); return; }
+    else if (page == Page::ConfirmDelete) {
+      String err;
+      const bool ok = deleteSelected(&err);
+      if (!ok) { showNotification("Delete", err.c_str()); delay(500); }
+      reloadDir(cwd, nullptr);
+      drawBrowserPage();
+      delay(160);
+      return;
+    }
   }
 
   int x, y;

@@ -28,26 +28,26 @@ constexpr int KEY_START_Y  = 95;
 
 constexpr unsigned long CURSOR_BLINK_MS = 500;
 
-/* Row 3 ends with ^ (caps); row 4 ends with space, # (symbols), and < (backspace). */
+/* Row 3 ends with ^ (caps); row 4 ends with # (symbols) and < (backspace). */
 static const char* const kStdRowsLower[OS_KEYBOARD_ROW_COUNT] = {
   "1234567890",
   "qwertyuiop",
-  "asdfghjkl^",
-  "zxcvbnm #<",
+  "asdfghjk ^",
+  "zxcvbnm#<",
 };
 
 static const char* const kStdRowsUpper[OS_KEYBOARD_ROW_COUNT] = {
   "1234567890",
   "QWERTYUIOP",
-  "ASDFGHJKL^",
-  "ZXCVBNM #<",
+  "ASDFGHJK ^",
+  "ZXCVBNM#<",
 };
 
 static const char* const kStdRowsSymbol[OS_KEYBOARD_ROW_COUNT] = {
   "1234567890",
   "!@#$%^&*()",
-  "-_=[]{}; ^",
-  "/\\.?,\"~|#<",
+  "[]\\;':, ^",
+  "(){}[]=+#<",
 };
 
 static const char* const* kbStdRowsFor(bool upperCase, bool symbolMode) {
@@ -158,18 +158,15 @@ void drawInputField(const String& value, bool cursorOn) {
 }
 
 void drawTitles(const OnScreenKeyboardConfig& cfg) {
-  // Titles sit under the status bar (not at the bottom — that left the IR menu
-  // chrome visible above the old clear region starting at y=37).
   tft.setTextColor(KB_BORDER(), KB_BG());
   tft.setTextSize(1);
-  tft.setTextFont(1);
   if (cfg.titleLine1 && cfg.titleLine1[0]) {
-    tft.setCursor(10, 24);
-    tft.print(cfg.titleLine1);
+    tft.setCursor(1, 230);
+    tft.println(cfg.titleLine1);
   }
   if (cfg.titleLine2 && cfg.titleLine2[0]) {
-    tft.setCursor(10, 36);
-    tft.print(cfg.titleLine2);
+    tft.setCursor(20, 245);
+    tft.println(cfg.titleLine2);
   }
 }
 
@@ -247,6 +244,10 @@ bool handleKeyPress(char c, String& text, uint8_t maxLen,
     }
     return true;
   }
+  if (c == '-') {
+    text = "";
+    return true;
+  }
   if (c == ' ') {
     if (text.length() < maxLen) {
       text += ' ';
@@ -281,10 +282,7 @@ OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
   const uint8_t activeRowCount =
       useStandard ? OS_KEYBOARD_ROW_COUNT : cfg.rowCount;
 
-  // Full clear — previous feature menus leave chrome in y=0..36 if we only
-  // wipe from y=37 (Copy Controller / IR submenu icons were leaking through).
-  tft.fillScreen(KB_BG());
-  drawStatusBar(readBatteryVoltage(), true);
+  tft.fillRect(0, 37, tft.width(), tft.height() - 37, KB_BG());
 
   bool cursorOn = true;
   unsigned long lastBlink = millis();
@@ -343,6 +341,8 @@ OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
             if (res.text.length() > 0) {
               res.text.remove(res.text.length() - 1);
             }
+          } else if (c == '-') {
+            res.text = "";
           } else if (c != ' ') {
             if (res.text.length() < cfg.maxLen) {
               res.text += c;

@@ -40,50 +40,6 @@ static int bleContentBottom() {
   return featureHasTouchNavBar() ? touchNavContentBottomY() : kBleScreenH;
 }
 
-bool ensureBleStackReady() {
-  static bool ready = false;
-  if (ready) {
-    return true;
-  }
-  const uint32_t heap = ESP.getFreeHeap();
-  Serial.printf("[ble] init begin, free heap=%u\n", (unsigned)heap);
-#if !BOARD_HAS_ESP32S3
-  // Classic ESP32 NimBLE typically needs ~40KB+ free; abort soft instead of OOM reboot.
-  if (heap < 40000u) {
-    Serial.println("[ble] skip init — low heap");
-    return false;
-  }
-#endif
-  // Classic BT controller RAM is unused by NimBLE; reclaim it before stack init.
-  // On ESP32 this often frees ~30KB and avoids boot OOM/reboot after the intro.
-  esp_err_t rel = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-  if (rel != ESP_OK && rel != ESP_ERR_INVALID_STATE) {
-    Serial.printf("[ble] classic mem_release: %s\n", esp_err_to_name(rel));
-  }
-  BLEDevice::init(ESP32DIV_NAME);
-  ready = true;
-  Serial.printf("[ble] init done, free heap=%u\n", (unsigned)ESP.getFreeHeap());
-  return true;
-}
-
-static bool bleRequireStackOrExit() {
-  if (ensureBleStackReady()) {
-    return true;
-  }
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_WARN, TFT_BLACK);
-  tft.setCursor(12, 120);
-  tft.print("BLE: low memory");
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.setCursor(12, 140);
-  tft.print("Exit and try again");
-  delay(1200);
-  feature_exit_requested = true;
-  return false;
-}
-
 static int bleMaxLinesInZone(int contentTop, int lineHeight) {
   const int h = bleContentBottom() - contentTop;
   if (h <= 0 || lineHeight <= 0) {
@@ -146,8 +102,53 @@ static void bleWaitNavRelease(int pin1, int pin2 = -1, int pin3 = -1) {
   delay(kBleNavDebounceMs);
 }
 
+bool ensureBleStackReady() {
+  static bool ready = false;
+  if (ready) {
+    return true;
+  }
+  const uint32_t heap = ESP.getFreeHeap();
+  Serial.printf("[ble] init begin, free heap=%u\n", (unsigned)heap);
+#if !BOARD_HAS_ESP32S3
+  // Classic ESP32 NimBLE typically needs ~40KB+ free; abort soft instead of OOM reboot.
+  if (heap < 40000u) {
+    Serial.println("[ble] skip init — low heap");
+    return false;
+  }
+#endif
+  // Classic BT controller RAM is unused by NimBLE; reclaim it before stack init.
+  // On ESP32 this often frees ~30KB and avoids boot OOM/reboot after the intro.
+  esp_err_t rel = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+  if (rel != ESP_OK && rel != ESP_ERR_INVALID_STATE) {
+    Serial.printf("[ble] classic mem_release: %s\n", esp_err_to_name(rel));
+  }
+  BLEDevice::init(ESP32DIV_NAME);
+  ready = true;
+  Serial.printf("[ble] init done, free heap=%u\n", (unsigned)ESP.getFreeHeap());
+  return true;
+}
+
+static bool bleRequireStackOrExit() {
+  if (ensureBleStackReady()) {
+    return true;
+  }
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_WARN, TFT_BLACK);
+  tft.setCursor(12, 120);
+  tft.print("BLE: low memory");
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.setCursor(12, 140);
+  tft.print("Exit and try again");
+  delay(1200);
+  feature_exit_requested = true;
+  return false;
+}
+
 namespace Scanner { void scannerHandleNavButtons(); }
-namespace ProtoKill { void prokillHandleNavButtons(); }
+namespace ProtoKill { void prokillHandleNavButtons(); void exit(); }
+
 namespace EsbSniffer { void esbHandleNavButtons(); }
 
 static void bleSetSpooferNavLabels() {
@@ -865,7 +866,6 @@ void runUI() {
 }
 
 void spooferSetup() {
-  if (!bleRequireStackOrExit()) return;
   setTouchButtonInputEnabled(true);
   bleSetSpooferNavLabels();
   spooferResetPanelCache();
@@ -1127,7 +1127,6 @@ BLEAdvertisementData getOAdvertisementData() {
 }
 
 void sourappleSetup() {
-  if (!bleRequireStackOrExit()) return;
   setTouchButtonInputEnabled(true);
   bleSetExitOnlyNavLabels();
   bleClearBody(TFT_BLACK);
@@ -1194,6 +1193,3084 @@ void exit() {
 }
 }
 
+namespace BleJammer {
+
+RF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
+RF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
+RF24 radio3(CE_PIN_3, CSN_PIN_3, 16000000);
+
+enum OperationMode { BLE_MODULE, Bluetooth_MODULE };
+OperationMode currentMode = BLE_MODULE;
+
+bool jammerActive = false;
+
+/* NRF24 module init status (set by initializeRadiosMultiMode, reported by blejamSetup) */
+static bool s_radio1Active = false;
+static bool s_radio2Active = false;
+static bool s_radio3Active = false;
+
+int bluetooth_channels[] = {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
+int ble_channels[] = {2, 26, 80};
+
+const byte BLE_channels[] = {2, 26, 80};
+byte channelGroup1[] = {2, 5, 8, 11};
+byte channelGroup2[] = {26, 29, 32, 35};
+byte channelGroup3[] = {80, 83, 86, 89};
+
+#define SCREEN_HEIGHT 320
+#define LINE_HEIGHT 12
+#define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
+
+String Buffer[MAX_LINES];
+uint16_t Buffercolor[MAX_LINES];
+int Index = 0;
+
+volatile bool modeChangeRequested = false;
+volatile bool jammerToggleRequested = false;
+
+unsigned long lastButtonPressTime = 0;
+const unsigned long debounceDelay = 500;
+
+static constexpr int JAMMER_LOG_TOP = 48;
+
+static int jammerVisibleLines() {
+  return bleMaxLinesInZone(JAMMER_LOG_TOP, LINE_HEIGHT);
+}
+
+static bool jammerLineFits(int yPos) {
+  return yPos + LINE_HEIGHT <= bleContentBottom();
+}
+
+void scroll() {
+  for (int i = 0; i < MAX_LINES - 1; i++) {
+    Buffer[i] = Buffer[i + 1];
+    Buffercolor[i] = Buffercolor[i + 1];
+  }
+}
+
+void Print(String text, uint16_t color, bool extraSpace = false) {
+  const int visibleLines = jammerVisibleLines();
+  if (Index >= visibleLines) {
+    for (int i = 0; i < visibleLines - 1; i++) {
+      Buffer[i] = Buffer[i + 1];
+      Buffercolor[i] = Buffercolor[i + 1];
+    }
+    Index = visibleLines - 1;
+  }
+
+  Buffer[Index] = text;
+  Buffercolor[Index] = color;
+  Index++;
+
+  if (extraSpace && Index < visibleLines) {
+    Buffer[Index] = "";
+    Buffercolor[Index] = WHITE;
+    Index++;
+  }
+
+  for (int i = 0; i < Index && i < visibleLines; i++) {
+    int yPos = (i * LINE_HEIGHT) + JAMMER_LOG_TOP;
+    if (!jammerLineFits(yPos)) {
+      continue;
+    }
+
+    tft.fillRect(5, yPos, tft.width() - 10, LINE_HEIGHT, TFT_BLACK);
+
+    tft.setTextColor(Buffercolor[i], TFT_BLACK);
+    tft.setCursor(5, yPos);
+    tft.print(Buffer[i]);
+  }
+}
+
+void checkButtons() {
+  unsigned long currentTime = millis();
+
+  if (isButtonPressed(BTN_UP) && currentTime - lastButtonPressTime > debounceDelay) {
+    jammerToggleRequested = true;
+    lastButtonPressTime = currentTime;
+  }
+
+  if (isButtonPressed(BTN_RIGHT) && currentTime - lastButtonPressTime > debounceDelay) {
+    modeChangeRequested = true;
+    lastButtonPressTime = currentTime;
+  }
+
+  if (isButtonPressed(BTN_LEFT) && currentTime - lastButtonPressTime > debounceDelay) {
+    modeChangeRequested = true;
+    lastButtonPressTime = currentTime;
+  }
+}
+
+void configureRadio(RF24 &radio, const byte* channels, size_t size) {
+  radio.setAutoAck(false);
+  radio.stopListening();
+  radio.setRetries(0, 0);
+  radio.setPALevel(RF24_PA_MAX, true);
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_DISABLED);
+  // Don't start carrier here - it causes overheating when just entering menu
+}
+
+void initializeRadiosMultiMode() {
+  s_radio1Active = false;
+  s_radio2Active = false;
+  s_radio3Active = false;
+
+  if (radio1.begin()) {
+    configureRadio(radio1, channelGroup1, sizeof(channelGroup1));
+    s_radio1Active = true;
+  }
+  if (radio2.begin()) {
+    configureRadio(radio2, channelGroup2, sizeof(channelGroup2));
+    s_radio2Active = true;
+  }
+  if (radio3.begin()) {
+    configureRadio(radio3, channelGroup3, sizeof(channelGroup3));
+    s_radio3Active = true;
+  }
+}
+
+void initializeRadios() {
+  if (jammerActive) {
+    initializeRadiosMultiMode();
+
+  } else {
+    radio1.powerDown();
+    radio2.powerDown();
+    radio3.powerDown();
+  }
+}
+
+void updateTFT() {
+  static bool previousJammerState = false;
+  static bool prevNRF1State = false;
+  static bool prevNRF2State = false;
+  static int previousMode = -1;
+
+  const int bodyH = bleContentBottom() - 39;
+  if (bodyH > 0) {
+    tft.fillRect(0, 39, 240, bodyH, TFT_BLACK);
+  }
+  tft.fillRect(0, 19, 240, 16, DARK_GRAY);
+
+  tft.setTextSize(1);
+
+  struct ButtonGuide {
+    const char* label;
+    const unsigned char* icon;
+  };
+
+  ButtonGuide buttons[] = {
+    {jammerActive ? "[ON]" : "[OFF]", bitmap_icon_UP},
+    {"MODE-", bitmap_icon_LEFT},
+    {"MODE+", bitmap_icon_RIGHT}
+  };
+
+  int xPos = 20;
+  int yPosIcon = 19;
+  int spacing = 75;
+
+  for (int i = 0; i < 3; i++) {
+    tft.drawBitmap(xPos, yPosIcon, buttons[i].icon, 16, 16, UI_ICON);
+
+    tft.setTextColor(UI_TEXT, DARK_GRAY);
+    tft.setCursor(xPos + 18, yPosIcon + 4);
+    tft.print(buttons[i].label);
+
+    if (i < 2) {
+      int sepX = xPos + spacing - 8;
+      tft.drawFastVLine(sepX, 22, 12, LIGHT_GRAY);
+    }
+
+    xPos += spacing;
+  }
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.drawFastHLine(0, 35, 240, UI_LINE);
+}
+
+void checkModeChange() {
+  checkButtons();
+
+  if (modeChangeRequested) {
+    modeChangeRequested = false;
+    currentMode = static_cast<OperationMode>((currentMode + 1) % 2);
+    initializeRadios();
+    updateTFT();
+
+    String modeText = "[+] Mode changed to: ";
+    modeText += (currentMode == BLE_MODULE) ? "BLE" : "Bluetooth";
+    Print(modeText, UI_TEXT, false);
+  }
+
+  if (jammerToggleRequested) {
+    jammerToggleRequested = false;
+    jammerActive = !jammerActive;
+    initializeRadios();
+    updateTFT();
+
+    String jammerText = "[!] Jammer ";
+    jammerText += (jammerActive) ? "Activated" : "Deactivated";
+    Print(jammerText, UI_WARN, false);
+  }
+}
+
+void blejamSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  bleSetJammerNavLabels();
+  bleClearBody(TFT_BLACK);
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  redrawTouchButtonBar();
+
+  // Release SPI bus before initializing NRF24
+  spiRelease();
+  delay(5);
+  spiInitForNRF24();
+
+  // Only check if NRF24 modules are present, but keep them in powerDown mode
+  // This prevents overheating when just entering the menu without activating jammer
+  s_radio1Active = radio1.begin();
+  if (s_radio1Active) {
+    configureRadio(radio1, channelGroup1, sizeof(channelGroup1));
+    radio1.powerDown();
+  }
+  
+  s_radio2Active = radio2.begin();
+  if (s_radio2Active) {
+    configureRadio(radio2, channelGroup2, sizeof(channelGroup2));
+    radio2.powerDown();
+  }
+  
+  s_radio3Active = radio3.begin();
+  if (s_radio3Active) {
+    configureRadio(radio3, channelGroup3, sizeof(channelGroup3));
+    radio3.powerDown();
+  }
+  
+  setupTouchscreen();
+  updateTFT();
+
+#if HAS_PCF8574_BUTTONS
+  pcf.pinMode(BTN_UP, INPUT_PULLUP);
+  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
+  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
+  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
+#endif
+
+  Print("[+] System Ready!", UI_WARN, true);
+  Print("[+] NRF24 Modules: " + String(s_radio1Active) + ", " + String(s_radio2Active) + ", " + String(s_radio3Active), TFT_WHITE, true);
+  redrawTouchButtonBar();
+}
+
+void blejamLoop() {
+  static bool carrierActive = false;
+  
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
+  checkModeChange();
+
+  // Manage carrier based on jammerActive state
+  if (jammerActive && !carrierActive) {
+    // Start carrier on all radios
+    if (currentMode == BLE_MODULE) {
+      int channel = ble_channels[random(0, sizeof(ble_channels) / sizeof(ble_channels[0]))];
+      if (s_radio1Active) { radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio2Active) { radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio3Active) { radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel); }
+    } else {
+      int channel = bluetooth_channels[random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]))];
+      if (s_radio1Active) { radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio2Active) { radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio3Active) { radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel); }
+    }
+    carrierActive = true;
+  } else if (!jammerActive && carrierActive) {
+    // Stop carrier and power down
+    if (s_radio1Active) radio1.stopConstCarrier();
+    if (s_radio2Active) radio2.stopConstCarrier();
+    if (s_radio3Active) radio3.stopConstCarrier();
+    carrierActive = false;
+  }
+
+  // If carrier is active, hop channels
+  if (jammerActive && carrierActive) {
+    if (currentMode == BLE_MODULE) {
+      int channel = ble_channels[random(0, sizeof(ble_channels) / sizeof(ble_channels[0]))];
+      if (s_radio1Active) { radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio2Active) { radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio3Active) { radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel); }
+    } else {
+      int channel = bluetooth_channels[random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]))];
+      if (s_radio1Active) { radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio2Active) { radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel); }
+      if (s_radio3Active) { radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel); }
+    }
+  }
+}
+
+void exit() {
+  // Stop carrier before powering down
+  if (s_radio1Active) radio1.stopConstCarrier();
+  if (s_radio2Active) radio2.stopConstCarrier();
+  if (s_radio3Active) radio3.stopConstCarrier();
+  
+  jammerActive = false;
+  initializeRadios();
+  
+  // Release SPI bus when leaving this feature
+  spiRelease();
+}
+}
+
+namespace BleSniffer { void exit(); }
+
+namespace BleScan {
+
+#define SCREEN_WIDTH  240
+#define SCREENHEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+
+BLEScan* bleScan;
+BLEScanResults bleResults;
+bool isScanning = false;
+bool isDetailView = false;
+int currentIndex = 0;
+int listStartIndex = 0;
+bool screenNeedsUpdate = true;
+bool fullScreenUpdate = true;
+
+static constexpr int yshift = 30;
+
+// Deauther-like list geometry (bigger rows + paging + bottom nav/tab bar).
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+static int current_page = 0;
+
+static int bleListBottomY() {
+  return featureHasTouchNavBar() ? touchNavContentBottomY() - 4 : 300;
+}
+
+static int bleDevicesPerPage() {
+  return (bleListBottomY() - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+}
+
+static void bleScanClearBody() {
+  const int h = bleContentBottom() - 37;
+  if (h > 0) {
+    tft.fillRect(0, 37, 240, h, TFT_BLACK);
+  }
+}
+
+static void bleScanUpdateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  if (isDetailView) {
+    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "Back");
+  } else {
+    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "View");
+  }
+  redrawTouchButtonBar();
+}
+
+unsigned long lastButtonPress = 0;
+const unsigned long debounceTime = 200;
+
+static bool uiDrawn = false;
+
+static int iconX[ICON_NUM] = {220, 10};
+static const unsigned char* icons[ICON_NUM] = {
+  bitmap_icon_undo,
+  bitmap_icon_go_back
+};
+
+static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+static void drawTabBar(const char* leftButton, bool leftDisabled,
+                       const char* prevButton, bool prevDisabled,
+                       const char* nextButton, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    bleScanUpdateNavLabels();
+    return;
+  }
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+  if (leftButton && leftButton[0]) drawButton(0,   304, 57, 16, leftButton, false, leftDisabled);
+  if (prevButton && prevButton[0]) drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  if (nextButton && nextButton[0]) drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+}
+
+static TaskHandle_t bgBleScanTaskHandle = nullptr;
+static volatile bool bgHasResults = false;
+static volatile uint32_t bgLastScanMs = 0;
+static volatile bool bgBleScanRunning = false;
+static volatile bool fgBleScanInProgress = false;
+static const uint32_t BG_BLE_SCAN_INTERVAL_MS = 15000;
+static bool bleInitDone = false;
+static const uint32_t BG_BOOT_GRACE_MS = 6000;
+static uint32_t bgBootMs = 0;
+
+static void stopBgBleScanIfRunning() {
+  if (fgBleScanInProgress || !bleInitDone || !bleScan) return;
+  if (!bgBleScanRunning) return;
+  bleScan->stop();
+  bgBleScanRunning = false;
+}
+
+static void ensureBleInit() {
+  if (bleInitDone) return;
+  if (!ensureBleStackReady()) return;
+
+  bleScan = BLEDevice::getScan();
+  bleScan->setActiveScan(true);
+  bleInitDone = true;
+}
+
+static void bgBleScanTask(void* ) {
+  ensureBleInit();
+  for (;;) {
+    const uint32_t now = millis();
+    if (bgBootMs == 0) bgBootMs = now;
+
+    const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
+    if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
+      if (fgBleScanInProgress) {
+        vTaskDelay(250 / portTICK_PERIOD_MS);
+        continue;
+      }
+      bgBleScanRunning = true;
+      isScanning = true;
+      bleResults = bleScan->start(2, false);
+      isScanning = false;
+      bgBleScanRunning = false;
+      if (bleResults.getCount() >= 0) {
+        bgHasResults = (bleResults.getCount() > 0);
+        bgLastScanMs = now;
+      }
+      vTaskDelay(BG_BLE_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
+    } else {
+      if (bgBleScanRunning) {
+        stopBgBleScanIfRunning();
+      }
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+  }
+}
+
+void displayScanning() {
+  bleScanClearBody();
+  tft.setTextSize(1);
+  tft.setTextColor(GREEN);
+  tft.setCursor(10, LIST_HEADER_Y);
+  tft.println("Scanning.");
+
+  loading(100, ORANGE, 0, 0, 3, true);
+/*
+  tft.setCursor(60, LIST_HEADER_Y);
+  for (int i = 0; i < 2; i++) {
+    for (int j = 0; j <= i; j++) {
+      tft.print(".");
+      delay(500);
+    }
+  }
+*/
+  tft.setCursor(10, LIST_HEADER_Y + 15);
+  tft.println("Wait a moment.");
+  delay(100);
+  isScanning = false;
+}
+
+void startBLEScan() {
+  pauseBackgroundRadioTasks();
+  if (bgBleScanRunning) {
+    stopBgBleScanIfRunning();
+  }
+  displayScanning();
+  isDetailView = false;
+  current_page = 0;
+  currentIndex = 0;
+  listStartIndex = 0;
+  isScanning = true;
+  screenNeedsUpdate = true;
+  fullScreenUpdate = true;
+  ensureBleInit();
+  fgBleScanInProgress = true;
+  bleResults = bleScan->start(5, false);
+  fgBleScanInProgress = false;
+  isScanning = false;
+  screenNeedsUpdate = true;
+
+  if (bleResults.getCount() >= 0) {
+    bgHasResults = (bleResults.getCount() > 0);
+    bgLastScanMs = millis();
+  }
+}
+
+void handleButtons() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastButtonPress < debounceTime) return;
+
+  int oldPage = current_page;
+
+  if (isButtonPressed(BTN_UP)) {
+    if (currentIndex > 0) {
+      currentIndex--;
+      delay(200);
+      if (!isDetailView) {
+        current_page = currentIndex / max(1, bleDevicesPerPage());
+        listStartIndex = current_page * bleDevicesPerPage();
+        fullScreenUpdate = (current_page != oldPage);
+      } else {
+        fullScreenUpdate = true;
+      }
+      screenNeedsUpdate = true;
+    }
+    lastButtonPress = currentMillis;
+  }
+
+  if (isButtonPressed(BTN_DOWN)) {
+    if (currentIndex < bleResults.getCount() - 1) {
+      currentIndex++;
+      delay(200);
+      if (!isDetailView) {
+        current_page = currentIndex / max(1, bleDevicesPerPage());
+        listStartIndex = current_page * bleDevicesPerPage();
+        fullScreenUpdate = (current_page != oldPage);
+      } else {
+        fullScreenUpdate = true;
+      }
+      screenNeedsUpdate = true;
+    }
+    lastButtonPress = currentMillis;
+  }
+
+  if (isButtonPressed(BTN_RIGHT)) {
+    delay(200);
+    if (!isScanning) {
+      isDetailView = !isDetailView;
+      screenNeedsUpdate = true;
+      fullScreenUpdate = true;
+    }
+    lastButtonPress = currentMillis;
+  }
+
+  if (isButtonPressed(BTN_LEFT)) {
+    delay(200);
+    if (isDetailView) {
+      isDetailView = false;
+      fullScreenUpdate = true;
+    } else if (!isScanning) {
+      startBLEScan();
+      fullScreenUpdate = true;
+    }
+    screenNeedsUpdate = true;
+    lastButtonPress = currentMillis;
+  }
+}
+
+void updateBLEList() {
+  int deviceCount = bleResults.getCount();
+  tft.setTextSize(1);
+
+  if (deviceCount <= 0) {
+    bleScanClearBody();
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("No devices found.");
+    tft.setCursor(10, LIST_HEADER_Y + 12);
+    tft.println("Press Rescan.");
+    drawTabBar("Rescan", false, "Prev", true, "Next", true);
+    return;
+  }
+
+  const int totalPages = (deviceCount + bleDevicesPerPage() - 1) / bleDevicesPerPage();
+  if (current_page < 0) current_page = 0;
+  if (current_page > totalPages - 1) current_page = max(0, totalPages - 1);
+  listStartIndex = current_page * bleDevicesPerPage();
+
+  static int last_rendered_page = -1;
+  static int last_rendered_index = -1;
+
+  auto drawRow = [&](int idx, bool selected) {
+    if (idx < 0 || idx >= deviceCount) return;
+    if (idx < listStartIndex || idx >= listStartIndex + bleDevicesPerPage()) return;
+    const int row = idx - listStartIndex;
+    const int y = LIST_FIRST_ROW_Y + row * LIST_ROW_H;
+
+    // Clear only this row (avoid overlapping next row).
+    tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+    BLEAdvertisedDevice device = bleResults.getDevice(idx);
+    String name = device.getName().length() > 0 ? device.getName().c_str() : "Unknown";
+    if (name.length() > 22) name = name.substring(0, 22) + "...";
+
+    tft.setCursor(10, y);
+    tft.setTextColor(selected ? ORANGE : WHITE);
+    tft.print(selected ? "> " : "  ");
+    tft.println(name);
+  };
+
+  const bool pageChanged = (current_page != last_rendered_page);
+  const bool needFull = fullScreenUpdate || pageChanged || (last_rendered_index < 0);
+
+  if (needFull) {
+    bleScanClearBody();
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("Devices:");
+
+    char page_buf[20];
+    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", current_page + 1, totalPages);
+    tft.setCursor(180, LIST_HEADER_Y);
+    tft.setTextColor(GREEN);
+    tft.println(page_buf);
+
+    const int end_index = min(listStartIndex + bleDevicesPerPage(), deviceCount);
+    for (int i = listStartIndex; i < end_index; i++) {
+      drawRow(i, (i == currentIndex));
+    }
+
+    const bool prevDisabled = (current_page == 0);
+    const bool nextDisabled = ((current_page + 1) * bleDevicesPerPage() >= deviceCount);
+    drawTabBar("Rescan", false, "Prev", prevDisabled, "Next", nextDisabled);
+
+    last_rendered_page = current_page;
+    last_rendered_index = currentIndex;
+    return;
+  }
+
+  if (last_rendered_index != currentIndex) {
+    drawRow(last_rendered_index, false);
+    drawRow(currentIndex, true);
+    last_rendered_index = currentIndex;
+  }
+}
+
+void displayBLEDetails() {
+
+  bleScanClearBody();
+  tft.setTextSize(1);
+
+  const int deviceCount = bleResults.getCount();
+  if (deviceCount <= 0) {
+    isDetailView = false;
+    screenNeedsUpdate = true;
+    fullScreenUpdate = true;
+    return;
+  }
+  if (currentIndex < 0) currentIndex = 0;
+  if (currentIndex >= deviceCount) currentIndex = deviceCount - 1;
+
+  BLEAdvertisedDevice device = bleResults.getDevice(currentIndex);
+  String deviceName = device.getName().length() > 0 ? device.getName().c_str() : "Unknown Device";
+  String address = device.getAddress().toString().c_str();
+  int rssi = device.getRSSI();
+  int txPower = device.getTXPower();
+
+  tft.setTextColor(WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+
+  int y = 50;
+  tft.setCursor(10, y);
+  tft.print("Device: " + deviceName);
+  y += 20;
+  tft.setCursor(10, y);
+  tft.print("MAC: " + address);
+  y += 20;
+  tft.setCursor(10, y);
+  tft.print("RSSI: " + String(rssi) + " dBm");
+  y += 20;
+  tft.setCursor(10, y);
+  tft.print("Tx Power: " + String(txPower) + " dBm");
+
+  if (device.haveServiceUUID()) {
+    y += 20;
+    tft.setCursor(10, y);
+    tft.print("Service UUID: " + String(device.getServiceUUID().toString().c_str()));
+  } else {
+    y += 20;
+    tft.setCursor(10, y);
+    tft.print("No Service UUID");
+  }
+  if (device.haveManufacturerData()) {
+    String manufacturerData = String((char*)device.getManufacturerData().c_str());
+    y += 20;
+    tft.setCursor(10, y);
+    tft.print("Manufacturer: " + manufacturerData);
+  } else {
+    y += 20;
+    tft.setCursor(10, y);
+    tft.print("No Manufacturer Data");
+  }
+  if (device.haveServiceData()) {
+    String serviceData = String((char*)device.getServiceData().c_str());
+    y += 30;
+    tft.setCursor(10, y);
+    tft.print("Service Data: " + serviceData);
+  } else {
+    y += 30;
+    tft.setCursor(10, y);
+    tft.print("No Service Data");
+  }
+
+  drawTabBar("Rescan", false, "", true, "Back", false);
+}
+
+void runUI() {
+
+  static int iconY = STATUS_BAR_Y_OFFSET;
+
+  if (!uiDrawn) {
+    tft.drawFastHLine(0, 19, 240, UI_LINE);
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
+    if (animationState == 1) {
+      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      animationState = 2;
+
+      switch (activeIcon) {
+        case 0:
+          if (!isScanning) {
+            startBLEScan();
+          }
+          break;
+        case 1:
+           feature_exit_requested = true;
+          break;
+      }
+    } else if (animationState == 2) {
+      animationState = 0;
+      activeIcon = -1;
+    }
+    lastAnimationTime = millis();
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  const unsigned long touchCheckInterval = 120;
+  static uint32_t lastTouchActionMs = 0;
+
+  if (millis() - lastTouchCheck >= touchCheckInterval) {
+  int x, y;
+  if (feature_active && readTouchXY(x, y)) {
+      const uint32_t nowMs = millis();
+      if (nowMs - lastTouchActionMs < 250) {
+        lastTouchCheck = millis();
+        return;
+      }
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+              animationState = 1;
+              activeIcon = i;
+              lastAnimationTime = millis();
+              lastTouchActionMs = nowMs;
+            }
+            break;
+          }
+        }
+      } else if (!isScanning) {
+        const int deviceCount = bleResults.getCount();
+
+        if (!featureHasTouchNavBar() && y >= 290 && y <= 320) {
+          const bool prevDisabled = (current_page == 0);
+          const bool nextDisabled = ((current_page + 1) * bleDevicesPerPage() >= deviceCount);
+
+          if (x >= 0 && x <= 57) {
+            drawButton(0, 304, 57, 16, "Rescan", true, false);
+            delay(50);
+            startBLEScan();
+            lastTouchActionMs = nowMs;
+          } else if (x >= 117 && x <= 179 && !isDetailView && !prevDisabled) {
+            drawButton(117, 304, 57, 16, "Prev", true, false);
+            current_page--;
+            if (current_page < 0) current_page = 0;
+            currentIndex = current_page * bleDevicesPerPage();
+            listStartIndex = current_page * bleDevicesPerPage();
+            screenNeedsUpdate = true;
+            fullScreenUpdate = true;
+            lastTouchActionMs = nowMs;
+          } else if (x >= 177 && x <= 240) {
+            if (isDetailView) {
+              drawButton(177, 304, 57, 16, "Back", true, false);
+              isDetailView = false;
+              screenNeedsUpdate = true;
+              fullScreenUpdate = true;
+              lastTouchActionMs = nowMs;
+            } else if (!nextDisabled) {
+              drawButton(177, 304, 57, 16, "Next", true, false);
+              current_page++;
+              currentIndex = current_page * bleDevicesPerPage();
+              listStartIndex = current_page * bleDevicesPerPage();
+              screenNeedsUpdate = true;
+              fullScreenUpdate = true;
+              lastTouchActionMs = nowMs;
+            }
+          }
+        } else if (!isDetailView) {
+          const int listMaxY = LIST_FIRST_ROW_Y + (bleDevicesPerPage() * LIST_ROW_H);
+          if (deviceCount > 0 && y >= LIST_FIRST_ROW_Y && y < listMaxY) {
+            const int row = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
+            const int idx = (current_page * bleDevicesPerPage()) + row;
+            if (idx >= 0 && idx < deviceCount) {
+              currentIndex = idx;
+              isDetailView = true;
+              screenNeedsUpdate = true;
+              fullScreenUpdate = true;
+              lastTouchActionMs = nowMs;
+            }
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+void bleScanSetup() {
+  BleSniffer::exit();
+  delay(100);
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  bleScanUpdateNavLabels();
+  bleClearBody(TFT_BLACK);
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  redrawTouchButtonBar();
+
+  uiDrawn = false;
+  runUI();
+
+  setupTouchscreen();
+
+#if HAS_PCF8574_BUTTONS
+  pcf.pinMode(BTN_UP, INPUT_PULLUP);
+  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
+  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
+#endif
+
+  ensureBleInit();
+
+  // With auto BLE scan off, cached bleResults are not updated — only reuse when background scan is on.
+  if (settings().autoBleScan && bgHasResults && bleResults.getCount() > 0) {
+    current_page = 0;
+    currentIndex = 0;
+    listStartIndex = 0;
+    isDetailView = false;
+    screenNeedsUpdate = true;
+    fullScreenUpdate = true;
+    updateBLEList();
+  } else {
+    startBLEScan();
+  }
+
+  redrawTouchButtonBar();
+}
+
+void bleScanLoop() {
+
+  if (feature_active && isButtonPressed(BTN_SELECT)) {
+    feature_exit_requested = true;
+    return;
+  }
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  handleButtons();
+
+  runUI();
+  updateStatusBar();
+
+  if (screenNeedsUpdate) {
+    screenNeedsUpdate = false;
+    if (isScanning) {
+      displayScanning();
+    } else if (!isDetailView) {
+      updateBLEList();
+    } else {
+      displayBLEDetails();
+    }
+    if (fullScreenUpdate) fullScreenUpdate = false;
+  }
+}
+
+void startBackgroundScanner() {
+  if (bgBleScanTaskHandle != nullptr) return;
+  xTaskCreatePinnedToCore(
+    bgBleScanTask,
+    "bgBleScan",
+    4096,
+    nullptr,
+    1,
+    &bgBleScanTaskHandle,
+    0
+  );
+}
+
+int getLastCount() {
+
+  if (!settings().autoBleScan) return 0;
+  return bleResults.getCount();
+}
+
+void exit() {
+  fgBleScanInProgress = false;
+  if (bgBleScanRunning) {
+    stopBgBleScanIfRunning();
+  }
+  if (isScanning && bleScan) {
+    bleScan->stop();
+    isScanning = false;
+  }
+}
+}
+
+namespace Scanner {
+
+#define CE  14
+#define CSN 21
+
+#define CHANNELS  128
+int channel[CHANNELS];
+
+#define N 128
+uint8_t values[N];
+
+static bool uiDrawn = false;
+
+static constexpr uint16_t SCAN_SWEEPS        = 25;
+static constexpr uint16_t DISPLAY_SWEEPS     = 10;
+static constexpr uint16_t RX_SETTLE_US       = 100;
+static constexpr uint16_t RPD_DWELL_US       = 50;
+static constexpr uint32_t UI_THROTTLE_MS     = 35;
+static constexpr uint16_t BUTTON_POLL_STRIDE = 8;
+
+#define _NRF24_CONFIG   0x00
+#define _NRF24_EN_AA    0x01
+#define _NRF24_RF_CH    0x05
+#define _NRF24_RF_SETUP 0x06
+#define _NRF24_RPD      0x09
+
+int backgroundNoise[CHANNELS] = {0};
+
+volatile bool scanning = true;
+
+static constexpr int kScannerGraphTop = 190;
+static constexpr int kScannerLogBottom = kScannerGraphTop - 6;
+static constexpr int kScannerToolbarBottom = 36;
+static constexpr int kScannerToolbarGap = 8;
+static constexpr int kScannerBoxPad = 4;
+static constexpr int kScannerBoxHeaderH = 15;
+static constexpr int kScannerStatusY = kScannerToolbarBottom + kScannerToolbarGap;
+static constexpr int kScannerGraphMarginX = 6;
+static constexpr int kScannerBarColGap = 10;
+static constexpr int kScannerBarsPerCol = 64;
+static constexpr int kScannerStatusLineCount = 6;
+static constexpr int kScannerStatusTextY = kScannerStatusY + kScannerBoxHeaderH;
+static constexpr int kScannerStatusBoxH = 91;
+static constexpr int kScannerLogGap = 4;
+static constexpr int kScannerLogBoxH = 49;
+static constexpr int kScannerLogBoxTop = kScannerStatusY + kScannerStatusBoxH + kScannerLogGap;
+static constexpr int kScannerLogStartY = kScannerLogBoxTop + kScannerBoxHeaderH;
+static constexpr int kScannerLogEndY = kScannerLogBoxTop + kScannerLogBoxH - 2;
+
+#define SCREEN_HEIGHT 180
+#define LINE_HEIGHT 12
+#define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
+
+String Buffer[MAX_LINES];
+uint16_t Buffercolor[MAX_LINES];
+int Index = 0;
+
+bool isSelectButtonPressed() {
+  return isButtonPressed(BTN_SELECT);
+}
+
+byte getRegister(byte r) {
+  byte c;
+  digitalWrite(CSN, LOW);
+  SPI.transfer(r & 0x1F);
+  c = SPI.transfer(0);
+  digitalWrite(CSN, HIGH);
+  return c;
+}
+
+bool carrierDetected() {
+  return getRegister(_NRF24_RPD) & 0x01;
+}
+
+void setRegister(byte r, byte v) {
+  digitalWrite(CSN, LOW);
+  SPI.transfer((r & 0x1F) | 0x20);
+  SPI.transfer(v);
+  digitalWrite(CSN, HIGH);
+}
+
+void setChannel(uint8_t channel) {
+  setRegister(_NRF24_RF_CH, channel);
+}
+
+void powerUp() {
+  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x02);
+  delayMicroseconds(130);
+}
+
+void powerDown() {
+  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) & ~0x02);
+}
+
+void enable() {
+  digitalWrite(CE, HIGH);
+}
+
+void disable() {
+  digitalWrite(CE, LOW);
+}
+
+void setRX() {
+  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x01);
+  enable();
+  delayMicroseconds(100);
+}
+
+void scroll() {
+  for (int i = 3; i < MAX_LINES - 1; i++) {
+    Buffer[i] = Buffer[i + 1];
+    Buffercolor[i] = Buffercolor[i + 1];
+  }
+}
+
+void Print(String text, uint16_t color, bool extraSpace = false) {
+  const bool scrolled = (Index >= MAX_LINES - 1);
+  if (scrolled) {
+    scroll();
+    Index = MAX_LINES - 1;
+  }
+
+  const int firstNewIndex = Index;
+  Buffer[Index] = text;
+  Buffercolor[Index] = color;
+  Index++;
+
+  if (extraSpace && Index < MAX_LINES) {
+    Buffer[Index] = "";
+    Buffercolor[Index] = WHITE;
+    Index++;
+  }
+
+  static auto redrawLogLine = [](int bufIndex) {
+    if (bufIndex < 3) {
+      return;
+    }
+    const int yPos = kScannerLogStartY + (bufIndex - 3) * LINE_HEIGHT;
+    if (yPos + LINE_HEIGHT > kScannerLogEndY) {
+      return;
+    }
+    tft.fillRect(8, yPos, tft.width() - 16, LINE_HEIGHT, TFT_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(Buffercolor[bufIndex], TFT_BLACK);
+    tft.setCursor(8, yPos);
+    tft.print(Buffer[bufIndex]);
+  };
+
+  if (scrolled) {
+    for (int i = 3; i < Index; i++) {
+      redrawLogLine(i);
+    }
+    return;
+  }
+
+  for (int i = firstNewIndex; i < Index; i++) {
+    redrawLogLine(i);
+  }
+}
+
+static unsigned long s_scannerLastBtnMs = 0;
+static constexpr unsigned long kScannerNavDebounceMs = 80;
+
+void calibrateBackgroundNoise();
+void scan();
+static String scannerChannelGHzText(int ch);
+static String scannerBandHint(int ch);
+
+static void scannerWaitNavRelease(int pin) {
+  const uint32_t t0 = millis();
+  while (isTouchNavButtonPressed(pin) && millis() - t0 < 400) {
+    delay(5);
+  }
+  delay(30);
+}
+
+void scannerHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - s_scannerLastBtnMs < kScannerNavDebounceMs) {
+    return;
+  }
+
+  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    calibrateBackgroundNoise();
+    s_scannerLastBtnMs = millis();
+    scannerWaitNavRelease(BTN_LEFT);
+    return;
+  }
+  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+    scan();
+    s_scannerLastBtnMs = millis();
+    scannerWaitNavRelease(BTN_DOWN);
+  }
+}
+
+static void scannerPollNavButtons() {
+  maintainTouchNavBar();
+  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    feature_exit_requested = true;
+    scanning = false;
+    return;
+  }
+  scannerHandleNavButtons();
+}
+
+void calibrateBackgroundNoise() {
+
+  Print("[!] Calibrating noise floor...", UI_TEXT, false);
+
+  for (int i = 0; i < 2; i++) {
+    disable();
+    for (int j = 0; j < 50; j++) {
+      for (int i = 0; i < CHANNELS; i++) {
+        if ((i % BUTTON_POLL_STRIDE) == 0) {
+          scannerPollNavButtons();
+        }
+
+        setRegister(_NRF24_RF_CH, (uint8_t)i);
+        enable();
+        delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
+        disable();
+        if (carrierDetected()) channel[i]++;
+      }
+    }
+    for (int j = 0; j < CHANNELS; j++) {
+      backgroundNoise[j] += channel[j];
+
+    }
+  }
+
+  int maxNoiseCh = 0;
+  int maxNoise = 0;
+  for (int i = 0; i < CHANNELS; i++) {
+    backgroundNoise[i] /= 5;
+    if (backgroundNoise[i] > maxNoise) {
+      maxNoise = backgroundNoise[i];
+      maxNoiseCh = i;
+    }
+  }
+
+  Print("[+] Calibrate done  Ch" + String(maxNoiseCh) + " " + scannerChannelGHzText(maxNoiseCh) + "GHz", UI_WARN, false);
+}
+
+void scan() {
+  Print("[!] Scan refresh...", UI_TEXT, false);
+  memset(channel, 0, sizeof(channel));
+  disable();
+  for (int j = 0; j < 50; j++) {
+    for (int i = 0; i < CHANNELS; i++) {
+      if ((i % BUTTON_POLL_STRIDE) == 0) {
+        scannerPollNavButtons();
+      }
+
+      setRegister(_NRF24_RF_CH, (uint8_t)i);
+      enable();
+      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
+      disable();
+      if (carrierDetected()) channel[i]++;
+    }
+  }
+
+  int peakCh = 0;
+  int peakHits = 0;
+  int active = 0;
+  for (int i = 0; i < CHANNELS; i++) {
+    if (channel[i] > 0) {
+      active++;
+    }
+    if (channel[i] > peakHits) {
+      peakHits = channel[i];
+      peakCh = i;
+    }
+  }
+  if (peakHits > 0) {
+    Print("[+] Scan done  " + String(active) + " hit(s)  peak Ch" + String(peakCh), UI_WARN, false);
+  } else {
+    Print("[*] Scan done  no carriers", UI_DIM_TEXT, false);
+  }
+}
+
+void runUI() {
+#define SCREEN_WIDTH  240
+#define SCREEN_HEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 3
+
+  static int iconX[ICON_NUM] = {170, 210, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+
+  static const unsigned char* icons[ICON_NUM] = {
+    bitmap_icon_undo,
+    bitmap_icon_start,
+    bitmap_icon_go_back
+  };
+
+  if (!uiDrawn) {
+
+    tft.fillRect(0, 20, 160, 16, DARK_GRAY);
+    tft.setTextColor(UI_TEXT, DARK_GRAY);
+    tft.setCursor(35, 24);
+    tft.print("2.4GHz Scanner");
+
+    tft.drawFastHLine(0, 19, 240, UI_LINE);
+    tft.fillRect(160, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, UI_ICON);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
+    if (animationState == 1) {
+      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, UI_ICON);
+      animationState = 2;
+
+      switch (activeIcon) {
+        case 0: calibrateBackgroundNoise(); break;
+        case 1: scan(); break;
+      }
+    } else if (animationState == 2) {
+      animationState = 0;
+      activeIcon = -1;
+    }
+    lastAnimationTime = millis();
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  const unsigned long touchCheckInterval = 50;
+
+  if (millis() - lastTouchCheck >= touchCheckInterval) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+
+              if (i == 2) {
+                feature_exit_requested = true;
+
+                scanning = false;
+              } else {
+
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+void scanChannels() {
+  disable();
+  static uint32_t lastUI = 0;
+  for (int j = 0; j < (int)SCAN_SWEEPS && scanning; j++) {
+    for (int i = 0; i < CHANNELS && scanning; i++) {
+
+      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+        scanning = false;
+        Print("Scan interrupted by user", UI_WARN, true);
+        return;
+      }
+      if (feature_exit_requested || featureExitButtonPressed()) {
+        scanning = false;
+        return;
+      }
+
+      setRegister(_NRF24_RF_CH, (uint8_t)i);
+      enable();
+      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
+      disable();
+      if (carrierDetected()) channel[i]++;
+
+      uint32_t now = millis();
+      if (now - lastUI >= UI_THROTTLE_MS) {
+        runUI();
+        scannerPollNavButtons();
+        lastUI = now;
+        delay(0);
+        if (feature_exit_requested || featureExitButtonPressed()) {
+          scanning = false;
+          return;
+        }
+      } else if ((i % BUTTON_POLL_STRIDE) == 0) {
+        scannerPollNavButtons();
+      }
+    }
+  }
+}
+
+void outputChannels() {
+  int norm = 0;
+  for (int i = 0; i < CHANNELS && scanning; i++) {
+    if (channel[i] > norm) norm = channel[i];
+  }
+  static uint32_t lastUI = 0;
+  for (int i = 0; i < CHANNELS && scanning; i++) {
+    if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+      scanning = false;
+      Print("Output interrupted by user", UI_WARN, true);
+      return;
+    }
+    int strength = (norm != 0) ? (channel[i] * 10) / norm : 0;
+    (void)strength;
+    channel[i] = 0;
+    uint32_t now = millis();
+    if (now - lastUI >= UI_THROTTLE_MS) {
+      runUI();
+      scannerPollNavButtons();
+      lastUI = now;
+      delay(0);
+    } else if ((i % BUTTON_POLL_STRIDE) == 0) {
+      scannerPollNavButtons();
+    }
+  }
+}
+
+struct ScannerPlotLayout {
+  int graphTop = 0;
+  int axisX = 10;
+  int plotRight = 0;
+  int plotTop = 0;
+  int plotBottom = 0;
+  int plotHeight = 0;
+  int plotWidth = 0;
+  int maxBarHeight = 0;
+  bool valid = false;
+};
+
+static ScannerPlotLayout s_plot;
+static uint8_t s_smoothValues[N];
+static uint8_t s_prevBarPx[N];
+static bool s_graphChromeDrawn = false;
+static int s_lastPeakCh = -1;
+static uint8_t s_lastPeakVal = 0;
+static int s_peakMarkerX = -1;
+static int s_statusPeakCh = -1;
+static uint8_t s_statusPeakVal = 0;
+static int s_statusActive = -1;
+static int s_statusPctBucket = -1;
+static uint32_t s_lastStatusDrawMs = 0;
+static String s_statusLineText[kScannerStatusLineCount];
+static uint16_t s_statusLineColor[kScannerStatusLineCount];
+static bool s_statusStaticDrawn = false;
+
+
+static int scannerBarCol0X() {
+  const int barsSpan = (kScannerBarsPerCol * 2) + kScannerBarColGap;
+  return s_plot.axisX + max(0, (s_plot.plotWidth - barsSpan) / 2);
+}
+
+static int scannerBarX(int ch) {
+  const int col0 = scannerBarCol0X();
+  if (ch < kScannerBarsPerCol) {
+    return col0 + ch;
+  }
+  return col0 + kScannerBarsPerCol + kScannerBarColGap + (ch - kScannerBarsPerCol);
+}
+
+static constexpr int kScannerGridDivisions = 4;
+static constexpr int kScannerMinBarPx = 5;
+
+static int scannerHorizGridY(int lineIndex) {
+  return s_plot.plotTop + ((s_plot.plotHeight * lineIndex) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
+}
+
+static void scannerDrawHorizGridLines() {
+  for (int g = 1; g < kScannerGridDivisions; g++) {
+    const int gy = scannerHorizGridY(g);
+    tft.drawFastHLine(s_plot.axisX + 1, gy, s_plot.plotWidth - 2, 0x2945);
+  }
+}
+
+static void scannerDrawVertGridLines() {
+  for (int v = 1; v < kScannerGridDivisions; v++) {
+    const int vx = s_plot.axisX + ((s_plot.plotWidth * v) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
+    tft.drawFastVLine(vx, s_plot.plotTop + 1, s_plot.plotHeight - 2, 0x2945);
+  }
+}
+
+static void scannerResetGraphState() {
+  s_graphChromeDrawn = false;
+  s_plot.valid = false;
+  memset(s_smoothValues, 0, sizeof(s_smoothValues));
+  memset(s_prevBarPx, 0, sizeof(s_prevBarPx));
+  memset(values, 0, sizeof(values));
+  s_lastPeakCh = -1;
+  s_lastPeakVal = 0;
+  s_peakMarkerX = -1;
+  s_statusPeakCh = -1;
+  s_statusPeakVal = 0;
+  s_statusActive = -1;
+  s_statusPctBucket = -1;
+  s_lastStatusDrawMs = 0;
+  s_statusStaticDrawn = false;
+  for (int i = 0; i < kScannerStatusLineCount; i++) {
+    s_statusLineText[i] = "";
+    s_statusLineColor[i] = 0;
+  }
+}
+
+static void scannerRestoreColumnDecor(int x) {
+  if (!s_plot.valid) {
+    return;
+  }
+  for (int g = 1; g < kScannerGridDivisions; g++) {
+    const int gy = scannerHorizGridY(g);
+    if (gy > s_plot.plotTop && gy < s_plot.plotBottom) {
+      tft.drawPixel(x, gy, 0x2945);
+    }
+  }
+  for (int v = 1; v < kScannerGridDivisions; v++) {
+    const int vx = s_plot.axisX + ((s_plot.plotWidth * v) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
+    if (vx == x) {
+      tft.drawFastVLine(vx, s_plot.plotTop + 1, s_plot.plotHeight - 2, 0x2945);
+      break;
+    }
+  }
+}
+
+static void scannerEnsurePlotLayout() {
+  const int screenW = tft.width();
+  s_plot.graphTop = kScannerGraphTop;
+  s_plot.axisX = kScannerGraphMarginX;
+  s_plot.plotRight = screenW - kScannerGraphMarginX;
+  s_plot.plotTop = s_plot.graphTop + 12;
+  s_plot.plotBottom = bleContentBottom() - 13;
+  s_plot.plotHeight = s_plot.plotBottom - s_plot.plotTop;
+  s_plot.plotWidth = s_plot.plotRight - s_plot.axisX;
+  s_plot.maxBarHeight = s_plot.plotHeight;
+  s_plot.valid = s_plot.plotWidth >= 32 && s_plot.plotHeight >= 10;
+}
+
+static void scannerDrawGraphChrome() {
+  scannerEnsurePlotLayout();
+  if (!s_plot.valid) {
+    return;
+  }
+
+  const int screenW = tft.width();
+  const int graphBottom = bleContentBottom() - 2;
+  tft.fillRect(0, kScannerLogBottom, screenW, graphBottom - kScannerLogBottom + 2, TFT_BLACK);
+  tft.fillRect(s_plot.axisX, s_plot.plotTop, s_plot.plotWidth, s_plot.plotHeight, 0x0842);
+
+  scannerDrawHorizGridLines();
+  scannerDrawVertGridLines();
+
+  tft.drawRect(s_plot.axisX, s_plot.plotTop, s_plot.plotWidth, s_plot.plotHeight, UI_LINE);
+  tft.drawLine(s_plot.axisX, s_plot.plotTop, s_plot.axisX, s_plot.plotBottom, WHITE);
+  tft.drawLine(s_plot.axisX, s_plot.plotBottom, s_plot.plotRight, s_plot.plotBottom, WHITE);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("2.4 GHz Spectrum", (screenW - 96) / 2, s_plot.graphTop + 2);
+
+  const int labelY = s_plot.plotBottom + 2;
+  tft.drawString("2.40", s_plot.axisX + 2, labelY);
+  tft.drawString("2.45", s_plot.axisX + s_plot.plotWidth / 3 - 8, labelY);
+  tft.drawString("2.50", s_plot.axisX + (s_plot.plotWidth * 2) / 3 - 8, labelY);
+  tft.drawString("2.52G", s_plot.plotRight - 30, labelY);
+
+  s_graphChromeDrawn = true;
+  memset(s_prevBarPx, 0, sizeof(s_prevBarPx));
+  s_lastPeakCh = -1;
+  s_lastPeakVal = 0;
+  s_peakMarkerX = -1;
+}
+
+static void scannerFindPeak(const uint8_t* vals, int count, int& peakCh, uint8_t& peakVal) {
+  peakCh = 0;
+  peakVal = 0;
+  for (int i = 0; i < count; i++) {
+    if (vals[i] > peakVal) {
+      peakVal = vals[i];
+      peakCh = i;
+    }
+  }
+}
+
+static String scannerChannelGHzText(int ch) {
+  const uint16_t mhz = (uint16_t)(2400 + ch);
+  char buf[10];
+  snprintf(buf, sizeof(buf), "%u.%03u", mhz / 1000, mhz % 1000);
+  return String(buf);
+}
+
+static String scannerBandHint(int ch) {
+  if (ch == 2 || ch == 26 || ch == 80) {
+    return "BLE";
+  }
+  if (ch >= 10 && ch <= 15) {
+    return "WiFi Ch1";
+  }
+  if (ch >= 34 && ch <= 40) {
+    return "WiFi Ch6";
+  }
+  if (ch >= 59 && ch <= 65) {
+    return "WiFi Ch11";
+  }
+  if (ch >= 76 && ch <= 86) {
+    return "RC/Video";
+  }
+  return "ISM";
+}
+
+static String scannerChannelBandLine(int ch) {
+  return "Ch " + String(ch) + "  " + scannerBandHint(ch);
+}
+
+static String scannerFitStatusText(const String& text) {
+  const int maxWidth = tft.width() - 16;
+  tft.setTextSize(1);
+  if (tft.textWidth(text) <= maxWidth) {
+    return text;
+  }
+  String out = text;
+  while (out.length() > 1 && tft.textWidth(out + "...") > maxWidth) {
+    out.remove(out.length() - 1);
+  }
+  if (!out.isEmpty()) {
+    out += "...";
+  }
+  return out;
+}
+
+static int scannerCountActiveChannels(const uint8_t* vals, int count) {
+  int active = 0;
+  for (int i = 0; i < count; i++) {
+    if (vals[i] >= 3) {
+      active++;
+    }
+  }
+  return active;
+}
+
+static void scannerDrawStatusLine(int line, const String& text, uint16_t color) {
+  const int y = kScannerStatusTextY + line * LINE_HEIGHT;
+  const String fitted = scannerFitStatusText(text);
+  tft.fillRect(8, y, tft.width() - 16, LINE_HEIGHT, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(8, y);
+  tft.print(fitted);
+}
+
+static void scannerDrawStatusLineIfChanged(int line, const String& text, uint16_t color) {
+  if (line < 0 || line >= kScannerStatusLineCount) {
+    return;
+  }
+  if (s_statusLineText[line] == text && s_statusLineColor[line] == color) {
+    return;
+  }
+  s_statusLineText[line] = text;
+  s_statusLineColor[line] = color;
+  scannerDrawStatusLine(line, text, color);
+}
+
+static void scannerDrawTextBoxes() {
+  tft.fillRect(0, kScannerStatusY - 2, tft.width(), kScannerLogBottom - kScannerStatusY + 2, TFT_BLACK);
+  tft.drawFastHLine(0, 19, tft.width(), UI_LINE);
+  tft.drawRoundRect(4, kScannerStatusY, tft.width() - 8, kScannerStatusBoxH, 3, UI_LINE);
+  tft.drawRoundRect(4, kScannerLogBoxTop, tft.width() - 8, kScannerLogBoxH, 3, UI_LINE);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.drawString("RF Status", 8, kScannerStatusY + 3);
+  tft.drawString("Activity", 8, kScannerLogBoxTop + 3);
+}
+
+static void scannerDrawStaticStatusLines() {
+  if (s_statusStaticDrawn) {
+    return;
+  }
+  scannerDrawStatusLineIfChanged(4, "Range: 2.4-2.528 GHz  128 ch", UI_DIM_TEXT);
+  scannerDrawStatusLineIfChanged(5, "State: Monitoring", UI_DIM_TEXT);
+  s_statusStaticDrawn = true;
+}
+
+static void scannerUpdateStatusPanel(const uint8_t* vals, int count) {
+  int peakCh = 0;
+  uint8_t peakVal = 0;
+  scannerFindPeak(vals, count, peakCh, peakVal);
+  const int active = scannerCountActiveChannels(vals, count);
+
+  const int pct = peakVal > 0 ? min(100, ((int)peakVal * 100) / 64) : 0;
+  const int pctBucket = pct / 3;
+  const uint32_t now = millis();
+  if (peakCh == s_statusPeakCh && pctBucket == s_statusPctBucket &&
+      active == s_statusActive && now - s_lastStatusDrawMs < 200) {
+    return;
+  }
+  s_statusPeakCh = peakCh;
+  s_statusPeakVal = peakVal;
+  s_statusActive = active;
+  s_statusPctBucket = pctBucket;
+  s_lastStatusDrawMs = now;
+
+  scannerDrawStaticStatusLines();
+
+  if (peakVal == 0) {
+    scannerDrawStatusLineIfChanged(0, "Peak: none", UI_DIM_TEXT);
+    scannerDrawStatusLineIfChanged(1, "Ch --  --", UI_DIM_TEXT);
+    scannerDrawStatusLineIfChanged(2, "Strength: 0%", UI_DIM_TEXT);
+  } else {
+    scannerDrawStatusLineIfChanged(0, "Peak: " + scannerChannelGHzText(peakCh) + " GHz", UI_TEXT);
+    scannerDrawStatusLineIfChanged(1, scannerChannelBandLine(peakCh), UI_TEXT);
+    scannerDrawStatusLineIfChanged(2, "Strength: " + String(pct) + "%", UI_TEXT);
+  }
+
+  scannerDrawStatusLineIfChanged(3, "Active: " + String(active) + " channel(s)", active > 0 ? UI_OK : UI_DIM_TEXT);
+}
+
+static void scannerClearPeakMarker() {
+  if (!s_plot.valid || s_peakMarkerX < 0) {
+    return;
+  }
+  tft.drawPixel(s_peakMarkerX, s_plot.plotTop + 1, 0x0842);
+  s_peakMarkerX = -1;
+}
+
+static void scannerUpdatePeakMarker(const uint8_t* vals, int count) {
+  if (!s_plot.valid) {
+    return;
+  }
+
+  int peakCh = 0;
+  uint8_t peakVal = 0;
+  scannerFindPeak(vals, count, peakCh, peakVal);
+
+  if (peakCh == s_lastPeakCh && peakVal == s_lastPeakVal) {
+    return;
+  }
+  s_lastPeakCh = peakCh;
+  s_lastPeakVal = peakVal;
+
+  scannerClearPeakMarker();
+  if (peakVal == 0) {
+    return;
+  }
+
+  const int markerX = scannerBarX(peakCh);
+  tft.drawPixel(markerX, s_plot.plotTop + 1, WHITE);
+  s_peakMarkerX = markerX;
+}
+
+static void scannerUpdateBarColumn(int ch, int newPx, int oldPx) {
+  if (!s_plot.valid) {
+    return;
+  }
+  const int x = scannerBarX(ch);
+  const uint16_t bg = 0x0842;
+
+  if (newPx < oldPx) {
+    tft.fillRect(x, s_plot.plotBottom - oldPx, 1, oldPx - newPx, bg);
+    scannerRestoreColumnDecor(x);
+  }
+  if (newPx > oldPx) {
+    tft.fillRect(x, s_plot.plotBottom - newPx, 1, newPx - oldPx, UI_WARN);
+  }
+  s_prevBarPx[ch] = (uint8_t)newPx;
+}
+
+static void scannerSmoothFrame(const uint8_t* frameHits, int count) {
+  for (int i = 0; i < count; i++) {
+    if (frameHits[i] > 0) {
+      int blended = (((int)s_smoothValues[i] * 3) + ((int)frameHits[i] * 5)) / 8;
+      if (blended < (int)frameHits[i]) {
+        blended = frameHits[i];
+      }
+      s_smoothValues[i] = (uint8_t)min(255, blended);
+    } else if (s_smoothValues[i] > 2) {
+      s_smoothValues[i] = (uint8_t)(((int)s_smoothValues[i] * 7) / 8);
+    } else if (s_smoothValues[i] > 0) {
+      s_smoothValues[i]--;
+    }
+  }
+}
+
+static int scannerValueToBarPx(uint8_t val, uint8_t peakVal) {
+  if (val == 0 || !s_plot.valid || s_plot.maxBarHeight <= 0) {
+    return 0;
+  }
+
+  const int maxH = s_plot.maxBarHeight;
+  if (peakVal == 0 || val >= peakVal) {
+    return min(maxH, max(kScannerMinBarPx, (int)val));
+  }
+
+  const int span = maxH - kScannerMinBarPx;
+  int scaled = kScannerMinBarPx + (span * (int)val) / (int)peakVal;
+  return min(maxH, max(kScannerMinBarPx, scaled));
+}
+
+static void scannerUpdateBars(const uint8_t* vals, int count) {
+  if (!s_graphChromeDrawn) {
+    scannerDrawGraphChrome();
+  }
+  if (!s_plot.valid) {
+    return;
+  }
+
+  int peakCh = 0;
+  uint8_t peakVal = 0;
+  scannerFindPeak(vals, count, peakCh, peakVal);
+
+  for (int i = 0; i < count; i++) {
+    const int newPx = scannerValueToBarPx(vals[i], peakVal);
+    const int oldPx = s_prevBarPx[i];
+    if (newPx != oldPx) {
+      scannerUpdateBarColumn(i, newPx, oldPx);
+    }
+  }
+}
+
+void display() {
+  if (!scanning) {
+    return;
+  }
+
+  uint8_t frameHits[N];
+  memset(frameHits, 0, sizeof(frameHits));
+
+  disable();
+  static uint32_t lastNavPoll = 0;
+  for (int pass = 0; pass < (int)DISPLAY_SWEEPS && scanning; ++pass) {
+    for (int i = 0; i < N && scanning; ++i) {
+      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+        scanning = false;
+        Print("Display interrupted by user", UI_WARN, true);
+        return;
+      }
+      if (feature_exit_requested || featureExitButtonPressed()) {
+        return;
+      }
+
+      setRegister(_NRF24_RF_CH, (uint8_t)i);
+      enable();
+      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
+      disable();
+      if (carrierDetected()) {
+        frameHits[i]++;
+      }
+
+      const uint32_t now = millis();
+      if (now - lastNavPoll >= UI_THROTTLE_MS) {
+        scannerPollNavButtons();
+        lastNavPoll = now;
+      } else if ((i % BUTTON_POLL_STRIDE) == 0) {
+        scannerPollNavButtons();
+      }
+    }
+  }
+
+  scannerSmoothFrame(frameHits, N);
+  scannerUpdateBars(s_smoothValues, N);
+  scannerUpdatePeakMarker(s_smoothValues, N);
+  scannerUpdateStatusPanel(s_smoothValues, N);
+}
+
+void scannerSetup() {
+  setTouchButtonInputEnabled(true);
+  bleSetScannerNavLabels();
+  bleClearBody(TFT_BLACK);
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  redrawTouchButtonBar();
+
+  uiDrawn = false;
+  scannerResetGraphState();
+  scannerDrawGraphChrome();
+
+  setupTouchscreen();
+
+  scannerDrawTextBoxes();
+  scannerDrawStatusLineIfChanged(0, "Peak: scanning...", UI_DIM_TEXT);
+  scannerDrawStatusLineIfChanged(1, "Ch --  --", UI_DIM_TEXT);
+  scannerDrawStatusLineIfChanged(2, "Strength: --", UI_DIM_TEXT);
+  scannerDrawStatusLineIfChanged(3, "Active: 0 channel(s)", UI_DIM_TEXT);
+  scannerDrawStaticStatusLines();
+  Print("[+] Scanner ready", UI_WARN, false);
+  redrawTouchButtonBar();
+
+  // Use unified SPI management - reconfigure for NRF24 Scanner
+  spiRelease();
+  delay(5);
+  spiInitForNRF24();
+
+  // Use board-defined pins for NRF24 (same as NRF24 module 1)
+  SPI.begin(CC1101_MISO, CC1101_MOSI, CC1101_SCK, CSN_PIN_1);
+  SPI.setDataMode(SPI_MODE0);
+  SPI.setFrequency(10000000);
+  SPI.setBitOrder(MSBFIRST);
+
+  pinMode(CE, OUTPUT);
+  pinMode(CSN, OUTPUT);
+
+  disable();
+  powerUp();
+
+  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x03);
+  delayMicroseconds(130);
+  setRegister(_NRF24_EN_AA, 0x0);
+  setRegister(_NRF24_RF_SETUP, 0x0F);
+
+  scanning = true;
+}
+
+void scannerLoop() {
+  scanning = true;
+  while (scanning) {
+
+    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+      feature_exit_requested = true;
+      scanning = false;
+      break;
+    }
+
+    scannerPollNavButtons();
+    runUI();
+    scanChannels();
+    outputChannels();
+    display();
+    delay(2);
+  }
+  
+  // Release SPI bus when leaving Scanner
+  spiRelease();
+}
+
+void exit() {
+  scanning = false;
+  // Power down NRF24 before releasing SPI
+  disable();
+  powerDown();
+  // Release SPI bus when leaving Scanner
+  spiRelease();
+}
+
+}  // namespace Scanner
+
+namespace ProtoKill {
+
+RF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
+RF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
+RF24 radio3(CE_PIN_3, CSN_PIN_3, 16000000);
+
+enum OperationMode { BLE_MODULE, Bluetooth_MODULE, WiFi_MODULE, VIDEO_TX_MODULE, RC_MODULE, USB_WIRELESS_MODULE, ZIGBEE_MODULE, NRF24_MODULE };
+OperationMode currentMode = WiFi_MODULE;
+
+bool jammerActive = false;
+
+const byte bluetooth_channels[] =        {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
+const byte ble_channels[] =              {2, 26, 80};
+const byte WiFi_channels[] =             {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+const byte usbWireless_channels[] =      {40, 50, 60};
+const byte videoTransmitter_channels[] = {70, 75, 80};
+const byte rc_channels[] =               {1, 3, 5, 7};
+const byte zigbee_channels[] =           {11, 15, 20, 25};
+const byte nrf24_channels[] =            {76, 78, 79};
+
+const byte BLE_channels[] = {2, 26, 80};
+byte channelGroup1[] = {2, 5, 8, 11};
+byte channelGroup2[] = {26, 29, 32, 35};
+byte channelGroup3[] = {80, 83, 86, 89};
+
+#define SCREEN_HEIGHT 320
+#define LINE_HEIGHT 12
+#define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
+
+String Buffer[MAX_LINES];
+uint16_t Buffercolor[MAX_LINES];
+int Index = 0;
+
+volatile bool modeChangeRequested = false;
+volatile bool modeChangeRequested1 = false;
+volatile bool jammerToggleRequested = false;
+
+static constexpr int kProkillLogTop = 48;
+
+static int prokillVisibleLines() {
+  return bleMaxLinesInZone(kProkillLogTop, LINE_HEIGHT);
+}
+
+static bool prokillLineFits(int yPos) {
+  return yPos + LINE_HEIGHT <= bleContentBottom();
+}
+
+static void prokillRedrawLogLine(int bufIndex) {
+  const int visibleLines = prokillVisibleLines();
+  if (bufIndex < 0 || bufIndex >= visibleLines) {
+    return;
+  }
+  const int yPos = (bufIndex * LINE_HEIGHT) + kProkillLogTop;
+  if (!prokillLineFits(yPos)) {
+    return;
+  }
+
+  tft.fillRect(5, yPos, tft.width() - 10, LINE_HEIGHT, TFT_BLACK);
+  tft.setTextColor(Buffercolor[bufIndex], TFT_BLACK);
+  tft.setCursor(5, yPos);
+  tft.print(Buffer[bufIndex]);
+}
+
+static void prokillRedrawAllLog() {
+  const int visibleLines = prokillVisibleLines();
+  for (int i = 0; i < Index && i < visibleLines; i++) {
+    prokillRedrawLogLine(i);
+  }
+}
+
+void Print(String text, uint16_t color, bool extraSpace = false) {
+  const int visibleLines = prokillVisibleLines();
+  const bool scrolled = (Index >= visibleLines);
+  if (scrolled) {
+    for (int i = 0; i < visibleLines - 1; i++) {
+      Buffer[i] = Buffer[i + 1];
+      Buffercolor[i] = Buffercolor[i + 1];
+    }
+    Index = visibleLines - 1;
+  }
+
+  const int firstNewIndex = Index;
+  Buffer[Index] = text;
+  Buffercolor[Index] = color;
+  Index++;
+
+  if (extraSpace && Index < visibleLines) {
+    Buffer[Index] = "";
+    Buffercolor[Index] = WHITE;
+    Index++;
+  }
+
+  if (scrolled) {
+    prokillRedrawAllLog();
+    return;
+  }
+
+  for (int i = firstNewIndex; i < Index; i++) {
+    prokillRedrawLogLine(i);
+  }
+}
+
+void prokillHandleNavButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_UP)) {
+    jammerToggleRequested = true;
+    bleWaitButtonRelease(BTN_UP);
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    modeChangeRequested = true;
+    bleWaitButtonRelease(BTN_RIGHT);
+  }
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    modeChangeRequested1 = true;
+    bleWaitButtonRelease(BTN_LEFT);
+  }
+}
+
+void configureRadio(RF24 &radio, const byte* channels, size_t size) {
+  radio.setAutoAck(false);
+  radio.stopListening();
+  radio.setRetries(0, 0);
+  radio.setPALevel(RF24_PA_MAX, true);
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_DISABLED);
+  // Don't start carrier here - it causes overheating when just entering menu
+}
+
+void initializeRadiosMultiMode() {
+  bool radio1Active = false;
+  bool radio2Active = false;
+  bool radio3Active = false;
+
+  if (radio1.begin()) {
+    configureRadio(radio1, channelGroup1, sizeof(channelGroup1));
+    radio1Active = true;
+  }
+  if (radio2.begin()) {
+    configureRadio(radio2, channelGroup2, sizeof(channelGroup2));
+    radio2Active = true;
+  }
+  if (radio3.begin()) {
+    configureRadio(radio3, channelGroup3, sizeof(channelGroup3));
+    radio3Active = true;
+  }
+}
+
+void initializeRadios() {
+  if (jammerActive) {
+    initializeRadiosMultiMode();
+
+  } else {
+    radio1.powerDown();
+    radio2.powerDown();
+    radio3.powerDown();
+  }
+}
+
+void updateTFT() {
+  tft.fillRect(0, 19, 240, 16, DARK_GRAY);
+
+  tft.setTextSize(1);
+
+  struct ButtonGuide {
+    const char* label;
+    const unsigned char* icon;
+  };
+
+  ButtonGuide buttons[] = {
+    {jammerActive ? "[ON]" : "[OFF]", bitmap_icon_UP},
+    {"MODE-", bitmap_icon_LEFT},
+    {"MODE+", bitmap_icon_RIGHT}
+  };
+
+  int xPos = 20;
+  int yPosIcon = 19;
+  int spacing = 75;
+
+  for (int i = 0; i < 3; i++) {
+    tft.drawBitmap(xPos, yPosIcon, buttons[i].icon, 16, 16, UI_ICON);
+
+    tft.setTextColor(UI_TEXT, DARK_GRAY);
+    tft.setCursor(xPos + 18, yPosIcon + 4);
+    tft.print(buttons[i].label);
+
+    if (i < 2) {
+      int sepX = xPos + spacing - 8;
+      tft.drawFastVLine(sepX, 22, 12, LIGHT_GRAY);
+    }
+
+    xPos += spacing;
+  }
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  tft.drawFastHLine(0, 35, 240, UI_LINE);
+
+}
+
+void printModeChange(OperationMode mode) {
+  String modeText = "[+] Mode changed to: ";
+  switch (mode) {
+    case BLE_MODULE:          modeText += "BLE";       break;
+    case Bluetooth_MODULE:    modeText += "Bluetooth"; break;
+    case WiFi_MODULE:         modeText += "WIFI";      break;
+    case USB_WIRELESS_MODULE: modeText += "USB";       break;
+    case VIDEO_TX_MODULE:     modeText += "Video";     break;
+    case RC_MODULE:           modeText += "RC";        break;
+    case ZIGBEE_MODULE:       modeText += "ZIGBEE";    break;
+    case NRF24_MODULE:        modeText += "NRF24";     break;
+    default: modeText                  += "Unknown";   break;
+  }
+  Print(modeText, UI_TEXT, false);
+}
+
+void printJammerStatus(bool active) {
+  String jammerText = "[!] Jammer ";
+  jammerText += active ? "Activated" : "Deactivated";
+  Print(jammerText, UI_WARN, false);
+}
+
+void checkModeChange() {
+  prokillHandleNavButtons();
+
+  if (modeChangeRequested) {
+    modeChangeRequested = false;
+    currentMode = static_cast<OperationMode>((currentMode + 1) % 8);
+    initializeRadios();
+    updateTFT();
+    printModeChange(currentMode);
+  }
+
+  if (modeChangeRequested1) {
+    modeChangeRequested1 = false;
+    currentMode = static_cast<OperationMode>((currentMode == 0) ? 7 : (currentMode - 1));
+    initializeRadios();
+    updateTFT();
+    printModeChange(currentMode);
+  }
+
+  if (jammerToggleRequested) {
+    jammerToggleRequested = false;
+    jammerActive = !jammerActive;
+    initializeRadios();
+    updateTFT();
+    printJammerStatus(jammerActive);
+  }
+}
+
+void prokillSetup() {
+  setTouchButtonInputEnabled(true);
+  bleSetJammerNavLabels();
+  bleClearBody(TFT_BLACK);
+  Index = 0;
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  redrawTouchButtonBar();
+
+  updateTFT();
+
+  initializeRadios();
+
+#if HAS_PCF8574_BUTTONS
+  pcf.pinMode(BTN_UP, INPUT_PULLUP);
+  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
+  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
+  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
+#endif
+
+  Print("[+] System Ready!", UI_WARN, true);
+  redrawTouchButtonBar();
+}
+
+void prokillLoop() {
+  static bool carrierActive = false;
+
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    feature_exit_requested = true;
+    return;
+  }
+
+  maintainTouchNavBar();
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  checkModeChange();
+
+  // Manage carrier based on jammerActive state
+  if (jammerActive && !carrierActive) {
+    // Start carrier on all radios with MAX power
+    if (currentMode == BLE_MODULE) {
+      int channel = ble_channels[random(0, sizeof(ble_channels) / sizeof(ble_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == Bluetooth_MODULE) {
+      int channel = bluetooth_channels[random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == WiFi_MODULE) {
+      int channel = WiFi_channels[random(0, sizeof(WiFi_channels) / sizeof(WiFi_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == USB_WIRELESS_MODULE) {
+      int channel = usbWireless_channels[random(0, sizeof(usbWireless_channels) / sizeof(usbWireless_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == VIDEO_TX_MODULE) {
+      int channel = videoTransmitter_channels[random(0, sizeof(videoTransmitter_channels) / sizeof(videoTransmitter_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == RC_MODULE) {
+      int channel = rc_channels[random(0, sizeof(rc_channels) / sizeof(rc_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == ZIGBEE_MODULE) {
+      int channel = zigbee_channels[random(0, sizeof(zigbee_channels) / sizeof(zigbee_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == NRF24_MODULE) {
+      int channel = nrf24_channels[random(0, sizeof(nrf24_channels) / sizeof(nrf24_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    }
+    carrierActive = true;
+  } else if (!jammerActive && carrierActive) {
+    // Stop carrier
+    radio1.stopConstCarrier();
+    radio2.stopConstCarrier();
+    radio3.stopConstCarrier();
+    carrierActive = false;
+  }
+
+  // If carrier is active, hop channels
+  if (jammerActive && carrierActive) {
+    if (currentMode == BLE_MODULE) {
+      int channel = ble_channels[random(0, sizeof(ble_channels) / sizeof(ble_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == Bluetooth_MODULE) {
+      int channel = bluetooth_channels[random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == WiFi_MODULE) {
+      int channel = WiFi_channels[random(0, sizeof(WiFi_channels) / sizeof(WiFi_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == USB_WIRELESS_MODULE) {
+      int channel = usbWireless_channels[random(0, sizeof(usbWireless_channels) / sizeof(usbWireless_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == VIDEO_TX_MODULE) {
+      int channel = videoTransmitter_channels[random(0, sizeof(videoTransmitter_channels) / sizeof(videoTransmitter_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == RC_MODULE) {
+      int channel = rc_channels[random(0, sizeof(rc_channels) / sizeof(rc_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == ZIGBEE_MODULE) {
+      int channel = zigbee_channels[random(0, sizeof(zigbee_channels) / sizeof(zigbee_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    } else if (currentMode == NRF24_MODULE) {
+      int channel = nrf24_channels[random(0, sizeof(nrf24_channels) / sizeof(nrf24_channels[0]))];
+      radio1.setChannel(channel); radio1.startConstCarrier(RF24_PA_MAX, channel);
+      radio2.setChannel(channel); radio2.startConstCarrier(RF24_PA_MAX, channel);
+      radio3.setChannel(channel); radio3.startConstCarrier(RF24_PA_MAX, channel);
+    }
+  }
+}
+
+void exit() {
+  // Stop carrier before powering down
+  radio1.stopConstCarrier();
+  radio2.stopConstCarrier();
+  radio3.stopConstCarrier();
+  
+  jammerActive = false;
+  radio1.powerDown();
+  radio2.powerDown();
+  radio3.powerDown();
+  
+  // Release SPI bus when leaving this feature
+  spiRelease();
+}
+
+}  // namespace ProtoKill
+
+// Shared MouseJack targets: scanner publishes, inject consumes.
+static constexpr int kMjSharedMax = 12;
+struct MjSharedTarget {
+  uint8_t addr[5];
+  uint8_t channel = 0;
+  bool used = false;
+  bool vulnerable = false;
+  char vendor[12] = {0};
+  uint16_t hits = 0;
+};
+static MjSharedTarget g_mjShared[kMjSharedMax];
+
+static void mjSharedPublish(const uint8_t* addr, uint8_t ch, bool vulnerable, const char* vendor) {
+  int idx = -1;
+  for (int i = 0; i < kMjSharedMax; i++) {
+    if (g_mjShared[i].used && memcmp(g_mjShared[i].addr, addr, 5) == 0) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    for (int i = 0; i < kMjSharedMax; i++) {
+      if (!g_mjShared[i].used) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) {
+      idx = 0;
+    }
+    memset(&g_mjShared[idx], 0, sizeof(MjSharedTarget));
+    memcpy(g_mjShared[idx].addr, addr, 5);
+    g_mjShared[idx].used = true;
+  }
+  g_mjShared[idx].channel = ch;
+  g_mjShared[idx].hits++;
+  if (vulnerable) {
+    g_mjShared[idx].vulnerable = true;
+  }
+  if (vendor && vendor[0]) {
+    strncpy(g_mjShared[idx].vendor, vendor, sizeof(g_mjShared[idx].vendor) - 1);
+  }
+}
+
+static int mjSharedCount() {
+  int n = 0;
+  for (int i = 0; i < kMjSharedMax; i++) {
+    if (g_mjShared[i].used) {
+      n++;
+    }
+  }
+  return n;
+}
+
+namespace BleSniffer {
+
+#define SCREEN_WIDTH  240
+#define SCREENHEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 3
+
+static bool uiDrawn = false;
+
+static int iconX[ICON_NUM] = {170, 210, 10};
+static const unsigned char* icons[ICON_NUM] = {
+  bitmap_icon_undo,
+  bitmap_icon_eye2,
+  bitmap_icon_go_back
+};
+
+#define HEADER_HEIGHT 20
+#define STATUS_DOT_SIZE 8
+#define LINE_HEIGHT 16
+#define MAX_LINES 16
+#define MAX_DEVICES 32
+#define SCAN_INTERVAL 5000
+#define MAX_LINE_LENGTH 38
+#define BEACON_PREFIX "4c000215"
+#define ALERT_FLASH_DURATION 1000
+#define SEPARATOR_THICKNESS 1
+#define SEPARATOR_MARGIN 5
+#define Y_OFFSET 37
+
+struct Config {
+  static constexpr int tftRotation = 0;
+  static constexpr int serialBaud = 115200;
+  static constexpr int bleScanDuration = 5;
+  static constexpr int btScanDuration = 5;
+  static constexpr int maxPacketCount = 20;
+  static constexpr int minRssiThreshold = -20;
+  static constexpr int maxNewDevices = 20;
+  static constexpr int maxMfgDataLength = 31;
+  static constexpr unsigned long deviceTimeout = 30000;
+  static constexpr int maxRandomizedMacChanges = 5;
+};
+
+enum class MessageType {
+  DEVICE,
+  ALERT,
+  STATUS
+};
+
+struct DeviceInfo {
+  String mac;
+  int rssi = 0;
+  int packetCount = 0;
+  bool isSuspicious = false;
+  String deviceName;
+  String serviceUUID;
+  String beaconUUID;
+  unsigned long lastSeen = 0;
+  bool display = true;
+  bool jammingAlerted = false;
+  bool isBLE = true;
+  int macChangeCount = 0;
+};
+
+struct DisplayLine {
+  String text;
+  uint16_t color = GREEN;
+  uint16_t originalColor = GREEN;
+  bool isAlert = false;
+  unsigned long flashUntil = 0;
+  MessageType type = MessageType::DEVICE;
+};
+
+class BluetoothSniffer {
+private:
+  DeviceInfo devices[MAX_DEVICES];
+  DisplayLine displayLines[MAX_LINES];
+  int deviceCount = 0;
+  int lineNumber = 1;
+  int suspiciousCount = 0;
+  int newDevicesThisScan = 0;
+  int lastDeviceCount = -1;
+  int lastSuspiciousCount = -1;
+  bool scanning = true;
+  bool isBLEScanActive = true;
+  unsigned long lastScanTime = 0;
+  unsigned long lastFlashToggle = 0;
+  bool flashState = false;
+  BLEScan* pBLEScan = nullptr;
+  BLEAdvertisedDeviceCallbacks* bleDeviceCallbacks = nullptr;
+  static BluetoothSniffer* snifferInstance;
+
+  void releaseBleCallbacks() {
+    if (pBLEScan) {
+      pBLEScan->stop();
+      pBLEScan->setAdvertisedDeviceCallbacks(nullptr);
+    }
+    delete bleDeviceCallbacks;
+    bleDeviceCallbacks = nullptr;
+  }
+
+  static int snifferContentTop() {
+    return Y_OFFSET + HEADER_HEIGHT;
+  }
+
+  static int snifferVisibleLines() {
+    return bleMaxLinesInZone(snifferContentTop(), LINE_HEIGHT);
+  }
+
+  static bool snifferLineFits(int lineIndex) {
+    const int y = snifferContentTop() + (lineIndex * LINE_HEIGHT);
+    return y + LINE_HEIGHT <= bleContentBottom();
+  }
+
+  void initDisplay() {
+    uiDrawn = false;
+
+    float currentBatteryVoltage = readBatteryVoltage();
+    drawStatusBar(currentBatteryVoltage, true);
+    runUI();
+
+    setupTouchscreen();
+    {
+      const int bodyH = bleContentBottom() - 37;
+      if (bodyH > 0) {
+        tft.fillRect(0, 37, 240, bodyH, TFT_BLACK);
+      }
+    }
+    tft.setTextSize(1);
+    updateHeader();
+
+  }
+
+  void updateHeader() {
+    if (!scanning) return;
+    tft.fillRect(0, Y_OFFSET, tft.width(), HEADER_HEIGHT, DARK_GRAY);
+    tft.setTextColor(WHITE, DARK_GRAY);
+    tft.setCursor(5, Y_OFFSET + 6);
+    String status = isBLEScanActive ? "BLE Scanning" : "BT Scanning";
+    tft.print(status + " | Dev: " + String(deviceCount) + " Sus: " + String(suspiciousCount));
+    uint16_t dotColor = isBLEScanActive ? BLUE : GREEN;
+    tft.fillCircle(tft.width() - 10, 46, STATUS_DOT_SIZE / 2, dotColor);
+    tft.drawFastHLine(0, 56, 240, UI_LINE);
+  }
+
+  void updateDisplay() {
+    if (!scanning) return;
+    unsigned long now = millis();
+    if (now - lastFlashToggle >= 500) {
+      flashState = !flashState;
+      lastFlashToggle = now;
+    }
+    {
+      const int bodyTop = Y_OFFSET + HEADER_HEIGHT;
+      const int bodyH = bleContentBottom() - bodyTop;
+      if (bodyH > 0) {
+        tft.fillRect(0, bodyTop, tft.width(), bodyH, TFT_BLACK);
+      }
+    }
+    const int visibleLines = snifferVisibleLines();
+    for (int i = 0; i < visibleLines; i++) {
+      if (displayLines[i].text.isEmpty()) continue;
+      if (!snifferLineFits(i)) continue;
+      int y = snifferContentTop() + (i * LINE_HEIGHT);
+      uint16_t textColor = displayLines[i].originalColor;
+      if (displayLines[i].isAlert && displayLines[i].flashUntil > now) {
+        textColor = flashState ? displayLines[i].originalColor : TFT_BLACK;
+      }
+      tft.setTextColor(textColor, TFT_BLACK);
+      tft.setCursor(5, y + 2);
+      tft.print(displayLines[i].text);
+      if (displayLines[i].originalColor == ORANGE && !displayLines[i].isAlert) {
+        tft.drawRect(3, y, tft.width() - 6, LINE_HEIGHT - 2, ORANGE);
+      }
+      if (i < visibleLines - 1 && !displayLines[i + 1].text.isEmpty() &&
+          displayLines[i].type != displayLines[i + 1].type && snifferLineFits(i + 1)) {
+        int separatorY = y + LINE_HEIGHT - 1;
+        tft.drawFastHLine(SEPARATOR_MARGIN, separatorY, tft.width() - 2 * SEPARATOR_MARGIN, DARK_GRAY);
+      }
+    }
+    if (deviceCount != lastDeviceCount || suspiciousCount != lastSuspiciousCount) {
+      updateHeader();
+      lastDeviceCount = deviceCount;
+      lastSuspiciousCount = suspiciousCount;
+    }
+    if (deviceCount == 0 && lineNumber == 1) {
+      tft.setTextColor(GREEN, TFT_BLACK);
+      tft.setCursor(5, snifferContentTop() + 10);
+    }
+  }
+
+  void addLine(String text, uint16_t color, bool isAlert = false, MessageType type = MessageType::DEVICE) {
+    if (!scanning) return;
+    if (text.length() > MAX_LINE_LENGTH) {
+      text = text.substring(0, MAX_LINE_LENGTH - 3) + "...";
+    }
+    const int visibleLines = snifferVisibleLines();
+    for (int i = visibleLines - 1; i > 0; i--) {
+      displayLines[i] = displayLines[i - 1];
+    }
+    for (int i = visibleLines; i < MAX_LINES; i++) {
+      displayLines[i].text = "";
+    }
+    displayLines[0].text = text;
+    displayLines[0].color = color;
+    displayLines[0].originalColor = (type == MessageType::STATUS) ? UI_DIM_TEXT : color;
+    displayLines[0].isAlert = isAlert;
+    displayLines[0].flashUntil = isAlert ? millis() + ALERT_FLASH_DURATION : 0;
+    displayLines[0].type = type;
+    updateDisplay();
+  }
+
+  void checkSuspiciousActivity(int idx, unsigned long timestamp) {
+    auto& device = devices[idx];
+    if (device.packetCount > Config::maxPacketCount || (device.isBLE && device.rssi > Config::minRssiThreshold)) {
+      if (!device.isSuspicious) {
+        device.isSuspicious = true;
+        suspiciousCount++;
+        if (device.display && !device.jammingAlerted) {
+          String protocol = device.isBLE ? "BLE" : "BT";
+          addLine(String(lineNumber++) + " -> Jamming Suspected (" + protocol + "): " + device.mac + " T:" + String(timestamp),
+                  ORANGE, true, MessageType::ALERT);
+          device.jammingAlerted = true;
+        }
+      }
+    }
+    if (device.isBLE && isRandomizedMac(device.mac) && device.macChangeCount > Config::maxRandomizedMacChanges) {
+      device.isSuspicious = true;
+      suspiciousCount++;
+      if (device.display) {
+        addLine(String(lineNumber++) + " -> MAC Spoofing Suspected (BLE): " + device.mac + " T:" + String(timestamp),
+                ORANGE, true, MessageType::ALERT);
+      }
+    }
+  }
+
+  bool isRandomizedMac(const String& mac) {
+    String firstByte = mac.substring(0, 2);
+    char* end;
+    long value = strtol(firstByte.c_str(), &end, 16);
+    return (value & 0xC0) == 0xC0;
+  }
+
+  void processNewDevice(BLEAdvertisedDevice* bleDevice, esp_bt_gap_cb_param_t* btDevice, unsigned long timestamp, bool isBLE) {
+    if (deviceCount >= MAX_DEVICES) {
+      addLine("Max devices reached!", RED, true, MessageType::ALERT);
+      return;
+    }
+    newDevicesThisScan++;
+    auto& device = devices[deviceCount];
+    device.isBLE = isBLE;
+    if (isBLE) {
+      device.mac = bleDevice->getAddress().toString().c_str();
+      device.rssi = bleDevice->getRSSI();
+      device.deviceName = bleDevice->getName().c_str();
+      device.serviceUUID = bleDevice->getServiceUUID().toString().c_str();
+      String mfgData = bleDevice->getManufacturerData().c_str();
+      checkBeaconSpoofing(device, mfgData, timestamp);
+      checkMalformedPacket(device, mfgData, timestamp);
+    } else {
+      char macStr[18];
+      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+               btDevice->disc_res.bda[0], btDevice->disc_res.bda[1], btDevice->disc_res.bda[2],
+               btDevice->disc_res.bda[3], btDevice->disc_res.bda[4], btDevice->disc_res.bda[5]);
+      device.mac = macStr;
+      device.rssi = 0;
+    }
+    device.packetCount = 1;
+    device.lastSeen = timestamp;
+    device.display = true;
+    checkMacSpoofing(device, timestamp);
+    checkSuspiciousActivity(deviceCount, timestamp);
+    if (device.display) {
+      String protocol = isBLE ? "BLE" : "BT";
+      String line = String(lineNumber++) + " -> " + device.mac + " (" + String(device.rssi) + " dBm, " + protocol + ")";
+      if (isBLE && !device.deviceName.isEmpty()) line += " N:" + device.deviceName.substring(0, 6);
+      if (isBLE && !device.serviceUUID.isEmpty()) line += " U:" + device.serviceUUID.substring(0, 8);
+      line += " T:" + String(timestamp).substring(0, 6);
+      addLine(line, device.isSuspicious ? ORANGE : GREEN, false, MessageType::DEVICE);
+    }
+    deviceCount++;
+    if (newDevicesThisScan > Config::maxNewDevices && device.display) {
+      String protocol = isBLE ? "BLE" : "BT";
+      addLine(String(lineNumber++) + " -> Flooding Detected (" + protocol + ") T:" + String(timestamp),
+              ORANGE, true, MessageType::ALERT);
+    }
+  }
+
+  void checkBeaconSpoofing(DeviceInfo& device, const String& mfgData, unsigned long timestamp) {
+    if (!device.isBLE || !mfgData.startsWith(BEACON_PREFIX)) return;
+    device.beaconUUID = mfgData.substring(4, 36);
+    for (int i = 0; i < deviceCount; i++) {
+      if (devices[i].beaconUUID == device.beaconUUID && devices[i].mac != device.mac) {
+        devices[i].isSuspicious = true;
+        device.isSuspicious = true;
+        suspiciousCount++;
+        if (device.display) {
+          addLine(String(lineNumber++) + " -> Beacon Spoofing (BLE): " + device.mac + " T:" + String(timestamp),
+                  ORANGE, true, MessageType::ALERT);
+        }
+      }
+    }
+  }
+
+  void checkMalformedPacket(DeviceInfo& device, const String& mfgData, unsigned long timestamp) {
+    if (!device.isBLE || mfgData.length() <= Config::maxMfgDataLength) return;
+    device.isSuspicious = true;
+    suspiciousCount++;
+    if (device.display) {
+      addLine(String(lineNumber++) + " -> Malformed Packet (BLE): " + device.mac + " T:" + String(timestamp),
+              ORANGE, true, MessageType::ALERT);
+    }
+  }
+
+  void checkMacSpoofing(DeviceInfo& device, unsigned long timestamp) {
+    for (int i = 0; i < deviceCount; i++) {
+      if (devices[i].mac == device.mac && i != deviceCount) {
+        devices[i].isSuspicious = true;
+        device.isSuspicious = true;
+        suspiciousCount++;
+        if (device.display) {
+          String protocol = device.isBLE ? "BLE" : "BT";
+          addLine(String(lineNumber++) + " -> Possible Spoofing (" + protocol + "): " + device.mac + " T:" + String(timestamp),
+                  ORANGE, true, MessageType::ALERT);
+        }
+      }
+    }
+  }
+
+  void cleanupDevices(unsigned long timestamp) {
+    for (int i = 0; i < deviceCount; ) {
+      if (timestamp - devices[i].lastSeen > Config::deviceTimeout) {
+        if (devices[i].isSuspicious) suspiciousCount--;
+        for (int j = i; j < deviceCount - 1; j++) {
+          devices[j] = devices[j + 1];
+        }
+        deviceCount--;
+      } else {
+        i++;
+      }
+    }
+  }
+
+  void filterByMac(const String& filterMac) {
+    for (int i = 0; i < deviceCount; i++) {
+      devices[i].display = (devices[i].mac == filterMac);
+    }
+    refreshDisplay();
+  }
+
+  void filterSuspicious() {
+    for (int i = 0; i < deviceCount; i++) {
+      devices[i].display = devices[i].isSuspicious;
+    }
+    refreshDisplay();
+  }
+
+  void refreshDisplay() {
+    for (int i = 0; i < MAX_LINES; i++) {
+      displayLines[i].text = "";
+      displayLines[i].color = GREEN;
+      displayLines[i].originalColor = GREEN;
+      displayLines[i].isAlert = false;
+      displayLines[i].flashUntil = 0;
+      displayLines[i].type = MessageType::DEVICE;
+    }
+    lineNumber = 1;
+    {
+      const int bodyTop = Y_OFFSET + HEADER_HEIGHT;
+      const int bodyH = bleContentBottom() - bodyTop;
+      if (bodyH > 0) {
+        tft.fillRect(0, bodyTop, tft.width(), bodyH, TFT_BLACK);
+      }
+    }
+    for (int i = 0; i < deviceCount; i++) {
+      if (devices[i].display) {
+        String protocol = devices[i].isBLE ? "BLE" : "BT";
+        String line = String(lineNumber++) + " -> " + devices[i].mac + " (" + String(devices[i].rssi) + " dBm, " + protocol + ")";
+        if (devices[i].isBLE && !devices[i].deviceName.isEmpty()) line += " N:" + devices[i].deviceName.substring(0, 6);
+        if (devices[i].isBLE && !devices[i].serviceUUID.isEmpty()) line += " U:" + devices[i].serviceUUID.substring(0, 8);
+        line += " T:" + String(devices[i].lastSeen).substring(0, 6);
+        addLine(line, devices[i].isSuspicious ? ORANGE : GREEN, false, MessageType::DEVICE);
+      }
+    }
+  }
+
+void runUI() {
+
+  static int iconY = STATUS_BAR_Y_OFFSET;
+
+  if (!uiDrawn) {
+    tft.drawFastHLine(0, 19, 240, UI_LINE);
+    tft.drawFastHLine(0, 36, 240, UI_LINE);
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+
+  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
+    if (animationState == 1) {
+      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      animationState = 2;
+
+      switch (activeIcon) {
+        case 0:
+            deviceCount = 0;
+            suspiciousCount = 0;
+            lastDeviceCount = -1;
+            lastSuspiciousCount = -1;
+            lineNumber = 1;
+            for (int i = 0; i < MAX_LINES; i++) {
+              displayLines[i].text = "";
+              displayLines[i].color = GREEN;
+              displayLines[i].originalColor = GREEN;
+              displayLines[i].isAlert = false;
+              displayLines[i].flashUntil = 0;
+              displayLines[i].type = MessageType::DEVICE;
+            }
+            refreshDisplay();
+            addLine("Device list reset", DARK_GRAY, true, MessageType::STATUS);
+          break;
+        case 1:
+           filterSuspicious();
+          break;
+        case 2:
+           feature_exit_requested = true;
+          break;
+      }
+    } else if (animationState == 2) {
+      animationState = 0;
+      activeIcon = -1;
+    }
+    lastAnimationTime = millis();
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  static bool s_headerTouchHeld = false;
+  const unsigned long touchCheckInterval = 25;
+
+  if (millis() - lastTouchCheck >= touchCheckInterval) {
+    int x = 0;
+    int y = 0;
+    int hitIcon = -1;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              hitIcon = i;
+            }
+            break;
+          }
+        }
+      }
+    }
+    if (hitIcon >= 0) {
+      if (!s_headerTouchHeld) {
+        if (hitIcon == 2) {
+          feature_exit_requested = true;
+        } else {
+          tft.drawBitmap(iconX[hitIcon], iconY, icons[hitIcon], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+          animationState = 1;
+          activeIcon = hitIcon;
+          lastAnimationTime = millis();
+        }
+      }
+      s_headerTouchHeld = true;
+    } else {
+      s_headerTouchHeld = false;
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+public:
+  void setup() {
+    uiDrawn = false;
+
+    float currentBatteryVoltage = readBatteryVoltage();
+    drawStatusBar(currentBatteryVoltage, false);
+    runUI();
+
+    setupTouchscreen();
+
+    initDisplay();
+
+    releaseBleCallbacks();
+    ensureBleStackReady();
+    pBLEScan = BLEDevice::getScan();
+    bleDeviceCallbacks = new AdvertisedDeviceCallbacks(*this);
+    pBLEScan->setAdvertisedDeviceCallbacks(bleDeviceCallbacks);
+    pBLEScan->setActiveScan(true);
+    scanning = true;
+
+    addLine("Bluetooth Sniffer Ready", DARK_GRAY, true, MessageType::STATUS);
+    startBLEScan();
+  }
+
+  void loop() {
+    if (feature_exit_requested || featureExitButtonPressed()) {
+      feature_exit_requested = true;
+      return;
+    }
+
+    unsigned long now = millis();
+    tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+    runUI();
+    if (feature_exit_requested || featureExitButtonPressed()) {
+      feature_exit_requested = true;
+      return;
+    }
+    updateStatusBar();
+    cleanupDevices(now);
+    if (scanning && now - lastScanTime >= SCAN_INTERVAL) {
+      if (isBLEScanActive) {
+        pBLEScan->stop();
+        startBTScan();
+        isBLEScanActive = false;
+      } else {
+
+        startBLEScan();
+        isBLEScanActive = true;
+      }
+      lastScanTime = now;
+    }
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      if (input.startsWith("FILTER MAC ")) {
+        filterByMac(input.substring(11));
+      } else if (input == "FILTER SUSPICIOUS") {
+        filterSuspicious();
+      } else if (input == "RESET") {
+        deviceCount = 0;
+        suspiciousCount = 0;
+        lastDeviceCount = -1;
+        lastSuspiciousCount = -1;
+        lineNumber = 1;
+        for (int i = 0; i < MAX_LINES; i++) {
+          displayLines[i].text = "";
+          displayLines[i].color = GREEN;
+          displayLines[i].originalColor = GREEN;
+          displayLines[i].isAlert = false;
+          displayLines[i].flashUntil = 0;
+          displayLines[i].type = MessageType::DEVICE;
+        }
+        refreshDisplay();
+        addLine("Device list reset", DARK_GRAY, true, MessageType::STATUS);
+      }
+    }
+  }
+
+  class AdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+    BluetoothSniffer& sniffer;
+  public:
+    AdvertisedDeviceCallbacks(BluetoothSniffer& s) : sniffer(s) {}
+    void onResult(BLEAdvertisedDevice* advertisedDevice) override {
+      if (!sniffer.scanning) return;
+      String mac = advertisedDevice->getAddress().toString().c_str();
+      int rssi = advertisedDevice->getRSSI();
+      unsigned long timestamp = millis();
+      int idx = -1;
+      for (int i = 0; i < sniffer.deviceCount; i++) {
+        if (sniffer.devices[i].mac == mac && sniffer.devices[i].isBLE) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx >= 0) {
+        sniffer.devices[idx].rssi = rssi;
+        sniffer.devices[idx].packetCount++;
+        sniffer.devices[idx].lastSeen = timestamp;
+        if (sniffer.isRandomizedMac(mac)) {
+          sniffer.devices[idx].macChangeCount++;
+        }
+        sniffer.checkSuspiciousActivity(idx, timestamp);
+      } else {
+        sniffer.processNewDevice(advertisedDevice, nullptr, timestamp, true);
+      }
+    }
+  };
+
+  static void btCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+    if (!snifferInstance) return;
+    if (event == ESP_BT_GAP_DISC_RES_EVT) {
+      unsigned long timestamp = millis();
+      int idx = -1;
+      char macStr[18];
+      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+               param->disc_res.bda[0], param->disc_res.bda[1], param->disc_res.bda[2],
+               param->disc_res.bda[3], param->disc_res.bda[4], param->disc_res.bda[5]);
+      String mac = macStr;
+      for (int i = 0; i < snifferInstance->deviceCount; i++) {
+        if (snifferInstance->devices[i].mac == mac && !snifferInstance->devices[i].isBLE) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx >= 0) {
+        snifferInstance->devices[idx].packetCount++;
+        snifferInstance->devices[idx].lastSeen = timestamp;
+        snifferInstance->checkSuspiciousActivity(idx, timestamp);
+      } else {
+        snifferInstance->processNewDevice(nullptr, param, timestamp, false);
+      }
+    }
+  }
+
+  void startBLEScan() {
+    newDevicesThisScan = 0;
+    constexpr int kScanChunkSec = 1;
+    for (int elapsed = 0; elapsed < Config::bleScanDuration; elapsed += kScanChunkSec) {
+      if (feature_exit_requested || featureExitButtonPressed()) {
+        feature_exit_requested = true;
+        if (pBLEScan) {
+          pBLEScan->stop();
+        }
+        return;
+      }
+      pBLEScan->start(kScanChunkSec, false);
+    }
+    addLine("BLE Scan Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
+    updateHeader();
+  }
+
+  void startBTScan() {
+    newDevicesThisScan = 0;
+
+    addLine("Classic BT Scan Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
+    updateHeader();
+  }
+
+  void setSnifferInstance() {
+    snifferInstance = this;
+  }
+
+  void stop() {
+    scanning = false;
+    snifferInstance = nullptr;
+    releaseBleCallbacks();
+  }
+};
+
+BluetoothSniffer* BluetoothSniffer::snifferInstance = nullptr;
+BluetoothSniffer sniffer;
+
+void blesnifferSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  bleSetExitOnlyNavLabels();
+  bleClearBody(TFT_BLACK);
+  {
+    float currentBatteryVoltage = readBatteryVoltage();
+    drawStatusBar(currentBatteryVoltage, true);
+  }
+  redrawTouchButtonBar();
+  {
+    const int bodyH = bleContentBottom() - 37;
+    if (bodyH > 0) {
+      tft.fillRect(0, 37, 240, bodyH, TFT_BLACK);
+    }
+  }
+  sniffer.setup();
+  sniffer.setSnifferInstance();
+  redrawTouchButtonBar();
+}
+
+void blesnifferLoop() {
+
+  if (feature_active && featureExitButtonPressed()) {
+    feature_exit_requested = true;
+    return;
+  }
+
+  sniffer.loop();
+}
+
+void exit() {
+
+  sniffer.stop();
+}
+}
+
+// ─── Ported from 1.7.2: Bluetooth & 2.4GHz new features ───
+
 namespace AirTagSpoofer {
 
 #define SCREEN_WIDTH 240
@@ -1219,7 +4296,7 @@ static constexpr unsigned long UI_FIELD_MS = 500;
 static constexpr unsigned long LOG_INTERVAL_MS = 1200;
 static constexpr int LOG_LINE_LEN = 40;
 
-// Apple Continuity Proximity Pairing â€” AirTag models (Flipper / Xtreme).
+// Apple Continuity Proximity Pairing — AirTag models (Flipper / Xtreme).
 // Prefix 0x05 = "New AirTag" (triggers setup popup on nearby iPhones).
 static const uint16_t kAirTagModels[] = {0x0055, 0x0030};
 static constexpr int kAirTagModelCount = 2;
@@ -1726,9 +4803,7 @@ void airTagLoop() {
 void exit() {
   teardown();
 }
-
 }  // namespace AirTagSpoofer
-
 
 namespace AirTagSniffer {
 
@@ -2032,7 +5107,7 @@ static bool parseAppleAdv(const uint8_t* data, size_t len,
     *statusOut = (len > 4) ? data[4] : 0;
     return true;
   }
-  // Continuity Proximity Pairing â€” New AirTag prefix 0x05.
+  // Continuity Proximity Pairing — New AirTag prefix 0x05.
   if (appleType == 0x07 && len >= 5 && data[4] == 0x05) {
     *kindOut = HIT_NEW_AT;
     *statusOut = data[4];
@@ -2324,9 +5399,7 @@ void airTagSnifferLoop() {
 void exit() {
   teardown();
 }
-
 }  // namespace AirTagSniffer
-
 
 namespace BleSkimmer {
 
@@ -3117,2309 +6190,6 @@ void exit() {
 }
 
 }  // namespace BleSkimmer
-
-
-namespace BleJammer {
-
-RF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
-RF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
-RF24 radio3(CE_PIN_3, CSN_PIN_3, 16000000);
-
-enum OperationMode { BLE_MODULE, Bluetooth_MODULE };
-OperationMode currentMode = BLE_MODULE;
-
-bool jammerActive = false;
-
-int bluetooth_channels[] = {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
-int ble_channels[] = {2, 26, 80};
-
-const byte BLE_channels[] = {2, 26, 80};
-byte channelGroup1[] = {2, 5, 8, 11};
-byte channelGroup2[] = {26, 29, 32, 35};
-byte channelGroup3[] = {80, 83, 86, 89};
-
-#define SCREEN_HEIGHT 320
-#define LINE_HEIGHT 12
-#define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
-
-String Buffer[MAX_LINES];
-uint16_t Buffercolor[MAX_LINES];
-int Index = 0;
-
-volatile bool modeChangeRequested = false;
-volatile bool jammerToggleRequested = false;
-
-unsigned long lastButtonPressTime = 0;
-const unsigned long debounceDelay = 500;
-
-static constexpr int JAMMER_LOG_TOP = 48;
-
-static int jammerVisibleLines() {
-  return bleMaxLinesInZone(JAMMER_LOG_TOP, LINE_HEIGHT);
-}
-
-static bool jammerLineFits(int yPos) {
-  return yPos + LINE_HEIGHT <= bleContentBottom();
-}
-
-void scroll() {
-  for (int i = 0; i < MAX_LINES - 1; i++) {
-    Buffer[i] = Buffer[i + 1];
-    Buffercolor[i] = Buffercolor[i + 1];
-  }
-}
-
-void Print(String text, uint16_t color, bool extraSpace = false) {
-  const int visibleLines = jammerVisibleLines();
-  if (Index >= visibleLines) {
-    for (int i = 0; i < visibleLines - 1; i++) {
-      Buffer[i] = Buffer[i + 1];
-      Buffercolor[i] = Buffercolor[i + 1];
-    }
-    Index = visibleLines - 1;
-  }
-
-  Buffer[Index] = text;
-  Buffercolor[Index] = color;
-  Index++;
-
-  if (extraSpace && Index < visibleLines) {
-    Buffer[Index] = "";
-    Buffercolor[Index] = WHITE;
-    Index++;
-  }
-
-  for (int i = 0; i < Index && i < visibleLines; i++) {
-    int yPos = (i * LINE_HEIGHT) + JAMMER_LOG_TOP;
-    if (!jammerLineFits(yPos)) {
-      continue;
-    }
-
-    tft.fillRect(5, yPos, tft.width() - 10, LINE_HEIGHT, TFT_BLACK);
-
-    tft.setTextColor(Buffercolor[i], TFT_BLACK);
-    tft.setCursor(5, yPos);
-    tft.print(Buffer[i]);
-  }
-}
-
-void checkButtons() {
-  unsigned long currentTime = millis();
-
-  if (isButtonPressed(BTN_UP) && currentTime - lastButtonPressTime > debounceDelay) {
-    jammerToggleRequested = true;
-    lastButtonPressTime = currentTime;
-  }
-
-  if (isButtonPressed(BTN_RIGHT) && currentTime - lastButtonPressTime > debounceDelay) {
-    modeChangeRequested = true;
-    lastButtonPressTime = currentTime;
-  }
-
-  if (isButtonPressed(BTN_LEFT) && currentTime - lastButtonPressTime > debounceDelay) {
-    modeChangeRequested = true;
-    lastButtonPressTime = currentTime;
-  }
-}
-
-void configureRadio(RF24 &radio, const byte* channels, size_t size) {
-  radio.setAutoAck(false);
-  radio.stopListening();
-  radio.setRetries(0, 0);
-  radio.setPALevel(RF24_PA_MAX, true);
-  radio.setDataRate(RF24_2MBPS);
-  radio.setCRCLength(RF24_CRC_DISABLED);
-
-  for (size_t i = 0; i < size; i++) {
-    radio.setChannel(channels[i]);
-    radio.startConstCarrier(RF24_PA_MAX, channels[i]);
-  }
-}
-
-void initializeRadiosMultiMode() {
-  bool radio1Active = false;
-  bool radio2Active = false;
-  bool radio3Active = false;
-
-  if (radio1.begin()) {
-    configureRadio(radio1, channelGroup1, sizeof(channelGroup1));
-    radio1Active = true;
-  }
-  if (radio2.begin()) {
-    configureRadio(radio2, channelGroup2, sizeof(channelGroup2));
-    radio2Active = true;
-  }
-  if (radio3.begin()) {
-    configureRadio(radio3, channelGroup3, sizeof(channelGroup3));
-    radio3Active = true;
-  }
-}
-
-void initializeRadios() {
-  if (jammerActive) {
-    initializeRadiosMultiMode();
-
-  } else {
-    radio1.powerDown();
-    radio2.powerDown();
-    radio3.powerDown();
-  }
-}
-
-void updateTFT() {
-  static bool previousJammerState = false;
-  static bool prevNRF1State = false;
-  static bool prevNRF2State = false;
-  static int previousMode = -1;
-
-  const int bodyH = bleContentBottom() - 39;
-  if (bodyH > 0) {
-    tft.fillRect(0, 39, 240, bodyH, TFT_BLACK);
-  }
-  tft.fillRect(0, 19, 240, 16, DARK_GRAY);
-
-  tft.setTextSize(1);
-
-  struct ButtonGuide {
-    const char* label;
-    const unsigned char* icon;
-  };
-
-  ButtonGuide buttons[] = {
-    {jammerActive ? "[ON]" : "[OFF]", bitmap_icon_UP},
-    {"MODE-", bitmap_icon_LEFT},
-    {"MODE+", bitmap_icon_RIGHT}
-  };
-
-  int xPos = 20;
-  int yPosIcon = 19;
-  int spacing = 75;
-
-  for (int i = 0; i < 3; i++) {
-    tft.drawBitmap(xPos, yPosIcon, buttons[i].icon, 16, 16, UI_ICON);
-
-    tft.setTextColor(UI_TEXT, DARK_GRAY);
-    tft.setCursor(xPos + 18, yPosIcon + 4);
-    tft.print(buttons[i].label);
-
-    if (i < 2) {
-      int sepX = xPos + spacing - 8;
-      tft.drawFastVLine(sepX, 22, 12, LIGHT_GRAY);
-    }
-
-    xPos += spacing;
-  }
-
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  tft.drawFastHLine(0, 35, 240, UI_LINE);
-}
-
-void checkModeChange() {
-  checkButtons();
-
-  if (modeChangeRequested) {
-    modeChangeRequested = false;
-    currentMode = static_cast<OperationMode>((currentMode + 1) % 2);
-    initializeRadios();
-    updateTFT();
-
-    String modeText = "[+] Mode changed to: ";
-    modeText += (currentMode == BLE_MODULE) ? "BLE" : "Bluetooth";
-    Print(modeText, UI_TEXT, false);
-  }
-
-  if (jammerToggleRequested) {
-    jammerToggleRequested = false;
-    jammerActive = !jammerActive;
-    initializeRadios();
-    updateTFT();
-
-    String jammerText = "[!] Jammer ";
-    jammerText += (jammerActive) ? "Activated" : "Deactivated";
-    Print(jammerText, UI_WARN, false);
-  }
-}
-
-void blejamSetup() {
-  pauseBackgroundRadioTasks();
-  setTouchButtonInputEnabled(true);
-  bleSetJammerNavLabels();
-  bleClearBody(TFT_BLACK);
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  redrawTouchButtonBar();
-
-  initializeRadios();
-  setupTouchscreen();
-  updateTFT();
-
-#if HAS_PCF8574_BUTTONS
-  pcf.pinMode(BTN_UP, INPUT_PULLUP);
-  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
-  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
-  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
-  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
-#endif
-
-  Print("[+] System Ready!", UI_WARN, true);
-  redrawTouchButtonBar();
-}
-
-void blejamLoop() {
-
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
-    feature_exit_requested = true;
-    return;
-  }
-
-  checkModeChange();
-
-  if (jammerActive) {
-    if (currentMode == BLE_MODULE) {
-      int randomIndex = random(0, sizeof(ble_channels) / sizeof(ble_channels[0]));
-      int channel = ble_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == Bluetooth_MODULE) {
-      int randomIndex = random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]));
-      int channel = bluetooth_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-    }
-  }
-
-  // Yield to the scheduler so the idle task/watchdog and core-0 radio stack get
-  // CPU time; without this the tight loop starves the system and everything lags.
-  delay(1);
-}
-
-void exit() {
-
-  jammerActive = false;
-  initializeRadios();
-  restoreSdAfterSharedSpi();
-}
-}
-
-namespace BleSniffer { void exit(); }
-
-namespace BleScan {
-
-#define SCREEN_WIDTH  240
-#define SCREENHEIGHT 320
-#define STATUS_BAR_Y_OFFSET 20
-#define STATUS_BAR_HEIGHT 16
-#define ICON_SIZE 16
-#define ICON_NUM 2
-
-BLEScan* bleScan;
-BLEScanResults bleResults;
-bool isScanning = false;
-bool isDetailView = false;
-int currentIndex = 0;
-int listStartIndex = 0;
-bool screenNeedsUpdate = true;
-bool fullScreenUpdate = true;
-
-static constexpr int yshift = 30;
-
-// Deauther-like list geometry (bigger rows + paging + bottom nav/tab bar).
-static constexpr int LIST_HEADER_Y = 50;
-static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
-static constexpr int LIST_ROW_H = 22;
-static int current_page = 0;
-
-static int bleListBottomY() {
-  return featureHasTouchNavBar() ? touchNavContentBottomY() - 4 : 300;
-}
-
-static int bleDevicesPerPage() {
-  return (bleListBottomY() - LIST_FIRST_ROW_Y) / LIST_ROW_H;
-}
-
-static void bleScanClearBody() {
-  const int h = bleContentBottom() - 37;
-  if (h > 0) {
-    tft.fillRect(0, 37, 240, h, TFT_BLACK);
-  }
-}
-
-static void bleScanUpdateNavLabels() {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
-  if (isDetailView) {
-    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "Back");
-  } else {
-    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "View");
-  }
-  redrawTouchButtonBar();
-}
-
-unsigned long lastButtonPress = 0;
-const unsigned long debounceTime = 200;
-
-static bool uiDrawn = false;
-
-static int iconX[ICON_NUM] = {220, 10};
-static const unsigned char* icons[ICON_NUM] = {
-  bitmap_icon_undo,
-  bitmap_icon_go_back
-};
-
-static void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
-  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
-                                           : FeatureUI::ButtonStyle::Secondary;
-  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
-}
-
-static void drawTabBar(const char* leftButton, bool leftDisabled,
-                       const char* prevButton, bool prevDisabled,
-                       const char* nextButton, bool nextDisabled) {
-  if (featureHasTouchNavBar()) {
-    bleScanUpdateNavLabels();
-    return;
-  }
-  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
-  if (leftButton && leftButton[0]) drawButton(0,   304, 57, 16, leftButton, false, leftDisabled);
-  if (prevButton && prevButton[0]) drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
-  if (nextButton && nextButton[0]) drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
-}
-
-static TaskHandle_t bgBleScanTaskHandle = nullptr;
-static volatile bool bgHasResults = false;
-static volatile uint32_t bgLastScanMs = 0;
-static volatile bool bgBleScanRunning = false;
-static volatile bool fgBleScanInProgress = false;
-static const uint32_t BG_BLE_SCAN_INTERVAL_MS = 15000;
-static bool bleInitDone = false;
-static const uint32_t BG_BOOT_GRACE_MS = 6000;
-static uint32_t bgBootMs = 0;
-
-static void stopBgBleScanIfRunning() {
-  if (fgBleScanInProgress || !bleInitDone || !bleScan) return;
-  if (!bgBleScanRunning) return;
-  bleScan->stop();
-  bgBleScanRunning = false;
-}
-
-static void ensureBleInit() {
-  if (bleInitDone) return;
-  if (!ensureBleStackReady()) return;
-
-  bleScan = BLEDevice::getScan();
-  bleScan->setActiveScan(true);
-  bleInitDone = true;
-}
-
-static void bgBleScanTask(void* ) {
-  ensureBleInit();
-  for (;;) {
-    const uint32_t now = millis();
-    if (bgBootMs == 0) bgBootMs = now;
-
-    const bool idleOk = (now - bgBootMs) > BG_BOOT_GRACE_MS;
-    if (settings().autoBleScan && idleOk && !feature_active && !in_sub_menu) {
-      if (fgBleScanInProgress) {
-        vTaskDelay(250 / portTICK_PERIOD_MS);
-        continue;
-      }
-      bgBleScanRunning = true;
-      isScanning = true;
-      bleResults = bleScan->start(2, false);
-      isScanning = false;
-      bgBleScanRunning = false;
-      if (bleResults.getCount() >= 0) {
-        bgHasResults = (bleResults.getCount() > 0);
-        bgLastScanMs = now;
-      }
-      vTaskDelay(BG_BLE_SCAN_INTERVAL_MS / portTICK_PERIOD_MS);
-    } else {
-      if (bgBleScanRunning) {
-        stopBgBleScanIfRunning();
-      }
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-  }
-}
-
-void displayScanning() {
-  bleScanClearBody();
-  tft.setTextSize(1);
-  tft.setTextColor(GREEN);
-  tft.setCursor(10, LIST_HEADER_Y);
-  tft.println("Scanning.");
-
-  loading(100, ORANGE, 0, 0, 3, true);
-/*
-  tft.setCursor(60, LIST_HEADER_Y);
-  for (int i = 0; i < 2; i++) {
-    for (int j = 0; j <= i; j++) {
-      tft.print(".");
-      delay(500);
-    }
-  }
-*/
-  tft.setCursor(10, LIST_HEADER_Y + 15);
-  tft.println("Wait a moment.");
-  delay(100);
-  isScanning = false;
-}
-
-void startBLEScan() {
-  pauseBackgroundRadioTasks();
-  if (bgBleScanRunning) {
-    stopBgBleScanIfRunning();
-  }
-  displayScanning();
-  isDetailView = false;
-  current_page = 0;
-  currentIndex = 0;
-  listStartIndex = 0;
-  isScanning = true;
-  screenNeedsUpdate = true;
-  fullScreenUpdate = true;
-  ensureBleInit();
-  fgBleScanInProgress = true;
-  bleResults = bleScan->start(5, false);
-  fgBleScanInProgress = false;
-  isScanning = false;
-  screenNeedsUpdate = true;
-
-  if (bleResults.getCount() >= 0) {
-    bgHasResults = (bleResults.getCount() > 0);
-    bgLastScanMs = millis();
-  }
-}
-
-void handleButtons() {
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastButtonPress < debounceTime) return;
-
-  int oldPage = current_page;
-
-  if (isButtonPressed(BTN_UP)) {
-    if (currentIndex > 0) {
-      currentIndex--;
-      delay(200);
-      if (!isDetailView) {
-        current_page = currentIndex / max(1, bleDevicesPerPage());
-        listStartIndex = current_page * bleDevicesPerPage();
-        fullScreenUpdate = (current_page != oldPage);
-      } else {
-        fullScreenUpdate = true;
-      }
-      screenNeedsUpdate = true;
-    }
-    lastButtonPress = currentMillis;
-  }
-
-  if (isButtonPressed(BTN_DOWN)) {
-    if (currentIndex < bleResults.getCount() - 1) {
-      currentIndex++;
-      delay(200);
-      if (!isDetailView) {
-        current_page = currentIndex / max(1, bleDevicesPerPage());
-        listStartIndex = current_page * bleDevicesPerPage();
-        fullScreenUpdate = (current_page != oldPage);
-      } else {
-        fullScreenUpdate = true;
-      }
-      screenNeedsUpdate = true;
-    }
-    lastButtonPress = currentMillis;
-  }
-
-  if (isButtonPressed(BTN_RIGHT)) {
-    delay(200);
-    if (!isScanning) {
-      isDetailView = !isDetailView;
-      screenNeedsUpdate = true;
-      fullScreenUpdate = true;
-    }
-    lastButtonPress = currentMillis;
-  }
-
-  if (isButtonPressed(BTN_LEFT)) {
-    delay(200);
-    if (isDetailView) {
-      isDetailView = false;
-      fullScreenUpdate = true;
-    } else if (!isScanning) {
-      startBLEScan();
-      fullScreenUpdate = true;
-    }
-    screenNeedsUpdate = true;
-    lastButtonPress = currentMillis;
-  }
-}
-
-void updateBLEList() {
-  int deviceCount = bleResults.getCount();
-  tft.setTextSize(1);
-
-  if (deviceCount <= 0) {
-    bleScanClearBody();
-    tft.setTextColor(GREEN);
-    tft.setCursor(10, LIST_HEADER_Y);
-    tft.println("No devices found.");
-    tft.setCursor(10, LIST_HEADER_Y + 12);
-    tft.println("Press Rescan.");
-    drawTabBar("Rescan", false, "Prev", true, "Next", true);
-    return;
-  }
-
-  const int totalPages = (deviceCount + bleDevicesPerPage() - 1) / bleDevicesPerPage();
-  if (current_page < 0) current_page = 0;
-  if (current_page > totalPages - 1) current_page = max(0, totalPages - 1);
-  listStartIndex = current_page * bleDevicesPerPage();
-
-  static int last_rendered_page = -1;
-  static int last_rendered_index = -1;
-
-  auto drawRow = [&](int idx, bool selected) {
-    if (idx < 0 || idx >= deviceCount) return;
-    if (idx < listStartIndex || idx >= listStartIndex + bleDevicesPerPage()) return;
-    const int row = idx - listStartIndex;
-    const int y = LIST_FIRST_ROW_Y + row * LIST_ROW_H;
-
-    // Clear only this row (avoid overlapping next row).
-    tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
-    BLEAdvertisedDevice device = bleResults.getDevice(idx);
-    String name = device.getName().length() > 0 ? device.getName().c_str() : "Unknown";
-    if (name.length() > 22) name = name.substring(0, 22) + "...";
-
-    tft.setCursor(10, y);
-    tft.setTextColor(selected ? ORANGE : WHITE);
-    tft.print(selected ? "> " : "  ");
-    tft.println(name);
-  };
-
-  const bool pageChanged = (current_page != last_rendered_page);
-  const bool needFull = fullScreenUpdate || pageChanged || (last_rendered_index < 0);
-
-  if (needFull) {
-    bleScanClearBody();
-    tft.setTextColor(GREEN);
-    tft.setCursor(10, LIST_HEADER_Y);
-    tft.println("Devices:");
-
-    char page_buf[20];
-    snprintf(page_buf, sizeof(page_buf), "Page %d/%d", current_page + 1, totalPages);
-    tft.setCursor(180, LIST_HEADER_Y);
-    tft.setTextColor(GREEN);
-    tft.println(page_buf);
-
-    const int end_index = min(listStartIndex + bleDevicesPerPage(), deviceCount);
-    for (int i = listStartIndex; i < end_index; i++) {
-      drawRow(i, (i == currentIndex));
-    }
-
-    const bool prevDisabled = (current_page == 0);
-    const bool nextDisabled = ((current_page + 1) * bleDevicesPerPage() >= deviceCount);
-    drawTabBar("Rescan", false, "Prev", prevDisabled, "Next", nextDisabled);
-
-    last_rendered_page = current_page;
-    last_rendered_index = currentIndex;
-    return;
-  }
-
-  if (last_rendered_index != currentIndex) {
-    drawRow(last_rendered_index, false);
-    drawRow(currentIndex, true);
-    last_rendered_index = currentIndex;
-  }
-}
-
-void displayBLEDetails() {
-
-  bleScanClearBody();
-  tft.setTextSize(1);
-
-  const int deviceCount = bleResults.getCount();
-  if (deviceCount <= 0) {
-    isDetailView = false;
-    screenNeedsUpdate = true;
-    fullScreenUpdate = true;
-    return;
-  }
-  if (currentIndex < 0) currentIndex = 0;
-  if (currentIndex >= deviceCount) currentIndex = deviceCount - 1;
-
-  BLEAdvertisedDevice device = bleResults.getDevice(currentIndex);
-  String deviceName = device.getName().length() > 0 ? device.getName().c_str() : "Unknown Device";
-  String address = device.getAddress().toString().c_str();
-  int rssi = device.getRSSI();
-  int txPower = device.getTXPower();
-
-  tft.setTextColor(WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-
-  int y = 50;
-  tft.setCursor(10, y);
-  tft.print("Device: " + deviceName);
-  y += 20;
-  tft.setCursor(10, y);
-  tft.print("MAC: " + address);
-  y += 20;
-  tft.setCursor(10, y);
-  tft.print("RSSI: " + String(rssi) + " dBm");
-  y += 20;
-  tft.setCursor(10, y);
-  tft.print("Tx Power: " + String(txPower) + " dBm");
-
-  if (device.haveServiceUUID()) {
-    y += 20;
-    tft.setCursor(10, y);
-    tft.print("Service UUID: " + String(device.getServiceUUID().toString().c_str()));
-  } else {
-    y += 20;
-    tft.setCursor(10, y);
-    tft.print("No Service UUID");
-  }
-  if (device.haveManufacturerData()) {
-    String manufacturerData = String((char*)device.getManufacturerData().c_str());
-    y += 20;
-    tft.setCursor(10, y);
-    tft.print("Manufacturer: " + manufacturerData);
-  } else {
-    y += 20;
-    tft.setCursor(10, y);
-    tft.print("No Manufacturer Data");
-  }
-  if (device.haveServiceData()) {
-    String serviceData = String((char*)device.getServiceData().c_str());
-    y += 30;
-    tft.setCursor(10, y);
-    tft.print("Service Data: " + serviceData);
-  } else {
-    y += 30;
-    tft.setCursor(10, y);
-    tft.print("No Service Data");
-  }
-
-  drawTabBar("Rescan", false, "", true, "Back", false);
-}
-
-void runUI() {
-
-  static int iconY = STATUS_BAR_Y_OFFSET;
-
-  if (!uiDrawn) {
-    tft.drawFastHLine(0, 19, 240, UI_LINE);
-    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-
-    for (int i = 0; i < ICON_NUM; i++) {
-      if (icons[i] != NULL) {
-        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      }
-    }
-    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
-    uiDrawn = true;
-  }
-
-  static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;
-  static int activeIcon = -1;
-
-  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
-    if (animationState == 1) {
-      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      animationState = 2;
-
-      switch (activeIcon) {
-        case 0:
-          if (!isScanning) {
-            startBLEScan();
-          }
-          break;
-        case 1:
-           feature_exit_requested = true;
-          break;
-      }
-    } else if (animationState == 2) {
-      animationState = 0;
-      activeIcon = -1;
-    }
-    lastAnimationTime = millis();
-  }
-
-  static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 120;
-  static uint32_t lastTouchActionMs = 0;
-
-  if (millis() - lastTouchCheck >= touchCheckInterval) {
-  int x, y;
-  if (feature_active && readTouchXY(x, y)) {
-      const uint32_t nowMs = millis();
-      if (nowMs - lastTouchActionMs < 250) {
-        lastTouchCheck = millis();
-        return;
-      }
-      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
-        for (int i = 0; i < ICON_NUM; i++) {
-          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
-            if (icons[i] != NULL && animationState == 0) {
-              tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-              animationState = 1;
-              activeIcon = i;
-              lastAnimationTime = millis();
-              lastTouchActionMs = nowMs;
-            }
-            break;
-          }
-        }
-      } else if (!isScanning) {
-        const int deviceCount = bleResults.getCount();
-
-        if (!featureHasTouchNavBar() && y >= 290 && y <= 320) {
-          const bool prevDisabled = (current_page == 0);
-          const bool nextDisabled = ((current_page + 1) * bleDevicesPerPage() >= deviceCount);
-
-          if (x >= 0 && x <= 57) {
-            drawButton(0, 304, 57, 16, "Rescan", true, false);
-            delay(50);
-            startBLEScan();
-            lastTouchActionMs = nowMs;
-          } else if (x >= 117 && x <= 179 && !isDetailView && !prevDisabled) {
-            drawButton(117, 304, 57, 16, "Prev", true, false);
-            current_page--;
-            if (current_page < 0) current_page = 0;
-            currentIndex = current_page * bleDevicesPerPage();
-            listStartIndex = current_page * bleDevicesPerPage();
-            screenNeedsUpdate = true;
-            fullScreenUpdate = true;
-            lastTouchActionMs = nowMs;
-          } else if (x >= 177 && x <= 240) {
-            if (isDetailView) {
-              drawButton(177, 304, 57, 16, "Back", true, false);
-              isDetailView = false;
-              screenNeedsUpdate = true;
-              fullScreenUpdate = true;
-              lastTouchActionMs = nowMs;
-            } else if (!nextDisabled) {
-              drawButton(177, 304, 57, 16, "Next", true, false);
-              current_page++;
-              currentIndex = current_page * bleDevicesPerPage();
-              listStartIndex = current_page * bleDevicesPerPage();
-              screenNeedsUpdate = true;
-              fullScreenUpdate = true;
-              lastTouchActionMs = nowMs;
-            }
-          }
-        } else if (!isDetailView) {
-          const int listMaxY = LIST_FIRST_ROW_Y + (bleDevicesPerPage() * LIST_ROW_H);
-          if (deviceCount > 0 && y >= LIST_FIRST_ROW_Y && y < listMaxY) {
-            const int row = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H;
-            const int idx = (current_page * bleDevicesPerPage()) + row;
-            if (idx >= 0 && idx < deviceCount) {
-              currentIndex = idx;
-              isDetailView = true;
-              screenNeedsUpdate = true;
-              fullScreenUpdate = true;
-              lastTouchActionMs = nowMs;
-            }
-          }
-        }
-      }
-    }
-    lastTouchCheck = millis();
-  }
-}
-
-void bleScanSetup() {
-  BleSniffer::exit();
-  pauseBackgroundRadioTasks();
-  setTouchButtonInputEnabled(true);
-  bleScanUpdateNavLabels();
-  bleClearBody(TFT_BLACK);
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  redrawTouchButtonBar();
-
-  uiDrawn = false;
-  runUI();
-
-  setupTouchscreen();
-
-#if HAS_PCF8574_BUTTONS
-  pcf.pinMode(BTN_UP, INPUT_PULLUP);
-  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
-  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
-  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
-#endif
-
-  ensureBleInit();
-
-  // With auto BLE scan off, cached bleResults are not updated â€” only reuse when background scan is on.
-  if (settings().autoBleScan && bgHasResults && bleResults.getCount() > 0) {
-    current_page = 0;
-    currentIndex = 0;
-    listStartIndex = 0;
-    isDetailView = false;
-    screenNeedsUpdate = true;
-    fullScreenUpdate = true;
-    updateBLEList();
-  } else {
-    startBLEScan();
-  }
-
-  redrawTouchButtonBar();
-}
-
-void bleScanLoop() {
-
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
-    feature_exit_requested = true;
-    return;
-  }
-
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  handleButtons();
-
-  runUI();
-  updateStatusBar();
-
-  if (screenNeedsUpdate) {
-    screenNeedsUpdate = false;
-    if (isScanning) {
-      displayScanning();
-    } else if (!isDetailView) {
-      updateBLEList();
-    } else {
-      displayBLEDetails();
-    }
-    if (fullScreenUpdate) fullScreenUpdate = false;
-  }
-}
-
-void startBackgroundScanner() {
-  if (bgBleScanTaskHandle != nullptr) return;
-  xTaskCreatePinnedToCore(
-    bgBleScanTask,
-    "bgBleScan",
-    4096,
-    nullptr,
-    1,
-    &bgBleScanTaskHandle,
-    0
-  );
-}
-
-int getLastCount() {
-
-  if (!settings().autoBleScan) return 0;
-  return bleResults.getCount();
-}
-
-void exit() {
-  fgBleScanInProgress = false;
-  if (bgBleScanRunning) {
-    stopBgBleScanIfRunning();
-  }
-  if (isScanning && bleScan) {
-    bleScan->stop();
-    isScanning = false;
-  }
-}
-}
-
-namespace Scanner {
-
-#define CE  NRF24_SCAN_CE
-#define CSN NRF24_SCAN_CSN
-
-#define CHANNELS  ESP32DIV_BLE_SCANNER_CHANS
-int channel[CHANNELS];
-
-#define N ESP32DIV_BLE_SCANNER_BARS
-uint8_t values[N];
-
-static bool uiDrawn = false;
-
-static constexpr uint16_t SCAN_SWEEPS        = 25;
-static constexpr uint16_t DISPLAY_SWEEPS     = 10;
-static constexpr uint16_t RX_SETTLE_US       = 100;
-static constexpr uint16_t RPD_DWELL_US       = 50;
-static constexpr uint32_t UI_THROTTLE_MS     = 35;
-static constexpr uint16_t BUTTON_POLL_STRIDE = 8;
-
-#define _NRF24_CONFIG   0x00
-#define _NRF24_EN_AA    0x01
-#define _NRF24_RF_CH    0x05
-#define _NRF24_RF_SETUP 0x06
-#define _NRF24_RPD      0x09
-
-int backgroundNoise[CHANNELS] = {0};
-
-volatile bool scanning = true;
-
-static constexpr int kScannerGraphTop = 190;
-static constexpr int kScannerLogBottom = kScannerGraphTop - 6;
-static constexpr int kScannerToolbarBottom = 36;
-static constexpr int kScannerToolbarGap = 8;
-static constexpr int kScannerBoxPad = 4;
-static constexpr int kScannerBoxHeaderH = 15;
-static constexpr int kScannerStatusY = kScannerToolbarBottom + kScannerToolbarGap;
-static constexpr int kScannerGraphMarginX = 6;
-static constexpr int kScannerBarColGap = 10;
-#if BOARD_HAS_ESP32S3
-static constexpr int kScannerBarsPerCol = 64;
-#else
-static constexpr int kScannerBarsPerCol = 32;
-#endif
-static constexpr int kScannerStatusLineCount = 6;
-static constexpr int kScannerStatusTextY = kScannerStatusY + kScannerBoxHeaderH;
-static constexpr int kScannerStatusBoxH = 91;
-static constexpr int kScannerLogGap = 4;
-static constexpr int kScannerLogBoxH = 49;
-static constexpr int kScannerLogBoxTop = kScannerStatusY + kScannerStatusBoxH + kScannerLogGap;
-static constexpr int kScannerLogStartY = kScannerLogBoxTop + kScannerBoxHeaderH;
-static constexpr int kScannerLogEndY = kScannerLogBoxTop + kScannerLogBoxH - 2;
-
-#define SCREEN_HEIGHT 180
-#define LINE_HEIGHT 12
-#define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
-
-String Buffer[MAX_LINES];
-uint16_t Buffercolor[MAX_LINES];
-int Index = 0;
-
-bool isSelectButtonPressed() {
-  return isButtonPressed(BTN_SELECT);
-}
-
-byte getRegister(byte r) {
-  byte c;
-  digitalWrite(CSN, LOW);
-  SPI.transfer(r & 0x1F);
-  c = SPI.transfer(0);
-  digitalWrite(CSN, HIGH);
-  return c;
-}
-
-bool carrierDetected() {
-  return getRegister(_NRF24_RPD) & 0x01;
-}
-
-void setRegister(byte r, byte v) {
-  digitalWrite(CSN, LOW);
-  SPI.transfer((r & 0x1F) | 0x20);
-  SPI.transfer(v);
-  digitalWrite(CSN, HIGH);
-}
-
-void setChannel(uint8_t channel) {
-  setRegister(_NRF24_RF_CH, channel);
-}
-
-void powerUp() {
-  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x02);
-  delayMicroseconds(130);
-}
-
-void powerDown() {
-  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) & ~0x02);
-}
-
-void enable() {
-  digitalWrite(CE, HIGH);
-}
-
-void disable() {
-  digitalWrite(CE, LOW);
-}
-
-void setRX() {
-  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x01);
-  enable();
-  delayMicroseconds(100);
-}
-
-void scroll() {
-  for (int i = 3; i < MAX_LINES - 1; i++) {
-    Buffer[i] = Buffer[i + 1];
-    Buffercolor[i] = Buffercolor[i + 1];
-  }
-}
-
-void Print(String text, uint16_t color, bool extraSpace = false) {
-  const bool scrolled = (Index >= MAX_LINES - 1);
-  if (scrolled) {
-    scroll();
-    Index = MAX_LINES - 1;
-  }
-
-  const int firstNewIndex = Index;
-  Buffer[Index] = text;
-  Buffercolor[Index] = color;
-  Index++;
-
-  if (extraSpace && Index < MAX_LINES) {
-    Buffer[Index] = "";
-    Buffercolor[Index] = WHITE;
-    Index++;
-  }
-
-  static auto redrawLogLine = [](int bufIndex) {
-    if (bufIndex < 3) {
-      return;
-    }
-    const int yPos = kScannerLogStartY + (bufIndex - 3) * LINE_HEIGHT;
-    if (yPos + LINE_HEIGHT > kScannerLogEndY) {
-      return;
-    }
-    tft.fillRect(8, yPos, tft.width() - 16, LINE_HEIGHT, TFT_BLACK);
-    tft.setTextSize(1);
-    tft.setTextColor(Buffercolor[bufIndex], TFT_BLACK);
-    tft.setCursor(8, yPos);
-    tft.print(Buffer[bufIndex]);
-  };
-
-  if (scrolled) {
-    for (int i = 3; i < Index; i++) {
-      redrawLogLine(i);
-    }
-    return;
-  }
-
-  for (int i = firstNewIndex; i < Index; i++) {
-    redrawLogLine(i);
-  }
-}
-
-static unsigned long s_scannerLastBtnMs = 0;
-static constexpr unsigned long kScannerNavDebounceMs = 80;
-
-void calibrateBackgroundNoise();
-void scan();
-static String scannerChannelGHzText(int ch);
-static String scannerBandHint(int ch);
-
-static void scannerWaitNavRelease(int pin) {
-  const uint32_t t0 = millis();
-  while (isTouchNavButtonPressed(pin) && millis() - t0 < 400) {
-    delay(5);
-  }
-  delay(30);
-}
-
-void scannerHandleNavButtons() {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
-  const uint32_t now = millis();
-  if (now - s_scannerLastBtnMs < kScannerNavDebounceMs) {
-    return;
-  }
-
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    calibrateBackgroundNoise();
-    s_scannerLastBtnMs = millis();
-    scannerWaitNavRelease(BTN_LEFT);
-    return;
-  }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    scan();
-    s_scannerLastBtnMs = millis();
-    scannerWaitNavRelease(BTN_DOWN);
-  }
-}
-
-static void scannerPollNavButtons() {
-  maintainTouchNavBar();
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-    feature_exit_requested = true;
-    scanning = false;
-    return;
-  }
-  scannerHandleNavButtons();
-}
-
-void calibrateBackgroundNoise() {
-
-  Print("[!] Calibrating noise floor...", UI_TEXT, false);
-
-  for (int i = 0; i < 2; i++) {
-    disable();
-    for (int j = 0; j < 50; j++) {
-      for (int i = 0; i < CHANNELS; i++) {
-        if ((i % BUTTON_POLL_STRIDE) == 0) {
-          scannerPollNavButtons();
-        }
-
-        setRegister(_NRF24_RF_CH, (uint8_t)i);
-        enable();
-        delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
-        disable();
-        if (carrierDetected()) channel[i]++;
-      }
-    }
-    for (int j = 0; j < CHANNELS; j++) {
-      backgroundNoise[j] += channel[j];
-
-    }
-  }
-
-  int maxNoiseCh = 0;
-  int maxNoise = 0;
-  for (int i = 0; i < CHANNELS; i++) {
-    backgroundNoise[i] /= 5;
-    if (backgroundNoise[i] > maxNoise) {
-      maxNoise = backgroundNoise[i];
-      maxNoiseCh = i;
-    }
-  }
-
-  Print("[+] Calibrate done  Ch" + String(maxNoiseCh) + " " + scannerChannelGHzText(maxNoiseCh) + "GHz", UI_WARN, false);
-}
-
-void scan() {
-  Print("[!] Scan refresh...", UI_TEXT, false);
-  memset(channel, 0, sizeof(channel));
-  disable();
-  for (int j = 0; j < 50; j++) {
-    for (int i = 0; i < CHANNELS; i++) {
-      if ((i % BUTTON_POLL_STRIDE) == 0) {
-        scannerPollNavButtons();
-      }
-
-      setRegister(_NRF24_RF_CH, (uint8_t)i);
-      enable();
-      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
-      disable();
-      if (carrierDetected()) channel[i]++;
-    }
-  }
-
-  int peakCh = 0;
-  int peakHits = 0;
-  int active = 0;
-  for (int i = 0; i < CHANNELS; i++) {
-    if (channel[i] > 0) {
-      active++;
-    }
-    if (channel[i] > peakHits) {
-      peakHits = channel[i];
-      peakCh = i;
-    }
-  }
-  if (peakHits > 0) {
-    Print("[+] Scan done  " + String(active) + " hit(s)  peak Ch" + String(peakCh), UI_WARN, false);
-  } else {
-    Print("[*] Scan done  no carriers", UI_DIM_TEXT, false);
-  }
-}
-
-void runUI() {
-#define SCREEN_WIDTH  240
-#define SCREEN_HEIGHT 320
-#define STATUS_BAR_Y_OFFSET 20
-#define STATUS_BAR_HEIGHT 16
-#define ICON_SIZE 16
-#define ICON_NUM 3
-
-  static int iconX[ICON_NUM] = {170, 210, 10};
-  static int iconY = STATUS_BAR_Y_OFFSET;
-
-  static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_undo,
-    bitmap_icon_start,
-    bitmap_icon_go_back
-  };
-
-  if (!uiDrawn) {
-
-    tft.fillRect(0, 20, 160, 16, DARK_GRAY);
-    tft.setTextColor(UI_TEXT, DARK_GRAY);
-    tft.setCursor(35, 24);
-    tft.print("2.4GHz Scanner");
-
-    tft.drawFastHLine(0, 19, 240, UI_LINE);
-    tft.fillRect(160, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-
-    for (int i = 0; i < ICON_NUM; i++) {
-      if (icons[i] != NULL) {
-        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, UI_ICON);
-      }
-    }
-    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
-    uiDrawn = true;
-  }
-
-  static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;
-  static int activeIcon = -1;
-
-  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
-    if (animationState == 1) {
-      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, UI_ICON);
-      animationState = 2;
-
-      switch (activeIcon) {
-        case 0: calibrateBackgroundNoise(); break;
-        case 1: scan(); break;
-      }
-    } else if (animationState == 2) {
-      animationState = 0;
-      activeIcon = -1;
-    }
-    lastAnimationTime = millis();
-  }
-
-  static unsigned long lastTouchCheck = 0;
-  const unsigned long touchCheckInterval = 50;
-
-  if (millis() - lastTouchCheck >= touchCheckInterval) {
-    int x, y;
-    if (feature_active && readTouchXY(x, y)) {
-      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
-        for (int i = 0; i < ICON_NUM; i++) {
-          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
-            if (icons[i] != NULL && animationState == 0) {
-
-              if (i == 2) {
-                feature_exit_requested = true;
-
-                scanning = false;
-              } else {
-
-                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-                animationState = 1;
-                activeIcon = i;
-                lastAnimationTime = millis();
-              }
-            }
-            break;
-          }
-        }
-      }
-    }
-    lastTouchCheck = millis();
-  }
-}
-
-void scanChannels() {
-  disable();
-  static uint32_t lastUI = 0;
-  for (int j = 0; j < (int)SCAN_SWEEPS && scanning; j++) {
-    for (int i = 0; i < CHANNELS && scanning; i++) {
-
-      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
-        scanning = false;
-        Print("Scan interrupted by user", UI_WARN, true);
-        return;
-      }
-      if (feature_exit_requested || featureExitButtonPressed()) {
-        scanning = false;
-        return;
-      }
-
-      setRegister(_NRF24_RF_CH, (uint8_t)i);
-      enable();
-      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
-      disable();
-      if (carrierDetected()) channel[i]++;
-
-      uint32_t now = millis();
-      if (now - lastUI >= UI_THROTTLE_MS) {
-        runUI();
-        scannerPollNavButtons();
-        lastUI = now;
-        delay(0);
-        if (feature_exit_requested || featureExitButtonPressed()) {
-          scanning = false;
-          return;
-        }
-      } else if ((i % BUTTON_POLL_STRIDE) == 0) {
-        scannerPollNavButtons();
-      }
-    }
-  }
-}
-
-void outputChannels() {
-  int norm = 0;
-  for (int i = 0; i < CHANNELS && scanning; i++) {
-    if (channel[i] > norm) norm = channel[i];
-  }
-  static uint32_t lastUI = 0;
-  for (int i = 0; i < CHANNELS && scanning; i++) {
-    if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
-      scanning = false;
-      Print("Output interrupted by user", UI_WARN, true);
-      return;
-    }
-    int strength = (norm != 0) ? (channel[i] * 10) / norm : 0;
-    (void)strength;
-    channel[i] = 0;
-    uint32_t now = millis();
-    if (now - lastUI >= UI_THROTTLE_MS) {
-      runUI();
-      scannerPollNavButtons();
-      lastUI = now;
-      delay(0);
-    } else if ((i % BUTTON_POLL_STRIDE) == 0) {
-      scannerPollNavButtons();
-    }
-  }
-}
-
-struct ScannerPlotLayout {
-  int graphTop = 0;
-  int axisX = 10;
-  int plotRight = 0;
-  int plotTop = 0;
-  int plotBottom = 0;
-  int plotHeight = 0;
-  int plotWidth = 0;
-  int maxBarHeight = 0;
-  bool valid = false;
-};
-
-static ScannerPlotLayout s_plot;
-static uint8_t s_smoothValues[N];
-static uint8_t s_prevBarPx[N];
-static bool s_graphChromeDrawn = false;
-static int s_lastPeakCh = -1;
-static uint8_t s_lastPeakVal = 0;
-static int s_peakMarkerX = -1;
-static int s_statusPeakCh = -1;
-static uint8_t s_statusPeakVal = 0;
-static int s_statusActive = -1;
-static int s_statusPctBucket = -1;
-static uint32_t s_lastStatusDrawMs = 0;
-static String s_statusLineText[kScannerStatusLineCount];
-static uint16_t s_statusLineColor[kScannerStatusLineCount];
-static bool s_statusStaticDrawn = false;
-
-
-static int scannerBarCol0X() {
-  const int barsSpan = (kScannerBarsPerCol * 2) + kScannerBarColGap;
-  return s_plot.axisX + max(0, (s_plot.plotWidth - barsSpan) / 2);
-}
-
-static int scannerBarX(int ch) {
-  const int col0 = scannerBarCol0X();
-  if (ch < kScannerBarsPerCol) {
-    return col0 + ch;
-  }
-  return col0 + kScannerBarsPerCol + kScannerBarColGap + (ch - kScannerBarsPerCol);
-}
-
-static constexpr int kScannerGridDivisions = 4;
-static constexpr int kScannerMinBarPx = 5;
-
-static int scannerHorizGridY(int lineIndex) {
-  return s_plot.plotTop + ((s_plot.plotHeight * lineIndex) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
-}
-
-static void scannerDrawHorizGridLines() {
-  for (int g = 1; g < kScannerGridDivisions; g++) {
-    const int gy = scannerHorizGridY(g);
-    tft.drawFastHLine(s_plot.axisX + 1, gy, s_plot.plotWidth - 2, 0x2945);
-  }
-}
-
-static void scannerDrawVertGridLines() {
-  for (int v = 1; v < kScannerGridDivisions; v++) {
-    const int vx = s_plot.axisX + ((s_plot.plotWidth * v) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
-    tft.drawFastVLine(vx, s_plot.plotTop + 1, s_plot.plotHeight - 2, 0x2945);
-  }
-}
-
-static void scannerResetGraphState() {
-  s_graphChromeDrawn = false;
-  s_plot.valid = false;
-  memset(s_smoothValues, 0, sizeof(s_smoothValues));
-  memset(s_prevBarPx, 0, sizeof(s_prevBarPx));
-  memset(values, 0, sizeof(values));
-  s_lastPeakCh = -1;
-  s_lastPeakVal = 0;
-  s_peakMarkerX = -1;
-  s_statusPeakCh = -1;
-  s_statusPeakVal = 0;
-  s_statusActive = -1;
-  s_statusPctBucket = -1;
-  s_lastStatusDrawMs = 0;
-  s_statusStaticDrawn = false;
-  for (int i = 0; i < kScannerStatusLineCount; i++) {
-    s_statusLineText[i] = "";
-    s_statusLineColor[i] = 0;
-  }
-}
-
-static void scannerRestoreColumnDecor(int x) {
-  if (!s_plot.valid) {
-    return;
-  }
-  for (int g = 1; g < kScannerGridDivisions; g++) {
-    const int gy = scannerHorizGridY(g);
-    if (gy > s_plot.plotTop && gy < s_plot.plotBottom) {
-      tft.drawPixel(x, gy, 0x2945);
-    }
-  }
-  for (int v = 1; v < kScannerGridDivisions; v++) {
-    const int vx = s_plot.axisX + ((s_plot.plotWidth * v) + (kScannerGridDivisions / 2)) / kScannerGridDivisions;
-    if (vx == x) {
-      tft.drawFastVLine(vx, s_plot.plotTop + 1, s_plot.plotHeight - 2, 0x2945);
-      break;
-    }
-  }
-}
-
-static void scannerEnsurePlotLayout() {
-  const int screenW = tft.width();
-  s_plot.graphTop = kScannerGraphTop;
-  s_plot.axisX = kScannerGraphMarginX;
-  s_plot.plotRight = screenW - kScannerGraphMarginX;
-  s_plot.plotTop = s_plot.graphTop + 12;
-  s_plot.plotBottom = bleContentBottom() - 13;
-  s_plot.plotHeight = s_plot.plotBottom - s_plot.plotTop;
-  s_plot.plotWidth = s_plot.plotRight - s_plot.axisX;
-  s_plot.maxBarHeight = s_plot.plotHeight;
-  s_plot.valid = s_plot.plotWidth >= 32 && s_plot.plotHeight >= 10;
-}
-
-static void scannerDrawGraphChrome() {
-  scannerEnsurePlotLayout();
-  if (!s_plot.valid) {
-    return;
-  }
-
-  const int screenW = tft.width();
-  const int graphBottom = bleContentBottom() - 2;
-  tft.fillRect(0, kScannerLogBottom, screenW, graphBottom - kScannerLogBottom + 2, TFT_BLACK);
-  tft.fillRect(s_plot.axisX, s_plot.plotTop, s_plot.plotWidth, s_plot.plotHeight, 0x0842);
-
-  scannerDrawHorizGridLines();
-  scannerDrawVertGridLines();
-
-  tft.drawRect(s_plot.axisX, s_plot.plotTop, s_plot.plotWidth, s_plot.plotHeight, UI_LINE);
-  tft.drawLine(s_plot.axisX, s_plot.plotTop, s_plot.axisX, s_plot.plotBottom, WHITE);
-  tft.drawLine(s_plot.axisX, s_plot.plotBottom, s_plot.plotRight, s_plot.plotBottom, WHITE);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString("2.4 GHz Spectrum", (screenW - 96) / 2, s_plot.graphTop + 2);
-
-  const int labelY = s_plot.plotBottom + 2;
-  const int endMhz = 2400 + N - 1;
-  char lo[8], mid[8], hi[8];
-  snprintf(lo, sizeof(lo), "2.40");
-  snprintf(mid, sizeof(mid), "2.%02u", (unsigned)((2400 + N / 2) % 100));
-  snprintf(hi, sizeof(hi), "2.%02u", (unsigned)(endMhz % 100));
-  tft.drawString(lo, s_plot.axisX + 2, labelY);
-  tft.drawString(mid, s_plot.axisX + s_plot.plotWidth / 2 - 8, labelY);
-  tft.drawString(hi, s_plot.plotRight - 24, labelY);
-
-  s_graphChromeDrawn = true;
-  memset(s_prevBarPx, 0, sizeof(s_prevBarPx));
-  s_lastPeakCh = -1;
-  s_lastPeakVal = 0;
-  s_peakMarkerX = -1;
-}
-
-static void scannerFindPeak(const uint8_t* vals, int count, int& peakCh, uint8_t& peakVal) {
-  peakCh = 0;
-  peakVal = 0;
-  for (int i = 0; i < count; i++) {
-    if (vals[i] > peakVal) {
-      peakVal = vals[i];
-      peakCh = i;
-    }
-  }
-}
-
-static String scannerChannelGHzText(int ch) {
-  const uint16_t mhz = (uint16_t)(2400 + ch);
-  char buf[10];
-  snprintf(buf, sizeof(buf), "%u.%03u", mhz / 1000, mhz % 1000);
-  return String(buf);
-}
-
-static String scannerBandHint(int ch) {
-  if (ch == 2 || ch == 26 || ch == 80) {
-    return "BLE";
-  }
-  if (ch >= 10 && ch <= 15) {
-    return "WiFi Ch1";
-  }
-  if (ch >= 34 && ch <= 40) {
-    return "WiFi Ch6";
-  }
-  if (ch >= 59 && ch <= 65) {
-    return "WiFi Ch11";
-  }
-  if (ch >= 76 && ch <= 86) {
-    return "RC/Video";
-  }
-  return "ISM";
-}
-
-static String scannerChannelBandLine(int ch) {
-  return "Ch " + String(ch) + "  " + scannerBandHint(ch);
-}
-
-static String scannerFitStatusText(const String& text) {
-  const int maxWidth = tft.width() - 16;
-  tft.setTextSize(1);
-  if (tft.textWidth(text) <= maxWidth) {
-    return text;
-  }
-  String out = text;
-  while (out.length() > 1 && tft.textWidth(out + "...") > maxWidth) {
-    out.remove(out.length() - 1);
-  }
-  if (!out.isEmpty()) {
-    out += "...";
-  }
-  return out;
-}
-
-static int scannerCountActiveChannels(const uint8_t* vals, int count) {
-  int active = 0;
-  for (int i = 0; i < count; i++) {
-    if (vals[i] >= 3) {
-      active++;
-    }
-  }
-  return active;
-}
-
-static void scannerDrawStatusLine(int line, const String& text, uint16_t color) {
-  const int y = kScannerStatusTextY + line * LINE_HEIGHT;
-  const String fitted = scannerFitStatusText(text);
-  tft.fillRect(8, y, tft.width() - 16, LINE_HEIGHT, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.setCursor(8, y);
-  tft.print(fitted);
-}
-
-static void scannerDrawStatusLineIfChanged(int line, const String& text, uint16_t color) {
-  if (line < 0 || line >= kScannerStatusLineCount) {
-    return;
-  }
-  if (s_statusLineText[line] == text && s_statusLineColor[line] == color) {
-    return;
-  }
-  s_statusLineText[line] = text;
-  s_statusLineColor[line] = color;
-  scannerDrawStatusLine(line, text, color);
-}
-
-static void scannerDrawTextBoxes() {
-  tft.fillRect(0, kScannerStatusY - 2, tft.width(), kScannerLogBottom - kScannerStatusY + 2, TFT_BLACK);
-  tft.drawFastHLine(0, 19, tft.width(), UI_LINE);
-  tft.drawRoundRect(4, kScannerStatusY, tft.width() - 8, kScannerStatusBoxH, 3, UI_LINE);
-  tft.drawRoundRect(4, kScannerLogBoxTop, tft.width() - 8, kScannerLogBoxH, 3, UI_LINE);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.drawString("RF Status", 8, kScannerStatusY + 3);
-  tft.drawString("Activity", 8, kScannerLogBoxTop + 3);
-}
-
-static void scannerDrawStaticStatusLines() {
-  if (s_statusStaticDrawn) {
-    return;
-  }
-  char rangeLine[40];
-  snprintf(rangeLine, sizeof(rangeLine), "Range: 2.4-2.528 GHz  %d ch", N);
-  scannerDrawStatusLineIfChanged(4, rangeLine, UI_DIM_TEXT);
-  scannerDrawStatusLineIfChanged(5, "State: Monitoring", UI_DIM_TEXT);
-  s_statusStaticDrawn = true;
-}
-
-static void scannerUpdateStatusPanel(const uint8_t* vals, int count) {
-  int peakCh = 0;
-  uint8_t peakVal = 0;
-  scannerFindPeak(vals, count, peakCh, peakVal);
-  const int active = scannerCountActiveChannels(vals, count);
-
-  const int pct = peakVal > 0 ? min(100, ((int)peakVal * 100) / 64) : 0;
-  const int pctBucket = pct / 3;
-  const uint32_t now = millis();
-  if (peakCh == s_statusPeakCh && pctBucket == s_statusPctBucket &&
-      active == s_statusActive && now - s_lastStatusDrawMs < 200) {
-    return;
-  }
-  s_statusPeakCh = peakCh;
-  s_statusPeakVal = peakVal;
-  s_statusActive = active;
-  s_statusPctBucket = pctBucket;
-  s_lastStatusDrawMs = now;
-
-  scannerDrawStaticStatusLines();
-
-  if (peakVal == 0) {
-    scannerDrawStatusLineIfChanged(0, "Peak: none", UI_DIM_TEXT);
-    scannerDrawStatusLineIfChanged(1, "Ch --  --", UI_DIM_TEXT);
-    scannerDrawStatusLineIfChanged(2, "Strength: 0%", UI_DIM_TEXT);
-  } else {
-    scannerDrawStatusLineIfChanged(0, "Peak: " + scannerChannelGHzText(peakCh) + " GHz", UI_TEXT);
-    scannerDrawStatusLineIfChanged(1, scannerChannelBandLine(peakCh), UI_TEXT);
-    scannerDrawStatusLineIfChanged(2, "Strength: " + String(pct) + "%", UI_TEXT);
-  }
-
-  scannerDrawStatusLineIfChanged(3, "Active: " + String(active) + " channel(s)", active > 0 ? UI_OK : UI_DIM_TEXT);
-}
-
-static void scannerClearPeakMarker() {
-  if (!s_plot.valid || s_peakMarkerX < 0) {
-    return;
-  }
-  tft.drawPixel(s_peakMarkerX, s_plot.plotTop + 1, 0x0842);
-  s_peakMarkerX = -1;
-}
-
-static void scannerUpdatePeakMarker(const uint8_t* vals, int count) {
-  if (!s_plot.valid) {
-    return;
-  }
-
-  int peakCh = 0;
-  uint8_t peakVal = 0;
-  scannerFindPeak(vals, count, peakCh, peakVal);
-
-  if (peakCh == s_lastPeakCh && peakVal == s_lastPeakVal) {
-    return;
-  }
-  s_lastPeakCh = peakCh;
-  s_lastPeakVal = peakVal;
-
-  scannerClearPeakMarker();
-  if (peakVal == 0) {
-    return;
-  }
-
-  const int markerX = scannerBarX(peakCh);
-  tft.drawPixel(markerX, s_plot.plotTop + 1, WHITE);
-  s_peakMarkerX = markerX;
-}
-
-static void scannerUpdateBarColumn(int ch, int newPx, int oldPx) {
-  if (!s_plot.valid) {
-    return;
-  }
-  const int x = scannerBarX(ch);
-  const uint16_t bg = 0x0842;
-
-  if (newPx < oldPx) {
-    tft.fillRect(x, s_plot.plotBottom - oldPx, 1, oldPx - newPx, bg);
-    scannerRestoreColumnDecor(x);
-  }
-  if (newPx > oldPx) {
-    tft.fillRect(x, s_plot.plotBottom - newPx, 1, newPx - oldPx, UI_WARN);
-  }
-  s_prevBarPx[ch] = (uint8_t)newPx;
-}
-
-static void scannerSmoothFrame(const uint8_t* frameHits, int count) {
-  for (int i = 0; i < count; i++) {
-    if (frameHits[i] > 0) {
-      int blended = (((int)s_smoothValues[i] * 3) + ((int)frameHits[i] * 5)) / 8;
-      if (blended < (int)frameHits[i]) {
-        blended = frameHits[i];
-      }
-      s_smoothValues[i] = (uint8_t)min(255, blended);
-    } else if (s_smoothValues[i] > 2) {
-      s_smoothValues[i] = (uint8_t)(((int)s_smoothValues[i] * 7) / 8);
-    } else if (s_smoothValues[i] > 0) {
-      s_smoothValues[i]--;
-    }
-  }
-}
-
-static int scannerValueToBarPx(uint8_t val, uint8_t peakVal) {
-  if (val == 0 || !s_plot.valid || s_plot.maxBarHeight <= 0) {
-    return 0;
-  }
-
-  const int maxH = s_plot.maxBarHeight;
-  if (peakVal == 0 || val >= peakVal) {
-    return min(maxH, max(kScannerMinBarPx, (int)val));
-  }
-
-  const int span = maxH - kScannerMinBarPx;
-  int scaled = kScannerMinBarPx + (span * (int)val) / (int)peakVal;
-  return min(maxH, max(kScannerMinBarPx, scaled));
-}
-
-static void scannerUpdateBars(const uint8_t* vals, int count) {
-  if (!s_graphChromeDrawn) {
-    scannerDrawGraphChrome();
-  }
-  if (!s_plot.valid) {
-    return;
-  }
-
-  int peakCh = 0;
-  uint8_t peakVal = 0;
-  scannerFindPeak(vals, count, peakCh, peakVal);
-
-  for (int i = 0; i < count; i++) {
-    const int newPx = scannerValueToBarPx(vals[i], peakVal);
-    const int oldPx = s_prevBarPx[i];
-    if (newPx != oldPx) {
-      scannerUpdateBarColumn(i, newPx, oldPx);
-    }
-  }
-}
-
-void display() {
-  if (!scanning) {
-    return;
-  }
-
-  uint8_t frameHits[N];
-  memset(frameHits, 0, sizeof(frameHits));
-
-  disable();
-  static uint32_t lastNavPoll = 0;
-  for (int pass = 0; pass < (int)DISPLAY_SWEEPS && scanning; ++pass) {
-    for (int i = 0; i < N && scanning; ++i) {
-      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
-        scanning = false;
-        Print("Display interrupted by user", UI_WARN, true);
-        return;
-      }
-      if (feature_exit_requested || featureExitButtonPressed()) {
-        return;
-      }
-
-      setRegister(_NRF24_RF_CH, (uint8_t)i);
-      enable();
-      delayMicroseconds(RX_SETTLE_US + RPD_DWELL_US);
-      disable();
-      if (carrierDetected()) {
-        frameHits[i]++;
-      }
-
-      const uint32_t now = millis();
-      if (now - lastNavPoll >= UI_THROTTLE_MS) {
-        scannerPollNavButtons();
-        lastNavPoll = now;
-      } else if ((i % BUTTON_POLL_STRIDE) == 0) {
-        scannerPollNavButtons();
-      }
-    }
-  }
-
-  scannerSmoothFrame(frameHits, N);
-  scannerUpdateBars(s_smoothValues, N);
-  scannerUpdatePeakMarker(s_smoothValues, N);
-  scannerUpdateStatusPanel(s_smoothValues, N);
-}
-
-void scannerSetup() {
-  setTouchButtonInputEnabled(true);
-  bleSetScannerNavLabels();
-  bleClearBody(TFT_BLACK);
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  redrawTouchButtonBar();
-
-  uiDrawn = false;
-  scannerResetGraphState();
-  scannerDrawGraphChrome();
-
-  setupTouchscreen();
-
-  scannerDrawTextBoxes();
-  scannerDrawStatusLineIfChanged(0, "Peak: scanning...", UI_DIM_TEXT);
-  scannerDrawStatusLineIfChanged(1, "Ch --  --", UI_DIM_TEXT);
-  scannerDrawStatusLineIfChanged(2, "Strength: --", UI_DIM_TEXT);
-  scannerDrawStatusLineIfChanged(3, "Active: 0 channel(s)", UI_DIM_TEXT);
-  scannerDrawStaticStatusLines();
-  Print("[+] Scanner ready", UI_WARN, false);
-  redrawTouchButtonBar();
-
-  SPI.begin(NRF24_SPI_SCK, NRF24_SPI_MISO, NRF24_SPI_MOSI, NRF24_SPI_SS);
-  SPI.setDataMode(SPI_MODE0);
-  SPI.setFrequency(10000000);
-  SPI.setBitOrder(MSBFIRST);
-
-  pinMode(CE, OUTPUT);
-  pinMode(CSN, OUTPUT);
-
-  disable();
-  powerUp();
-
-  setRegister(_NRF24_CONFIG, getRegister(_NRF24_CONFIG) | 0x03);
-  delayMicroseconds(130);
-  setRegister(_NRF24_EN_AA, 0x0);
-  setRegister(_NRF24_RF_SETUP, 0x0F);
-
-  scanning = true;
-}
-
-void scannerLoop() {
-  scanning = true;
-  while (scanning) {
-
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-      feature_exit_requested = true;
-      scanning = false;
-      break;
-    }
-
-    scannerPollNavButtons();
-    runUI();
-    scanChannels();
-    outputChannels();
-    display();
-    delay(2);
-  }
-}
-
-void exit() {
-  // Fully release the nRF24 so it stops holding the shared SPI bus and drawing
-  // RX current after the user leaves the feature.
-  scanning = false;
-  disable();    // CE low: leave RX mode
-  powerDown();  // clear PWR_UP in CONFIG
-  digitalWrite(CSN, HIGH);
-
-  // Scanner remaps SPI (SCK/MISO swapped vs SD on DIV V2). Remount SD on the
-  // default shared bus so later features see a working card.
-  restoreSdAfterSharedSpi();
-}
-
-}  // namespace Scanner
-
-namespace ProtoKill {
-
-RF24 radio1(CE_PIN_1, CSN_PIN_1, 16000000);
-RF24 radio2(CE_PIN_2, CSN_PIN_2, 16000000);
-RF24 radio3(CE_PIN_3, CSN_PIN_3, 16000000);
-
-enum OperationMode { BLE_MODULE, Bluetooth_MODULE, WiFi_MODULE, VIDEO_TX_MODULE, RC_MODULE, USB_WIRELESS_MODULE, ZIGBEE_MODULE, NRF24_MODULE };
-OperationMode currentMode = WiFi_MODULE;
-
-bool jammerActive = false;
-
-const byte bluetooth_channels[] =        {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
-const byte ble_channels[] =              {2, 26, 80};
-const byte WiFi_channels[] =             {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-const byte usbWireless_channels[] =      {40, 50, 60};
-const byte videoTransmitter_channels[] = {70, 75, 80};
-const byte rc_channels[] =               {1, 3, 5, 7};
-const byte zigbee_channels[] =           {11, 15, 20, 25};
-const byte nrf24_channels[] =            {76, 78, 79};
-
-const byte BLE_channels[] = {2, 26, 80};
-byte channelGroup1[] = {2, 5, 8, 11};
-byte channelGroup2[] = {26, 29, 32, 35};
-byte channelGroup3[] = {80, 83, 86, 89};
-
-#define SCREEN_HEIGHT 320
-#define LINE_HEIGHT 12
-#define MAX_LINES (SCREEN_HEIGHT / LINE_HEIGHT)
-
-String Buffer[MAX_LINES];
-uint16_t Buffercolor[MAX_LINES];
-int Index = 0;
-
-volatile bool modeChangeRequested = false;
-volatile bool modeChangeRequested1 = false;
-volatile bool jammerToggleRequested = false;
-
-static constexpr int kProkillLogTop = 48;
-
-static int prokillVisibleLines() {
-  return bleMaxLinesInZone(kProkillLogTop, LINE_HEIGHT);
-}
-
-static bool prokillLineFits(int yPos) {
-  return yPos + LINE_HEIGHT <= bleContentBottom();
-}
-
-static void prokillRedrawLogLine(int bufIndex) {
-  const int visibleLines = prokillVisibleLines();
-  if (bufIndex < 0 || bufIndex >= visibleLines) {
-    return;
-  }
-  const int yPos = (bufIndex * LINE_HEIGHT) + kProkillLogTop;
-  if (!prokillLineFits(yPos)) {
-    return;
-  }
-
-  tft.fillRect(5, yPos, tft.width() - 10, LINE_HEIGHT, TFT_BLACK);
-  tft.setTextColor(Buffercolor[bufIndex], TFT_BLACK);
-  tft.setCursor(5, yPos);
-  tft.print(Buffer[bufIndex]);
-}
-
-static void prokillRedrawAllLog() {
-  const int visibleLines = prokillVisibleLines();
-  for (int i = 0; i < Index && i < visibleLines; i++) {
-    prokillRedrawLogLine(i);
-  }
-}
-
-void Print(String text, uint16_t color, bool extraSpace = false) {
-  const int visibleLines = prokillVisibleLines();
-  const bool scrolled = (Index >= visibleLines);
-  if (scrolled) {
-    for (int i = 0; i < visibleLines - 1; i++) {
-      Buffer[i] = Buffer[i + 1];
-      Buffercolor[i] = Buffercolor[i + 1];
-    }
-    Index = visibleLines - 1;
-  }
-
-  const int firstNewIndex = Index;
-  Buffer[Index] = text;
-  Buffercolor[Index] = color;
-  Index++;
-
-  if (extraSpace && Index < visibleLines) {
-    Buffer[Index] = "";
-    Buffercolor[Index] = WHITE;
-    Index++;
-  }
-
-  if (scrolled) {
-    prokillRedrawAllLog();
-    return;
-  }
-
-  for (int i = firstNewIndex; i < Index; i++) {
-    prokillRedrawLogLine(i);
-  }
-}
-
-void prokillHandleNavButtons() {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
-
-  if (isButtonPressedEdge(BTN_UP)) {
-    jammerToggleRequested = true;
-    bleWaitButtonRelease(BTN_UP);
-  }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    modeChangeRequested = true;
-    bleWaitButtonRelease(BTN_RIGHT);
-  }
-  if (isButtonPressedEdge(BTN_LEFT)) {
-    modeChangeRequested1 = true;
-    bleWaitButtonRelease(BTN_LEFT);
-  }
-}
-
-void configureRadio(RF24 &radio, const byte* channels, size_t size) {
-  radio.setAutoAck(false);
-  radio.stopListening();
-  radio.setRetries(0, 0);
-  radio.setPALevel(RF24_PA_MAX, true);
-  radio.setDataRate(RF24_2MBPS);
-  radio.setCRCLength(RF24_CRC_DISABLED);
-
-  for (size_t i = 0; i < size; i++) {
-    radio.setChannel(channels[i]);
-    radio.startConstCarrier(RF24_PA_MAX, channels[i]);
-  }
-}
-
-void initializeRadiosMultiMode() {
-  bool radio1Active = false;
-  bool radio2Active = false;
-  bool radio3Active = false;
-
-  if (radio1.begin()) {
-    configureRadio(radio1, channelGroup1, sizeof(channelGroup1));
-    radio1Active = true;
-  }
-  if (radio2.begin()) {
-    configureRadio(radio2, channelGroup2, sizeof(channelGroup2));
-    radio2Active = true;
-  }
-  if (radio3.begin()) {
-    configureRadio(radio3, channelGroup3, sizeof(channelGroup3));
-    radio3Active = true;
-  }
-}
-
-void initializeRadios() {
-  if (jammerActive) {
-    initializeRadiosMultiMode();
-
-  } else {
-    radio1.powerDown();
-    radio2.powerDown();
-    radio3.powerDown();
-  }
-}
-
-void updateTFT() {
-  tft.fillRect(0, 19, 240, 16, DARK_GRAY);
-
-  tft.setTextSize(1);
-
-  struct ButtonGuide {
-    const char* label;
-    const unsigned char* icon;
-  };
-
-  ButtonGuide buttons[] = {
-    {jammerActive ? "[ON]" : "[OFF]", bitmap_icon_UP},
-    {"MODE-", bitmap_icon_LEFT},
-    {"MODE+", bitmap_icon_RIGHT}
-  };
-
-  int xPos = 20;
-  int yPosIcon = 19;
-  int spacing = 75;
-
-  for (int i = 0; i < 3; i++) {
-    tft.drawBitmap(xPos, yPosIcon, buttons[i].icon, 16, 16, UI_ICON);
-
-    tft.setTextColor(UI_TEXT, DARK_GRAY);
-    tft.setCursor(xPos + 18, yPosIcon + 4);
-    tft.print(buttons[i].label);
-
-    if (i < 2) {
-      int sepX = xPos + spacing - 8;
-      tft.drawFastVLine(sepX, 22, 12, LIGHT_GRAY);
-    }
-
-    xPos += spacing;
-  }
-
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  tft.drawFastHLine(0, 35, 240, UI_LINE);
-
-}
-
-void printModeChange(OperationMode mode) {
-  String modeText = "[+] Mode changed to: ";
-  switch (mode) {
-    case BLE_MODULE:          modeText += "BLE";       break;
-    case Bluetooth_MODULE:    modeText += "Bluetooth"; break;
-    case WiFi_MODULE:         modeText += "WIFI";      break;
-    case USB_WIRELESS_MODULE: modeText += "USB";       break;
-    case VIDEO_TX_MODULE:     modeText += "Video";     break;
-    case RC_MODULE:           modeText += "RC";        break;
-    case ZIGBEE_MODULE:       modeText += "ZIGBEE";    break;
-    case NRF24_MODULE:        modeText += "NRF24";     break;
-    default: modeText                  += "Unknown";   break;
-  }
-  Print(modeText, UI_TEXT, false);
-}
-
-void printJammerStatus(bool active) {
-  String jammerText = "[!] Jammer ";
-  jammerText += active ? "Activated" : "Deactivated";
-  Print(jammerText, UI_WARN, false);
-}
-
-void checkModeChange() {
-  prokillHandleNavButtons();
-
-  if (modeChangeRequested) {
-    modeChangeRequested = false;
-    currentMode = static_cast<OperationMode>((currentMode + 1) % 8);
-    initializeRadios();
-    updateTFT();
-    printModeChange(currentMode);
-  }
-
-  if (modeChangeRequested1) {
-    modeChangeRequested1 = false;
-    currentMode = static_cast<OperationMode>((currentMode == 0) ? 7 : (currentMode - 1));
-    initializeRadios();
-    updateTFT();
-    printModeChange(currentMode);
-  }
-
-  if (jammerToggleRequested) {
-    jammerToggleRequested = false;
-    jammerActive = !jammerActive;
-    initializeRadios();
-    updateTFT();
-    printJammerStatus(jammerActive);
-  }
-}
-
-void prokillSetup() {
-  setTouchButtonInputEnabled(true);
-  bleSetJammerNavLabels();
-  bleClearBody(TFT_BLACK);
-  Index = 0;
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  redrawTouchButtonBar();
-
-  updateTFT();
-
-  initializeRadios();
-
-#if HAS_PCF8574_BUTTONS
-  pcf.pinMode(BTN_UP, INPUT_PULLUP);
-  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
-  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
-  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
-  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
-#endif
-
-  Print("[+] System Ready!", UI_WARN, true);
-  redrawTouchButtonBar();
-}
-
-void prokillLoop() {
-
-  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    feature_exit_requested = true;
-    return;
-  }
-
-  maintainTouchNavBar();
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-
-  checkModeChange();
-
-  if (jammerActive) {
-    if (currentMode == BLE_MODULE) {
-      int randomIndex = random(0, sizeof(ble_channels) / sizeof(ble_channels[0]));
-      int channel = ble_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == Bluetooth_MODULE) {
-      int randomIndex = random(0, sizeof(bluetooth_channels) / sizeof(bluetooth_channels[0]));
-      int channel = bluetooth_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == WiFi_MODULE) {
-      int randomIndex = random(0, sizeof(WiFi_channels) / sizeof(WiFi_channels[0]));
-      int channel = WiFi_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == USB_WIRELESS_MODULE) {
-      int randomIndex = random(0, sizeof(usbWireless_channels) / sizeof(usbWireless_channels[0]));
-      int channel = usbWireless_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == VIDEO_TX_MODULE) {
-      int randomIndex = random(0, sizeof(videoTransmitter_channels) / sizeof(videoTransmitter_channels[0]));
-      int channel = videoTransmitter_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == RC_MODULE) {
-      int randomIndex = random(0, sizeof(rc_channels) / sizeof(rc_channels[0]));
-      int channel = rc_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == ZIGBEE_MODULE) {
-      int randomIndex = random(0, sizeof(zigbee_channels) / sizeof(zigbee_channels[0]));
-      int channel = zigbee_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-
-    } else if (currentMode == NRF24_MODULE) {
-      int randomIndex = random(0, sizeof(nrf24_channels) / sizeof(nrf24_channels[0]));
-      int channel = nrf24_channels[randomIndex];
-      radio1.setChannel(channel);
-      radio2.setChannel(channel);
-      radio3.setChannel(channel);
-    }
-  }
-
-  // Yield to the scheduler so the idle task/watchdog and core-0 radio stack get
-  // CPU time; without this the tight loop starves the system and everything lags.
-  delay(1);
-}
-
-void exit() {
-  // Without this, leaving the feature keeps the radios running
-  // startConstCarrier(RF24_PA_MAX): a permanent full-power 2.4GHz transmission
-  // that jams the ESP32's own WiFi/BLE and makes the whole device sluggish.
-  jammerActive = false;
-  modeChangeRequested = false;
-  modeChangeRequested1 = false;
-  jammerToggleRequested = false;
-  radio1.powerDown();
-  radio2.powerDown();
-  radio3.powerDown();
-  restoreSdAfterSharedSpi();
-}
-
-}  // namespace ProtoKill
-
-// Shared MouseJack targets: scanner publishes, inject consumes.
-static constexpr int kMjSharedMax = 12;
-struct MjSharedTarget {
-  uint8_t addr[5];
-  uint8_t channel = 0;
-  bool used = false;
-  bool vulnerable = false;
-  char vendor[12] = {0};
-  uint16_t hits = 0;
-};
-static MjSharedTarget g_mjShared[kMjSharedMax];
-
-static void mjSharedPublish(const uint8_t* addr, uint8_t ch, bool vulnerable, const char* vendor) {
-  int idx = -1;
-  for (int i = 0; i < kMjSharedMax; i++) {
-    if (g_mjShared[i].used && memcmp(g_mjShared[i].addr, addr, 5) == 0) {
-      idx = i;
-      break;
-    }
-  }
-  if (idx < 0) {
-    for (int i = 0; i < kMjSharedMax; i++) {
-      if (!g_mjShared[i].used) {
-        idx = i;
-        break;
-      }
-    }
-    if (idx < 0) {
-      idx = 0;
-    }
-    memset(&g_mjShared[idx], 0, sizeof(MjSharedTarget));
-    memcpy(g_mjShared[idx].addr, addr, 5);
-    g_mjShared[idx].used = true;
-  }
-  g_mjShared[idx].channel = ch;
-  g_mjShared[idx].hits++;
-  if (vulnerable) {
-    g_mjShared[idx].vulnerable = true;
-  }
-  if (vendor && vendor[0]) {
-    strncpy(g_mjShared[idx].vendor, vendor, sizeof(g_mjShared[idx].vendor) - 1);
-  }
-}
-
-static int mjSharedCount() {
-  int n = 0;
-  for (int i = 0; i < kMjSharedMax; i++) {
-    if (g_mjShared[i].used) {
-      n++;
-    }
-  }
-  return n;
-}
 
 namespace EsbSniffer {
 
@@ -8869,698 +9639,3 @@ void exit() {
 }
 
 }  // namespace MouseJackInject
-
-namespace BleSniffer {
-
-#define SCREEN_WIDTH  240
-#define SCREENHEIGHT 320
-#define STATUS_BAR_Y_OFFSET 20
-#define STATUS_BAR_HEIGHT 16
-#define ICON_SIZE 16
-#define ICON_NUM 3
-
-static bool uiDrawn = false;
-
-static int iconX[ICON_NUM] = {170, 210, 10};
-static const unsigned char* icons[ICON_NUM] = {
-  bitmap_icon_undo,
-  bitmap_icon_eye2,
-  bitmap_icon_go_back
-};
-
-#define HEADER_HEIGHT 20
-#define STATUS_DOT_SIZE 8
-#define LINE_HEIGHT 16
-#define MAX_LINES 16
-#define MAX_DEVICES 32
-#define SCAN_INTERVAL 5000
-#define MAX_LINE_LENGTH 38
-#define BEACON_PREFIX "4c000215"
-#define ALERT_FLASH_DURATION 1000
-#define SEPARATOR_THICKNESS 1
-#define SEPARATOR_MARGIN 5
-#define Y_OFFSET 37
-
-struct Config {
-  static constexpr int tftRotation = 0;
-  static constexpr int serialBaud = 115200;
-  static constexpr int bleScanDuration = 5;
-  static constexpr int btScanDuration = 5;
-  static constexpr int maxPacketCount = 20;
-  static constexpr int minRssiThreshold = -20;
-  static constexpr int maxNewDevices = 20;
-  static constexpr int maxMfgDataLength = 31;
-  static constexpr unsigned long deviceTimeout = 30000;
-  static constexpr int maxRandomizedMacChanges = 5;
-};
-
-enum class MessageType {
-  DEVICE,
-  ALERT,
-  STATUS
-};
-
-struct DeviceInfo {
-  String mac;
-  int rssi = 0;
-  int packetCount = 0;
-  bool isSuspicious = false;
-  String deviceName;
-  String serviceUUID;
-  String beaconUUID;
-  unsigned long lastSeen = 0;
-  bool display = true;
-  bool jammingAlerted = false;
-  bool isBLE = true;
-  int macChangeCount = 0;
-};
-
-struct DisplayLine {
-  String text;
-  uint16_t color = GREEN;
-  uint16_t originalColor = GREEN;
-  bool isAlert = false;
-  unsigned long flashUntil = 0;
-  MessageType type = MessageType::DEVICE;
-};
-
-class BluetoothSniffer {
-private:
-  DeviceInfo devices[MAX_DEVICES];
-  DisplayLine displayLines[MAX_LINES];
-  int deviceCount = 0;
-  int lineNumber = 1;
-  int suspiciousCount = 0;
-  int newDevicesThisScan = 0;
-  int lastDeviceCount = -1;
-  int lastSuspiciousCount = -1;
-  bool scanning = true;
-  bool isBLEScanActive = true;
-  unsigned long lastScanTime = 0;
-  unsigned long lastFlashToggle = 0;
-  bool flashState = false;
-  BLEScan* pBLEScan = nullptr;
-  BLEAdvertisedDeviceCallbacks* bleDeviceCallbacks = nullptr;
-  static BluetoothSniffer* snifferInstance;
-
-  void releaseBleCallbacks() {
-    if (pBLEScan) {
-      pBLEScan->stop();
-      pBLEScan->setAdvertisedDeviceCallbacks(nullptr);
-    }
-    delete bleDeviceCallbacks;
-    bleDeviceCallbacks = nullptr;
-  }
-
-  static int snifferContentTop() {
-    return Y_OFFSET + HEADER_HEIGHT;
-  }
-
-  static int snifferVisibleLines() {
-    return bleMaxLinesInZone(snifferContentTop(), LINE_HEIGHT);
-  }
-
-  static bool snifferLineFits(int lineIndex) {
-    const int y = snifferContentTop() + (lineIndex * LINE_HEIGHT);
-    return y + LINE_HEIGHT <= bleContentBottom();
-  }
-
-  void initDisplay() {
-    uiDrawn = false;
-
-    float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, true);
-    runUI();
-
-    setupTouchscreen();
-    {
-      const int bodyH = bleContentBottom() - 37;
-      if (bodyH > 0) {
-        tft.fillRect(0, 37, 240, bodyH, TFT_BLACK);
-      }
-    }
-    tft.setTextSize(1);
-    updateHeader();
-
-  }
-
-  void updateHeader() {
-    if (!scanning) return;
-    tft.fillRect(0, Y_OFFSET, tft.width(), HEADER_HEIGHT, DARK_GRAY);
-    tft.setTextColor(WHITE, DARK_GRAY);
-    tft.setCursor(5, Y_OFFSET + 6);
-    String status = isBLEScanActive ? "BLE Scanning" : "BT Scanning";
-    tft.print(status + " | Dev: " + String(deviceCount) + " Sus: " + String(suspiciousCount));
-    uint16_t dotColor = isBLEScanActive ? BLUE : GREEN;
-    tft.fillCircle(tft.width() - 10, 46, STATUS_DOT_SIZE / 2, dotColor);
-    tft.drawFastHLine(0, 56, 240, UI_LINE);
-  }
-
-  void updateDisplay() {
-    if (!scanning) return;
-    unsigned long now = millis();
-    if (now - lastFlashToggle >= 500) {
-      flashState = !flashState;
-      lastFlashToggle = now;
-    }
-    {
-      const int bodyTop = Y_OFFSET + HEADER_HEIGHT;
-      const int bodyH = bleContentBottom() - bodyTop;
-      if (bodyH > 0) {
-        tft.fillRect(0, bodyTop, tft.width(), bodyH, TFT_BLACK);
-      }
-    }
-    const int visibleLines = snifferVisibleLines();
-    for (int i = 0; i < visibleLines; i++) {
-      if (displayLines[i].text.isEmpty()) continue;
-      if (!snifferLineFits(i)) continue;
-      int y = snifferContentTop() + (i * LINE_HEIGHT);
-      uint16_t textColor = displayLines[i].originalColor;
-      if (displayLines[i].isAlert && displayLines[i].flashUntil > now) {
-        textColor = flashState ? displayLines[i].originalColor : TFT_BLACK;
-      }
-      tft.setTextColor(textColor, TFT_BLACK);
-      tft.setCursor(5, y + 2);
-      tft.print(displayLines[i].text);
-      if (displayLines[i].originalColor == ORANGE && !displayLines[i].isAlert) {
-        tft.drawRect(3, y, tft.width() - 6, LINE_HEIGHT - 2, ORANGE);
-      }
-      if (i < visibleLines - 1 && !displayLines[i + 1].text.isEmpty() &&
-          displayLines[i].type != displayLines[i + 1].type && snifferLineFits(i + 1)) {
-        int separatorY = y + LINE_HEIGHT - 1;
-        tft.drawFastHLine(SEPARATOR_MARGIN, separatorY, tft.width() - 2 * SEPARATOR_MARGIN, DARK_GRAY);
-      }
-    }
-    if (deviceCount != lastDeviceCount || suspiciousCount != lastSuspiciousCount) {
-      updateHeader();
-      lastDeviceCount = deviceCount;
-      lastSuspiciousCount = suspiciousCount;
-    }
-    if (deviceCount == 0 && lineNumber == 1) {
-      tft.setTextColor(GREEN, TFT_BLACK);
-      tft.setCursor(5, snifferContentTop() + 10);
-    }
-  }
-
-  void addLine(String text, uint16_t color, bool isAlert = false, MessageType type = MessageType::DEVICE) {
-    if (!scanning) return;
-    if (text.length() > MAX_LINE_LENGTH) {
-      text = text.substring(0, MAX_LINE_LENGTH - 3) + "...";
-    }
-    const int visibleLines = snifferVisibleLines();
-    for (int i = visibleLines - 1; i > 0; i--) {
-      displayLines[i] = displayLines[i - 1];
-    }
-    for (int i = visibleLines; i < MAX_LINES; i++) {
-      displayLines[i].text = "";
-    }
-    displayLines[0].text = text;
-    displayLines[0].color = color;
-    displayLines[0].originalColor = (type == MessageType::STATUS) ? UI_DIM_TEXT : color;
-    displayLines[0].isAlert = isAlert;
-    displayLines[0].flashUntil = isAlert ? millis() + ALERT_FLASH_DURATION : 0;
-    displayLines[0].type = type;
-    updateDisplay();
-  }
-
-  void checkSuspiciousActivity(int idx, unsigned long timestamp) {
-    auto& device = devices[idx];
-    if (device.packetCount > Config::maxPacketCount || (device.isBLE && device.rssi > Config::minRssiThreshold)) {
-      if (!device.isSuspicious) {
-        device.isSuspicious = true;
-        suspiciousCount++;
-        if (device.display && !device.jammingAlerted) {
-          String protocol = device.isBLE ? "BLE" : "BT";
-          addLine(String(lineNumber++) + " -> Jamming Suspected (" + protocol + "): " + device.mac + " T:" + String(timestamp),
-                  ORANGE, true, MessageType::ALERT);
-          device.jammingAlerted = true;
-        }
-      }
-    }
-    if (device.isBLE && isRandomizedMac(device.mac) && device.macChangeCount > Config::maxRandomizedMacChanges) {
-      device.isSuspicious = true;
-      suspiciousCount++;
-      if (device.display) {
-        addLine(String(lineNumber++) + " -> MAC Spoofing Suspected (BLE): " + device.mac + " T:" + String(timestamp),
-                ORANGE, true, MessageType::ALERT);
-      }
-    }
-  }
-
-  bool isRandomizedMac(const String& mac) {
-    String firstByte = mac.substring(0, 2);
-    char* end;
-    long value = strtol(firstByte.c_str(), &end, 16);
-    return (value & 0xC0) == 0xC0;
-  }
-
-  void processNewDevice(BLEAdvertisedDevice* bleDevice, esp_bt_gap_cb_param_t* btDevice, unsigned long timestamp, bool isBLE) {
-    if (deviceCount >= MAX_DEVICES) {
-      addLine("Max devices reached!", RED, true, MessageType::ALERT);
-      return;
-    }
-    newDevicesThisScan++;
-    auto& device = devices[deviceCount];
-    device.isBLE = isBLE;
-    if (isBLE) {
-      device.mac = bleDevice->getAddress().toString().c_str();
-      device.rssi = bleDevice->getRSSI();
-      device.deviceName = bleDevice->getName().c_str();
-      device.serviceUUID = bleDevice->getServiceUUID().toString().c_str();
-      String mfgData = bleDevice->getManufacturerData().c_str();
-      checkBeaconSpoofing(device, mfgData, timestamp);
-      checkMalformedPacket(device, mfgData, timestamp);
-    } else {
-      char macStr[18];
-      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-               btDevice->disc_res.bda[0], btDevice->disc_res.bda[1], btDevice->disc_res.bda[2],
-               btDevice->disc_res.bda[3], btDevice->disc_res.bda[4], btDevice->disc_res.bda[5]);
-      device.mac = macStr;
-      device.rssi = 0;
-    }
-    device.packetCount = 1;
-    device.lastSeen = timestamp;
-    device.display = true;
-    checkMacSpoofing(device, timestamp);
-    checkSuspiciousActivity(deviceCount, timestamp);
-    if (device.display) {
-      String protocol = isBLE ? "BLE" : "BT";
-      String line = String(lineNumber++) + " -> " + device.mac + " (" + String(device.rssi) + " dBm, " + protocol + ")";
-      if (isBLE && !device.deviceName.isEmpty()) line += " N:" + device.deviceName.substring(0, 6);
-      if (isBLE && !device.serviceUUID.isEmpty()) line += " U:" + device.serviceUUID.substring(0, 8);
-      line += " T:" + String(timestamp).substring(0, 6);
-      addLine(line, device.isSuspicious ? ORANGE : GREEN, false, MessageType::DEVICE);
-    }
-    deviceCount++;
-    if (newDevicesThisScan > Config::maxNewDevices && device.display) {
-      String protocol = isBLE ? "BLE" : "BT";
-      addLine(String(lineNumber++) + " -> Flooding Detected (" + protocol + ") T:" + String(timestamp),
-              ORANGE, true, MessageType::ALERT);
-    }
-  }
-
-  void checkBeaconSpoofing(DeviceInfo& device, const String& mfgData, unsigned long timestamp) {
-    if (!device.isBLE || !mfgData.startsWith(BEACON_PREFIX)) return;
-    device.beaconUUID = mfgData.substring(4, 36);
-    for (int i = 0; i < deviceCount; i++) {
-      if (devices[i].beaconUUID == device.beaconUUID && devices[i].mac != device.mac) {
-        devices[i].isSuspicious = true;
-        device.isSuspicious = true;
-        suspiciousCount++;
-        if (device.display) {
-          addLine(String(lineNumber++) + " -> Beacon Spoofing (BLE): " + device.mac + " T:" + String(timestamp),
-                  ORANGE, true, MessageType::ALERT);
-        }
-      }
-    }
-  }
-
-  void checkMalformedPacket(DeviceInfo& device, const String& mfgData, unsigned long timestamp) {
-    if (!device.isBLE || mfgData.length() <= Config::maxMfgDataLength) return;
-    device.isSuspicious = true;
-    suspiciousCount++;
-    if (device.display) {
-      addLine(String(lineNumber++) + " -> Malformed Packet (BLE): " + device.mac + " T:" + String(timestamp),
-              ORANGE, true, MessageType::ALERT);
-    }
-  }
-
-  void checkMacSpoofing(DeviceInfo& device, unsigned long timestamp) {
-    for (int i = 0; i < deviceCount; i++) {
-      if (devices[i].mac == device.mac && i != deviceCount) {
-        devices[i].isSuspicious = true;
-        device.isSuspicious = true;
-        suspiciousCount++;
-        if (device.display) {
-          String protocol = device.isBLE ? "BLE" : "BT";
-          addLine(String(lineNumber++) + " -> Possible Spoofing (" + protocol + "): " + device.mac + " T:" + String(timestamp),
-                  ORANGE, true, MessageType::ALERT);
-        }
-      }
-    }
-  }
-
-  void cleanupDevices(unsigned long timestamp) {
-    for (int i = 0; i < deviceCount; ) {
-      if (timestamp - devices[i].lastSeen > Config::deviceTimeout) {
-        if (devices[i].isSuspicious) suspiciousCount--;
-        for (int j = i; j < deviceCount - 1; j++) {
-          devices[j] = devices[j + 1];
-        }
-        deviceCount--;
-      } else {
-        i++;
-      }
-    }
-  }
-
-  void filterByMac(const String& filterMac) {
-    for (int i = 0; i < deviceCount; i++) {
-      devices[i].display = (devices[i].mac == filterMac);
-    }
-    refreshDisplay();
-  }
-
-  void filterSuspicious() {
-    for (int i = 0; i < deviceCount; i++) {
-      devices[i].display = devices[i].isSuspicious;
-    }
-    refreshDisplay();
-  }
-
-  void refreshDisplay() {
-    for (int i = 0; i < MAX_LINES; i++) {
-      displayLines[i].text = "";
-      displayLines[i].color = GREEN;
-      displayLines[i].originalColor = GREEN;
-      displayLines[i].isAlert = false;
-      displayLines[i].flashUntil = 0;
-      displayLines[i].type = MessageType::DEVICE;
-    }
-    lineNumber = 1;
-    {
-      const int bodyTop = Y_OFFSET + HEADER_HEIGHT;
-      const int bodyH = bleContentBottom() - bodyTop;
-      if (bodyH > 0) {
-        tft.fillRect(0, bodyTop, tft.width(), bodyH, TFT_BLACK);
-      }
-    }
-    for (int i = 0; i < deviceCount; i++) {
-      if (devices[i].display) {
-        String protocol = devices[i].isBLE ? "BLE" : "BT";
-        String line = String(lineNumber++) + " -> " + devices[i].mac + " (" + String(devices[i].rssi) + " dBm, " + protocol + ")";
-        if (devices[i].isBLE && !devices[i].deviceName.isEmpty()) line += " N:" + devices[i].deviceName.substring(0, 6);
-        if (devices[i].isBLE && !devices[i].serviceUUID.isEmpty()) line += " U:" + devices[i].serviceUUID.substring(0, 8);
-        line += " T:" + String(devices[i].lastSeen).substring(0, 6);
-        addLine(line, devices[i].isSuspicious ? ORANGE : GREEN, false, MessageType::DEVICE);
-      }
-    }
-  }
-
-void runUI() {
-
-  static int iconY = STATUS_BAR_Y_OFFSET;
-
-  if (!uiDrawn) {
-    tft.drawFastHLine(0, 19, 240, UI_LINE);
-    tft.drawFastHLine(0, 36, 240, UI_LINE);
-    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
-
-    for (int i = 0; i < ICON_NUM; i++) {
-      if (icons[i] != NULL) {
-        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      }
-    }
-    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
-    uiDrawn = true;
-  }
-
-  static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;
-  static int activeIcon = -1;
-
-  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
-    if (animationState == 1) {
-      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      animationState = 2;
-
-      switch (activeIcon) {
-        case 0:
-            deviceCount = 0;
-            suspiciousCount = 0;
-            lastDeviceCount = -1;
-            lastSuspiciousCount = -1;
-            lineNumber = 1;
-            for (int i = 0; i < MAX_LINES; i++) {
-              displayLines[i].text = "";
-              displayLines[i].color = GREEN;
-              displayLines[i].originalColor = GREEN;
-              displayLines[i].isAlert = false;
-              displayLines[i].flashUntil = 0;
-              displayLines[i].type = MessageType::DEVICE;
-            }
-            refreshDisplay();
-            addLine("Device list reset", DARK_GRAY, true, MessageType::STATUS);
-          break;
-        case 1:
-           filterSuspicious();
-          break;
-        case 2:
-           feature_exit_requested = true;
-          break;
-      }
-    } else if (animationState == 2) {
-      animationState = 0;
-      activeIcon = -1;
-    }
-    lastAnimationTime = millis();
-  }
-
-  static unsigned long lastTouchCheck = 0;
-  static bool s_headerTouchHeld = false;
-  const unsigned long touchCheckInterval = 25;
-
-  if (millis() - lastTouchCheck >= touchCheckInterval) {
-    int x = 0;
-    int y = 0;
-    int hitIcon = -1;
-    if (feature_active && readTouchXY(x, y)) {
-      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
-        for (int i = 0; i < ICON_NUM; i++) {
-          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
-            if (icons[i] != NULL && animationState == 0) {
-              hitIcon = i;
-            }
-            break;
-          }
-        }
-      }
-    }
-    if (hitIcon >= 0) {
-      if (!s_headerTouchHeld) {
-        if (hitIcon == 2) {
-          feature_exit_requested = true;
-        } else {
-          tft.drawBitmap(iconX[hitIcon], iconY, icons[hitIcon], ICON_SIZE, ICON_SIZE, TFT_BLACK);
-          animationState = 1;
-          activeIcon = hitIcon;
-          lastAnimationTime = millis();
-        }
-      }
-      s_headerTouchHeld = true;
-    } else {
-      s_headerTouchHeld = false;
-    }
-    lastTouchCheck = millis();
-  }
-}
-
-public:
-  void setup() {
-    uiDrawn = false;
-
-    float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, false);
-    runUI();
-
-    setupTouchscreen();
-
-    initDisplay();
-
-    releaseBleCallbacks();
-    ensureBleStackReady();
-    pBLEScan = BLEDevice::getScan();
-    bleDeviceCallbacks = new AdvertisedDeviceCallbacks(*this);
-    pBLEScan->setAdvertisedDeviceCallbacks(bleDeviceCallbacks);
-    pBLEScan->setActiveScan(true);
-    scanning = true;
-
-    addLine("Bluetooth Sniffer Ready", DARK_GRAY, true, MessageType::STATUS);
-    startBLEScan();
-  }
-
-  void loop() {
-    if (feature_exit_requested || featureExitButtonPressed()) {
-      feature_exit_requested = true;
-      return;
-    }
-
-    unsigned long now = millis();
-    tft.drawFastHLine(0, 19, 240, UI_LINE);
-
-    runUI();
-    if (feature_exit_requested || featureExitButtonPressed()) {
-      feature_exit_requested = true;
-      return;
-    }
-    updateStatusBar();
-    cleanupDevices(now);
-    if (scanning && now - lastScanTime >= SCAN_INTERVAL) {
-      if (isBLEScanActive) {
-        pBLEScan->stop();
-        startBTScan();
-        isBLEScanActive = false;
-      } else {
-
-        startBLEScan();
-        isBLEScanActive = true;
-      }
-      lastScanTime = now;
-    }
-    if (Serial.available()) {
-      String input = Serial.readStringUntil('\n');
-      input.trim();
-      if (input.startsWith("FILTER MAC ")) {
-        filterByMac(input.substring(11));
-      } else if (input == "FILTER SUSPICIOUS") {
-        filterSuspicious();
-      } else if (input == "RESET") {
-        deviceCount = 0;
-        suspiciousCount = 0;
-        lastDeviceCount = -1;
-        lastSuspiciousCount = -1;
-        lineNumber = 1;
-        for (int i = 0; i < MAX_LINES; i++) {
-          displayLines[i].text = "";
-          displayLines[i].color = GREEN;
-          displayLines[i].originalColor = GREEN;
-          displayLines[i].isAlert = false;
-          displayLines[i].flashUntil = 0;
-          displayLines[i].type = MessageType::DEVICE;
-        }
-        refreshDisplay();
-        addLine("Device list reset", DARK_GRAY, true, MessageType::STATUS);
-      }
-    }
-  }
-
-  class AdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
-    BluetoothSniffer& sniffer;
-  public:
-    AdvertisedDeviceCallbacks(BluetoothSniffer& s) : sniffer(s) {}
-    void onResult(BLEAdvertisedDevice* advertisedDevice) override {
-      if (!sniffer.scanning) return;
-      String mac = advertisedDevice->getAddress().toString().c_str();
-      int rssi = advertisedDevice->getRSSI();
-      unsigned long timestamp = millis();
-      int idx = -1;
-      for (int i = 0; i < sniffer.deviceCount; i++) {
-        if (sniffer.devices[i].mac == mac && sniffer.devices[i].isBLE) {
-          idx = i;
-          break;
-        }
-      }
-      if (idx >= 0) {
-        sniffer.devices[idx].rssi = rssi;
-        sniffer.devices[idx].packetCount++;
-        sniffer.devices[idx].lastSeen = timestamp;
-        if (sniffer.isRandomizedMac(mac)) {
-          sniffer.devices[idx].macChangeCount++;
-        }
-        sniffer.checkSuspiciousActivity(idx, timestamp);
-      } else {
-        sniffer.processNewDevice(advertisedDevice, nullptr, timestamp, true);
-      }
-    }
-  };
-
-  static void btCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
-    if (!snifferInstance) return;
-    if (event == ESP_BT_GAP_DISC_RES_EVT) {
-      unsigned long timestamp = millis();
-      int idx = -1;
-      char macStr[18];
-      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-               param->disc_res.bda[0], param->disc_res.bda[1], param->disc_res.bda[2],
-               param->disc_res.bda[3], param->disc_res.bda[4], param->disc_res.bda[5]);
-      String mac = macStr;
-      for (int i = 0; i < snifferInstance->deviceCount; i++) {
-        if (snifferInstance->devices[i].mac == mac && !snifferInstance->devices[i].isBLE) {
-          idx = i;
-          break;
-        }
-      }
-      if (idx >= 0) {
-        snifferInstance->devices[idx].packetCount++;
-        snifferInstance->devices[idx].lastSeen = timestamp;
-        snifferInstance->checkSuspiciousActivity(idx, timestamp);
-      } else {
-        snifferInstance->processNewDevice(nullptr, param, timestamp, false);
-      }
-    }
-  }
-
-  void startBLEScan() {
-    newDevicesThisScan = 0;
-    constexpr int kScanChunkSec = 1;
-    for (int elapsed = 0; elapsed < Config::bleScanDuration; elapsed += kScanChunkSec) {
-      if (feature_exit_requested || featureExitButtonPressed()) {
-        feature_exit_requested = true;
-        if (pBLEScan) {
-          pBLEScan->stop();
-        }
-        return;
-      }
-      pBLEScan->start(kScanChunkSec, false);
-    }
-    addLine("BLE Scan Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
-    updateHeader();
-  }
-
-  void startBTScan() {
-    newDevicesThisScan = 0;
-
-    addLine("Classic BT Scan Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
-    updateHeader();
-  }
-
-  void setSnifferInstance() {
-    snifferInstance = this;
-  }
-
-  void stop() {
-    scanning = false;
-    snifferInstance = nullptr;
-    releaseBleCallbacks();
-  }
-};
-
-BluetoothSniffer* BluetoothSniffer::snifferInstance = nullptr;
-BluetoothSniffer sniffer;
-
-void blesnifferSetup() {
-  pauseBackgroundRadioTasks();
-  setTouchButtonInputEnabled(true);
-  bleSetExitOnlyNavLabels();
-  bleClearBody(TFT_BLACK);
-  {
-    float currentBatteryVoltage = readBatteryVoltage();
-    drawStatusBar(currentBatteryVoltage, true);
-  }
-  redrawTouchButtonBar();
-  {
-    const int bodyH = bleContentBottom() - 37;
-    if (bodyH > 0) {
-      tft.fillRect(0, 37, 240, bodyH, TFT_BLACK);
-    }
-  }
-  sniffer.setup();
-  sniffer.setSnifferInstance();
-  redrawTouchButtonBar();
-}
-
-void blesnifferLoop() {
-
-  if (feature_active && featureExitButtonPressed()) {
-    feature_exit_requested = true;
-    return;
-  }
-
-  sniffer.loop();
-}
-
-void exit() {
-
-  sniffer.stop();
-}
-}

@@ -82,10 +82,9 @@ static int duckyToastCenterY() {
   return DISPLAY_HEIGHT - duckyFooterReserve() - 24;
 }
 
-static bool sd_mounted = false;
-static bool ui_inited  = false;
-static bool ui_busy    = false;
-static bool needsRedraw = false;
+bool ui_inited  = false;
+bool ui_busy    = false;
+bool needsRedraw = false;
 
 static bool ducky_active = false;
 
@@ -330,12 +329,13 @@ static void updateIconAnimation() {
 }
 
 static bool mountSD() {
-  if (sd_mounted) {
-    if (SD.cardType() != CARD_NONE) return true;
-    sd_mounted = false;
-  }
-  sd_mounted = isSDCardAvailable();
-  return sd_mounted;
+  if (sd_mounted) return true;
+#ifdef SD_CD
+  pinMode(SD_CD, INPUT_PULLUP);
+#endif
+  // Use unified SPI management to ensure SPI is properly released and re-initialized
+  if (spiEnsureSD()) { sd_mounted = true; return true; }
+  return false;
 }
 static bool ensureDuckyDir() {
   if (!mountSD()) return false;
@@ -1256,6 +1256,9 @@ void exit() {
     adv->setAdvertisementData(empty);
     adv->setScanResponseData(empty);
   }
+  
+  // Release SPI bus when leaving this feature
+  spiRelease();
 }
 void setup() {
   ducky_active = false;

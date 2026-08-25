@@ -18,6 +18,8 @@ namespace {
     uint32_t value;
     uint16_t bitLength;
     uint16_t protocol;
+    uint8_t  modulation;  // 调制方式 (0=2-FSK, 1=GFSK, 2=ASK/OOK, 3=4-FSK, 4=MSK)
+    uint8_t  reserved;    // 保留字段
     char     name[16];
   };
 
@@ -28,6 +30,7 @@ namespace {
   static constexpr uint16_t ADDR_BITLEN = 1284;
   static constexpr uint16_t ADDR_PROTO = 1286;
   static constexpr uint16_t ADDR_FREQ = 1288;
+  static constexpr uint16_t ADDR_MODULATION = 1290;
   static constexpr uint16_t ADDR_PROFILE_COUNT = 1296;
   static constexpr uint16_t ADDR_PROFILE_START = 1300;
   static constexpr uint16_t MAX_PROFILES = 5;
@@ -47,16 +50,14 @@ namespace {
       subghz_sd_mounted = false;
     }
 
-#if defined(CC1101_CS)
-    pinMode(CC1101_CS, OUTPUT);
-    digitalWrite(CC1101_CS, HIGH);
-#endif
+    #ifdef SD_CD
+    pinMode(SD_CD, INPUT_PULLUP);
+    if (digitalRead(SD_CD)) return false;
+    #endif
 
-    restoreSdAfterSharedSpi();
-    if (isSDCardAvailable()) {
-      subghz_sd_mounted = true;
-      return true;
-    }
+    // Use unified SPI management to ensure SPI is properly released and re-initialized
+    if (spiEnsureSD()) { subghz_sd_mounted = true; return true; }
+
     return false;
   }
 
@@ -425,7 +426,7 @@ static bool subghzWaitWithNav(uint32_t ms) {
 }
 
 static void subghzSetReplayNavLabels() {
-  setTouchNavLabels("Freq-", "Save", "Exit", "Send", "Freq+");
+  setTouchNavLabels("Freq-", "Auto", "Exit", "Send", "Freq+");
 }
 
 static void subghzSetJammerNavLabels() {
@@ -440,7 +441,10 @@ static void subghzSetBruteNavLabels() {
   setTouchNavLabels("Prev", "Sel", "Exit", "Go", "Next");
 }
 
-namespace replayat { void replayHandleNavButtons(); }
+namespace replayat {
+  void replayHandleNavButtons();
+  void setModulationWithConfigPub(uint8_t modulation);
+}
 namespace subjammer { void subjammerHandleNavButtons(); }
 namespace SavedProfile { void profileHandleNavButtons(); }
 namespace SubBrute { void bruteHandleNavButtons(); }
@@ -453,6 +457,7 @@ namespace replayat {
 #define ADDR_BITLEN        1284
 #define ADDR_PROTO         1286
 #define ADDR_FREQ          1288
+#define ADDR_MODULATION    1290
 #define ADDR_PROFILE_COUNT 1296
 #define ADDR_PROFILE_START 1300
 #define MAX_PROFILES       5
@@ -481,6 +486,8 @@ struct __attribute__((packed)) Profile {
     uint32_t value;
     uint16_t bitLength;
     uint16_t protocol;
+    uint8_t  modulation;
+    uint8_t  reserved;
     char name[MAX_NAME_LENGTH];
 };
 
@@ -491,7 +498,7 @@ uint16_t profileCount = 0;
 RCSwitch mySwitch = RCSwitch();
 arduinoFFT FFTSUB = arduinoFFT();
 
-const uint16_t samplesSUB = ESP32DIV_FFT_SAMPLES;
+const uint16_t samplesSUB = 256;
 const double FrequencySUB = 5000;
 
 double attenuation_num = 10;
@@ -502,8 +509,7 @@ unsigned long micro_s;
 double vRealSUB[samplesSUB];
 double vImagSUB[samplesSUB];
 
-byte red[ESP32DIV_FFT_PALETTE_SIZE], green[ESP32DIV_FFT_PALETTE_SIZE],
-     blue[ESP32DIV_FFT_PALETTE_SIZE];
+byte red[128], green[128], blue[128];
 
 unsigned int epochSUB = 0;
 unsigned int colorcursor = 2016;
@@ -513,34 +519,20 @@ int rssi;
 static constexpr uint8_t REPLAY_RX_PIN = SUBGHZ_RX_PIN;
 static constexpr uint8_t REPLAY_TX_PIN = SUBGHZ_TX_PIN;
 
-/** RCSwitch::disableReceive() errors if no ISR was ever attached — track arm state. */
-static bool s_replayRxArmed = false;
-
-static void replayArmReceive() {
-  pinMode(REPLAY_RX_PIN, INPUT);
-  pinMode(REPLAY_TX_PIN, INPUT);
-  mySwitch.enableReceive(REPLAY_RX_PIN);
-  mySwitch.resetAvailable();
-  s_replayRxArmed = true;
-}
-
-static void replayDisarmReceive() {
-  if (!s_replayRxArmed) {
-    return;
-  }
-  mySwitch.disableReceive();
-  s_replayRxArmed = false;
-}
-
 uint32_t receivedValue = 0;
 uint16_t receivedBitLength = 0;
 uint16_t receivedProtocol = 0;
 const int rssi_threshold = -75;
 
+// 调制方式配置
+static uint8_t currentModulation = 2;  // 默认ASK/OOK
+const char* modulationNames[] = {"2-FSK", "GFSK", "ASK/OOK", "4-FSK", "MSK"};
+constexpr uint8_t MODULATION_COUNT = 5;
+
 static const uint32_t subghz_frequency_list[] = {
-    300000000, 303875000, 304250000, 310000000, 314000000, 315000000,
-    318000000, 390000000, 418000000, 433075000, 433420000, 433920000,
-    434420000, 434775000, 438900000, 868350000, 915000000, 925000000
+    300000000, 303875000, 304250000, 310000000, 315000000, 318000000,
+    390000000, 418000000, 433075000, 433420000, 433920000, 434420000,
+    434775000, 438900000, 868350000, 915000000, 925000000
 };
 
 uint16_t currentFrequencyIndex = 0;
@@ -580,27 +572,63 @@ static uint16_t lastDetectAlertFreq = 0xFFFF;
 static uint32_t notifHideAtMs = 0;
 static bool notifActive = false;
 
+static uint8_t  rssiDetectCount = 0;  // 连续检测计数器，减少误检测
+static constexpr uint8_t RSSI_DETECT_COUNT_THRESHOLD = 3;  // 需要连续3次检测到信号
+
 static constexpr uint8_t BUZZER_LEDC_CH = 7;
 static bool buzzerArmed = false;
 static uint32_t buzzerOffAtMs = 0;
+static uint32_t buzzerLastOnTime = 0;
 static void replayBeep(uint16_t hz = 2200, uint16_t ms = 60) {
   #ifdef BUZZER_PIN
+  Serial.print("[BUZZER] ON: ");
+  Serial.print(hz);
+  Serial.print(" Hz, ");
+  Serial.print(ms);
+  Serial.print(" ms, armed=");
+  Serial.println(buzzerArmed);
+
   ledcSetup(BUZZER_LEDC_CH, 4000, 8);
   ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
   ledcWriteTone(BUZZER_LEDC_CH, hz);
   buzzerArmed = true;
   buzzerOffAtMs = millis() + ms;
+  buzzerLastOnTime = millis();
+
+  Serial.print("[BUZZER] Will turn off at: ");
+  Serial.println(buzzerOffAtMs);
   #endif
 }
 
 static void replayBeepPoll() {
   #ifdef BUZZER_PIN
   if (!buzzerArmed) return;
-  if ((int32_t)(millis() - buzzerOffAtMs) < 0) return;
-  ledcWriteTone(BUZZER_LEDC_CH, 0);
 
+  uint32_t now = millis();
+
+  if ((int32_t)(now - buzzerOffAtMs) < 0) {
+    return;
+  }
+
+  Serial.print("[BUZZER] OFF at: ");
+  Serial.print(now);
+  Serial.print(", was armed for: ");
+  Serial.println(now - buzzerLastOnTime);
+
+  ledcWriteTone(BUZZER_LEDC_CH, 0);
   ledcDetachPin(BUZZER_PIN);
   buzzerArmed = false;
+  #endif
+}
+
+static void replayBeepForceOff() {
+  #ifdef BUZZER_PIN
+  if (buzzerArmed) {
+    Serial.println("[BUZZER] FORCE OFF");
+    ledcWriteTone(BUZZER_LEDC_CH, 0);
+    ledcDetachPin(BUZZER_PIN);
+    buzzerArmed = false;
+  }
   #endif
 }
 
@@ -668,9 +696,31 @@ static uint32_t replayDecodeMinDwellMs() {
                                                     : DECODE_MIN_DWELL_MS;
 }
 
+static void setModulationWithConfig(uint8_t modulation) {
+  Serial.print("[CC1101] Setting modulation: ");
+  Serial.println(modulationNames[modulation]);
+
+  ELECHOUSE_cc1101.setModulation(modulation);
+  ELECHOUSE_cc1101.SpiWriteReg(0x00, 0x0E);  // CC1101_IOCFG2
+  ELECHOUSE_cc1101.setManchester(0);
+}
+
+void setModulationWithConfigPub(uint8_t modulation) {
+  setModulationWithConfig(modulation);
+}
+
 static void tuneToIndex(uint16_t idx, bool persist = true) {
   currentFrequencyIndex = idx % freqCount();
   ELECHOUSE_cc1101.setSidle();
+  // 每次切换频率时重新设置调制模式，确保不会被覆盖
+  setModulationWithConfig(currentModulation);
+  ELECHOUSE_cc1101.setRxBW(200.0);         // 200kHz接收带宽
+  ELECHOUSE_cc1101.setDRate(4.8);          // 4.8 kbps数据速率
+
+  // 确保GDO配置正确
+  ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
+  ELECHOUSE_cc1101.SpiWriteReg(0x00, 0x0E);  // CC1101_IOCFG2
+
   ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
   ELECHOUSE_cc1101.SetRx();
   if (persist) {
@@ -808,6 +858,7 @@ struct ReplayDisplayCache {
   int16_t rssi = -9999;
   uint16_t protocol = 0xFFFF;
   uint32_t value = 0xFFFFFFFF;
+  uint8_t modulation = 0xFF;
   bool valid = false;
 };
 
@@ -876,6 +927,8 @@ static void replayDrawStaticChrome() {
   tft.print("Ptc:");
   tft.setCursor(5, 50 + yshift);
   tft.print("Val:");
+  tft.setCursor(130, 50 + yshift);
+  tft.print("Mod:");
 
   s_replayStaticDrawn = true;
 }
@@ -902,7 +955,7 @@ void replayHandleNavButtons() {
     subghzWaitNavRelease(BTN_UP);
   }
   if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    replayTrySave();
+    replayToggleAuto();
     subghzWaitNavRelease(BTN_DOWN);
   }
 }
@@ -918,6 +971,7 @@ void updateDisplay() {
     char rssiBuf[8];
     char ptcBuf[8];
     char valBuf[16];
+    char modBuf[8];
 
     snprintf(freqBuf, sizeof(freqBuf), "%.2f MHz",
              subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
@@ -930,6 +984,7 @@ void updateDisplay() {
     snprintf(rssiBuf, sizeof(rssiBuf), "%d", rssi);
     snprintf(ptcBuf, sizeof(ptcBuf), "%d", receivedProtocol);
     snprintf(valBuf, sizeof(valBuf), "%lu", (unsigned long)receivedValue);
+    snprintf(modBuf, sizeof(modBuf), "%s", modulationNames[currentModulation]);
 
     const bool fullRedraw = !s_replayDisp.valid;
     if (fullRedraw || s_replayDisp.freqIndex != currentFrequencyIndex) {
@@ -953,14 +1008,23 @@ void updateDisplay() {
       s_replayDisp.protocol = receivedProtocol;
     }
     if (fullRedraw || s_replayDisp.value != receivedValue) {
-      replayDrawValueCell(50, 50 + yshift, 180, kReplayValueLineH, valBuf, UI_WARN);
+      replayDrawValueCell(50, 50 + yshift, 72, kReplayValueLineH, valBuf, UI_WARN);
       s_replayDisp.value = receivedValue;
+    }
+    if (fullRedraw || s_replayDisp.modulation != currentModulation) {
+      replayDrawValueCell(170, 50 + yshift, 48, kReplayValueLineH, modBuf, UI_WARN);
+      s_replayDisp.modulation = currentModulation;
     }
 
     replayDrawStatusSeparator();
 
     s_replayDisp.valid = true;
-    /* Do NOT idle/retune here — that drops RCSwitch pulse timing mid-receive. */
+
+    if (!autoScanEnabled) {
+      ELECHOUSE_cc1101.setSidle();
+      ELECHOUSE_cc1101.setMHZ(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
+      ELECHOUSE_cc1101.SetRx();
+    }
 }
 
 String getUserInputName() {
@@ -994,11 +1058,43 @@ String getUserInputName() {
 
 void sendSignal() {
 
-    replayDisarmReceive();
+    Serial.println("[sendSignal] Starting...");
+    Serial.print("[sendSignal] REPLAY_TX_PIN: "); Serial.println(REPLAY_TX_PIN);
+    Serial.print("[sendSignal] CC1101_GDO0: "); Serial.println(CC1101_GDO0);
+
+    // 严格的参数边界检查，防止无效数据导致卡死
+    // bitLength限制在64以内，protocol限制在10以内（RCSwitch标准协议）
+    if (receivedValue == 0 || receivedBitLength == 0 || receivedBitLength > 64 || receivedProtocol == 0 || receivedProtocol > 10) {
+        Serial.println("[sendSignal] ERROR: Invalid parameters!");
+        Serial.print("[sendSignal]   receivedValue: "); Serial.println(receivedValue);
+        Serial.print("[sendSignal]   receivedBitLength: "); Serial.println(receivedBitLength);
+        Serial.print("[sendSignal]   receivedProtocol: "); Serial.println(receivedProtocol);
+
+        tft.fillRect(0, 40, 240, kReplayStatusLineY - 40, TFT_BLACK);
+        tft.setCursor(10, 30 + yshift);
+        tft.setTextColor(TFT_RED);
+        tft.print("No signal received!");
+        delay(1000);
+        updateDisplay();
+        return;
+    }
+
+    mySwitch.disableReceive();
     delay(100);
-    pinMode(REPLAY_TX_PIN, OUTPUT);
+    Serial.println("[sendSignal] Disabled receive, delay 100ms done");
+
+    // 关键修复：先禁用CC1101的GDO0功能，避免引脚冲突
+    Serial.println("[sendSignal] Disabling CC1101 GDO0...");
+    ELECHOUSE_cc1101.setGDO(0, CC1101_GDO2);
+    Serial.println("[sendSignal] CC1101 GDO0 disabled");
+
+    Serial.println("[sendSignal] Enabling transmit...");
     mySwitch.enableTransmit(REPLAY_TX_PIN);
+    Serial.println("[sendSignal] Transmit enabled");
+
+    Serial.println("[sendSignal] Setting CC1101 to Tx mode...");
     ELECHOUSE_cc1101.SetTx();
+    Serial.println("[sendSignal] CC1101 set to Tx mode");
 
     tft.fillRect(0, 40, 240, kReplayStatusLineY - 40, TFT_BLACK);
 
@@ -1008,21 +1104,56 @@ void sendSignal() {
     tft.print(receivedValue);
 
     mySwitch.setProtocol(receivedProtocol);
+    Serial.print("[sendSignal] Protocol: "); Serial.println(receivedProtocol);
+    Serial.print("[sendSignal] Value: "); Serial.println(receivedValue);
+    Serial.print("[sendSignal] BitLength: "); Serial.println(receivedBitLength);
+
+    // 使用定时发送，避免卡死
+    Serial.println("[sendSignal] Calling mySwitch.send()...");
+    unsigned long sendStartTime = millis();
     mySwitch.send(receivedValue, receivedBitLength);
+    unsigned long sendDuration = millis() - sendStartTime;
+    Serial.print("[sendSignal] mySwitch.send() completed in ");
+    Serial.print(sendDuration);
+    Serial.println("ms");
+
+    // 发送时间过长警告
+    if (sendDuration > 500) {
+        Serial.print("[sendSignal] WARNING: Send took ");
+        Serial.print(sendDuration);
+        Serial.println("ms - consider reducing bit length");
+    }
 
     delay(500);
+    Serial.println("[sendSignal] Delay 500ms done");
+
     tft.fillRect(0, 40, 240, kReplayStatusLineY - 40, TFT_BLACK);
     tft.setCursor(10, 30 + yshift);
     tft.print("Done!");
 
-    mySwitch.disableTransmit();
-    pinMode(REPLAY_TX_PIN, INPUT);
-    pinMode(REPLAY_RX_PIN, INPUT);
+    Serial.println("[sendSignal] Setting CC1101 to Rx mode...");
     ELECHOUSE_cc1101.SetRx();
-    delay(50);
-    replayArmReceive();
+    Serial.println("[sendSignal] CC1101 set to Rx mode");
+
+    Serial.println("[sendSignal] Disabling transmit...");
+    mySwitch.disableTransmit();
+    Serial.println("[sendSignal] Transmit disabled");
+
+    delay(100);
+    Serial.println("[sendSignal] Delay 100ms done");
+
+    // 恢复CC1101的GDO0功能
+    Serial.println("[sendSignal] Restoring CC1101 GDO0...");
+    ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
+    Serial.println("[sendSignal] CC1101 GDO0 restored");
+
+    Serial.println("[sendSignal] Enabling receive...");
+    mySwitch.enableReceive(REPLAY_RX_PIN);
+    Serial.println("[sendSignal] Receive enabled");
 
     delay(500);
+    Serial.println("[sendSignal] Delay 500ms done");
+
     replayRestoreStatusPanel();
 }
 
@@ -1154,6 +1285,8 @@ void saveProfile() {
         newProfile.value = (uint32_t)receivedValue;
         newProfile.bitLength = (uint16_t)receivedBitLength;
         newProfile.protocol = (uint16_t)receivedProtocol;
+        newProfile.modulation = currentModulation;
+        newProfile.reserved = 0;
         strncpy(newProfile.name, customName.c_str(), MAX_NAME_LENGTH - 1);
         newProfile.name[MAX_NAME_LENGTH - 1] = '\0';
 
@@ -1220,7 +1353,7 @@ void runUI() {
         bitmap_icon_sort_down_minus,
         bitmap_icon_antenna,
         bitmap_icon_floppy,
-        bitmap_icon_random,
+        bitmap_icon_setting,
         bitmap_icon_go_back
     };
 
@@ -1266,12 +1399,13 @@ void runUI() {
                     saveProfile();
                     break;
                 case 4:
-                    autoScanEnabled = !autoScanEnabled;
-                    if (autoScanEnabled) {
-                      replayBeginAutoScan();
-                    } else {
-                      replayClearScanLock();
-                    }
+                    currentModulation = (currentModulation + 1) % MODULATION_COUNT;
+                    Serial.print("[UI] Modulation changed to: ");
+                    Serial.println(modulationNames[currentModulation]);
+                    EEPROM.put(ADDR_MODULATION, currentModulation);
+                    EEPROM.commit();
+                    tuneToIndex(currentFrequencyIndex);
+                    replayBeep(1800 + currentModulation * 100, 40);
                     updateDisplay();
                     break;
             }
@@ -1313,57 +1447,66 @@ void runUI() {
 }
 
 void ReplayAttackSetup() {
-  pauseBackgroundRadioTasks();
-  setTouchButtonInputEnabled(true);
-  subghzSetReplayNavLabels();
-
-  replayDisarmReceive();
-  mySwitch.resetAvailable();
-
+  // Reclaim shared SPI bus before touching CC1101. Visiting another SubGHz
+  // feature first may have left the shared SPI in a state where SD (or another
+  // SPI slave) is driving MISO; initialising the CC1101 in that state causes
+  // subsequent register reads / display updates to fail (text missing on next
+  // ReplayAttack entry). Mirror 1.7.2's ReplayAttackSetup bus reclaim.
+  holdSdInactiveOnSharedSpi();
   reclaimSharedSpiBus();
-#if defined(SD_CS)
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
-#endif
-#if defined(CC1101_CS)
-  pinMode(CC1101_CS, OUTPUT);
-  digitalWrite(CC1101_CS, HIGH);
-#endif
 
   ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
+  ELECHOUSE_cc1101.Init();
+
+  // 设置GDO2引脚
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
+
+  // 使用配置的调制方式
+  setModulationWithConfig(currentModulation);
+
+  ELECHOUSE_cc1101.SetRx();
+
+  mySwitch.enableReceive(REPLAY_RX_PIN);
+  mySwitch.enableTransmit(REPLAY_TX_PIN);
+  mySwitch.setRepeatTransmit(8);
 
   EEPROM.begin(EEPROM_SIZE);
   readProfileCount();
 
+  // 从EEPROM读取值，但检查是否是默认值(0xFFFF/0xFFFFFFFF)，如果是，设置为0
   EEPROM.get(ADDR_VALUE, receivedValue);
   EEPROM.get(ADDR_BITLEN, receivedBitLength);
   EEPROM.get(ADDR_PROTO, receivedProtocol);
   EEPROM.get(ADDR_FREQ, currentFrequencyIndex);
+  EEPROM.get(ADDR_MODULATION, currentModulation);
+
+  // 如果值是未初始化的EEPROM默认值，重置为0
+  if (receivedValue == 0xFFFFFFFF) receivedValue = 0;
+  if (receivedBitLength == 0xFFFF) receivedBitLength = 0;
+  if (receivedProtocol == 0xFFFF) receivedProtocol = 0;
+
+  // 验证调制方式范围
+  if (currentModulation >= MODULATION_COUNT) {
+    currentModulation = 2;  // 默认使用ASK/OOK
+  }
 
   const uint16_t freqCount = (uint16_t)(sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
   if (currentFrequencyIndex >= freqCount) currentFrequencyIndex = 0;
 
-  autoScanEnabled = false;
-  replayClearScanLock();
+  tuneToIndex(currentFrequencyIndex, false);
 
-  subghzClearBody(TFT_BLACK);
-  tft.setRotation(TFT_ROTATION);
+  tft.fillScreen(TFT_BLACK);
+  tft.setRotation(2);
 
-  drawStatusBar(readBatteryVoltage(), true);
-  subghzRedrawNavChrome();
-  setupTouchscreen();
-
-#if HAS_PCF8574_BUTTONS
   pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
   pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
   pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
-#endif
 
   sampling_period = round(1000000*(1.0/FrequencySUB));
 
+  // 初始化颜色表
   for (int i = 0; i < 32; i++) {
     red[i] = i / 2;
     green[i] = 0;
@@ -1374,7 +1517,6 @@ void ReplayAttackSetup() {
     green[i] = 0;
     blue[i] = 63 - i;
   }
-#if ESP32DIV_FFT_PALETTE_SIZE > 64
   for (int i = 64; i < 96; i++) {
     red[i] = 31;
     green[i] = (i - 64) * 2;
@@ -1385,87 +1527,126 @@ void ReplayAttackSetup() {
     green[i] = 63;
     blue[i] = i - 96;
   }
-#endif
 
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
   replayInvalidateDisplay();
   updateDisplay();
   uiDrawn = false;
-  subghzRedrawNavChrome();
 
-  /* Bring radio up after UI/SPI activity so first entry RX matches re-entry. */
-  ELECHOUSE_cc1101.Init();
-  ELECHOUSE_cc1101.setCCMode(0);
-  ELECHOUSE_cc1101.setModulation(2);
-  ELECHOUSE_cc1101.setRxBW(500.0);
+  // 回显CC1101配置信息，方便调试
+  Serial.println("[CC1101] Configuration:");
+  Serial.print("[CC1101]   Modulation: ");
+  Serial.print(currentModulation);
+  Serial.print(" (");
+  Serial.print(modulationNames[currentModulation]);
+  Serial.println(")");
+  Serial.print("[CC1101]   Rx Bandwidth: ");
+  Serial.println(200.0);
+  Serial.print("[CC1101]   PA Level: ");
+  Serial.println(12);
+  Serial.print("[CC1101]   Frequency: ");
+  Serial.print(subghz_frequency_list[currentFrequencyIndex] / 1000000.0);
+  Serial.println(" MHz");
 
-  pinMode(REPLAY_RX_PIN, INPUT);
-  pinMode(REPLAY_TX_PIN, INPUT);
+  // 调谐到当前频率
+  tuneToIndex(currentFrequencyIndex);
 
-  tuneToIndex(currentFrequencyIndex, false);
-  mySwitch.setReceiveTolerance(replayFreqIsLowBand(currentFrequencyIndex) ? 50 : 40);
+  // 设置为接收模式
+  ELECHOUSE_cc1101.SetRx();
+  Serial.println("[CC1101] Set to Rx mode");
+
+  // 初始化RCSwitch（在CC1101之后初始化，确保引脚正确）
+  mySwitch.enableReceive(REPLAY_RX_PIN);
+  mySwitch.enableTransmit(REPLAY_TX_PIN);
   mySwitch.setRepeatTransmit(8);
-
-  delay(50);
-  replayArmReceive();
+  Serial.println("[RCSwitch] Initialized with receive pin: " + String(REPLAY_RX_PIN) + ", transmit pin: " + String(REPLAY_TX_PIN));
 }
 
 void ReplayAttackLoop() {
+    static bool modulationSelectMode = false;
+    static unsigned long modulationSelectStartTime = 0;
+    static bool prevSelect = false;
 
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-        replayDisarmReceive();
-        feature_exit_requested = true;
-        return;
+    if (feature_active && isButtonPressed(BTN_SELECT)) {
+        bool selectPressed = isButtonPressed(BTN_SELECT);
+        if (selectPressed && !prevSelect) {
+            modulationSelectStartTime = millis();
+        } else if (selectPressed && prevSelect && !modulationSelectMode) {
+            if (millis() - modulationSelectStartTime > 1000) {
+                modulationSelectMode = true;
+                Serial.println("[UI] Entered modulation selection mode");
+                replayBeep(1500, 80);
+                updateDisplay();
+                prevSelect = selectPressed;
+                return;
+            }
+        }
+
+        if (!selectPressed && modulationSelectMode) {
+            modulationSelectMode = false;
+            Serial.println("[UI] Exited modulation selection mode");
+            replayBeep(1000, 50);
+            updateDisplay();
+            prevSelect = selectPressed;
+            return;
+        } else if (!selectPressed && !modulationSelectMode && prevSelect && millis() - modulationSelectStartTime < 500) {
+            feature_exit_requested = true;
+            prevSelect = selectPressed;
+            return;
+        }
+
+        prevSelect = selectPressed;
+        if (modulationSelectMode) {
+            return;
+        }
     }
 
-    maintainTouchNavBar();
     runUI();
-    if (uiDrawn) {
-      tft.drawFastHLine(0, 19, 240, UI_LINE);
-      tft.drawFastHLine(0, 36, 240, UI_LINE);
-      if (s_replayDisp.valid) {
-        replayDrawStatusSeparator();
-      }
-    }
-    replayHandleNavButtons();
 
     static unsigned long lastDebounceTime = 0;
     const unsigned long debounceDelay = 200;
 
     static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
-    const bool leftPressed  = isPhysicalButtonPressed(BTN_LEFT);
-    const bool rightPressed = isPhysicalButtonPressed(BTN_RIGHT);
-    const bool upPressed    = isPhysicalButtonPressed(BTN_UP);
-    const bool downPressed  = isPhysicalButtonPressed(BTN_DOWN);
+    const bool leftPressed  = isButtonPressed(BTN_LEFT);
+    const bool rightPressed = isButtonPressed(BTN_RIGHT);
+    const bool upPressed    = isButtonPressed(BTN_UP);
+    const bool downPressed  = isButtonPressed(BTN_DOWN);
 
     replayBeepPoll();
 
+    #ifdef BUZZER_PIN
+    if (buzzerArmed && (millis() - buzzerLastOnTime) > 5000) {
+      Serial.println("[BUZZER] SAFETY: Forced off after 5 seconds");
+      replayBeepForceOff();
+    }
+    #endif
+
     if (notifActive && isNotificationVisible()) {
       int x, y;
+
       if (readTouchXY(x, y)) {
         NotificationAction act = notificationHandleTouch(x, y);
         if (act == NotificationAction::Save) {
           notifActive = false;
 
-          subghzClearBody(TFT_BLACK);
+          tft.fillScreen(TFT_BLACK);
           uiDrawn = false;
-          replayInvalidateDisplay();
           float v = readBatteryVoltage();
           drawStatusBar(v, true);
           runUI();
           updateDisplay();
-          subghzRedrawNavChrome();
 
           autoScanEnabled = false;
           saveProfile();
 
-          subghzClearBody(TFT_BLACK);
+          tft.fillScreen(TFT_BLACK);
           uiDrawn = false;
-          replayInvalidateDisplay();
           v = readBatteryVoltage();
           drawStatusBar(v, true);
           runUI();
           updateDisplay();
-          subghzRedrawNavChrome();
+
         } else if (act == NotificationAction::Ok || act == NotificationAction::Close) {
           notifActive = false;
 
@@ -1474,47 +1655,83 @@ void ReplayAttackLoop() {
           lockUntilMs = millis() + 1500;
           rssiHot = true;
 
-          subghzClearBody(TFT_BLACK);
+          tft.fillScreen(TFT_BLACK);
           uiDrawn = false;
-          replayInvalidateDisplay();
           float v = readBatteryVoltage();
           drawStatusBar(v, true);
           runUI();
           updateDisplay();
-          subghzRedrawNavChrome();
         }
       }
 
       return;
     } else if (notifActive && !isNotificationVisible()) {
-
       notifActive = false;
-      subghzClearBody(TFT_BLACK);
+      tft.fillScreen(TFT_BLACK);
       uiDrawn = false;
-      replayInvalidateDisplay();
       float v = readBatteryVoltage();
       drawStatusBar(v, true);
       runUI();
       updateDisplay();
-      subghzRedrawNavChrome();
     }
 
     if (rightPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
-        replayFreqNext();
+        if (modulationSelectMode) {
+            currentModulation = (currentModulation + 1) % MODULATION_COUNT;
+            EEPROM.put(ADDR_MODULATION, currentModulation);
+            EEPROM.commit();
+            tuneToIndex(currentFrequencyIndex);
+            replayBeep(1800 + currentModulation * 100, 40);
+            updateDisplay();
+        } else {
+            autoScanEnabled = false;
+            lockUntilMs = 0;
+            rssiHot = false;
+            currentFrequencyIndex = (currentFrequencyIndex + 1) % freqCount();
+            tuneToIndex(currentFrequencyIndex);
+            EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+            EEPROM.commit();
+            updateDisplay();
+        }
         lastDebounceTime = millis();
     }
     if (leftPressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
-        replayFreqPrev();
+        if (modulationSelectMode) {
+            currentModulation = (currentModulation + MODULATION_COUNT - 1) % MODULATION_COUNT;
+            EEPROM.put(ADDR_MODULATION, currentModulation);
+            EEPROM.commit();
+            tuneToIndex(currentFrequencyIndex);
+            replayBeep(1800 + currentModulation * 100, 40);
+            updateDisplay();
+        } else {
+            autoScanEnabled = false;
+            lockUntilMs = 0;
+            rssiHot = false;
+            currentFrequencyIndex = (currentFrequencyIndex + freqCount() - 1) % freqCount();
+            tuneToIndex(currentFrequencyIndex);
+            EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+            EEPROM.commit();
+            updateDisplay();
+        }
         lastDebounceTime = millis();
     }
     if (upPressed && !prevUp && receivedValue != 0 && millis() - lastDebounceTime > debounceDelay) {
+
         autoScanEnabled = false;
-        replayClearScanLock();
+        lockUntilMs = 0;
+        rssiHot = false;
         sendSignal();
         lastDebounceTime = millis();
     }
     if (downPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
-        replayTrySave();
+
+        autoScanEnabled = !autoScanEnabled;
+        scanIndex = currentFrequencyIndex;
+        lastHopMs = 0;
+        lockUntilMs = 0;
+        lastUiScanUpdateMs = 0;
+        rssiHot = false;
+        updateDisplay();
         lastDebounceTime = millis();
     }
 
@@ -1524,29 +1741,59 @@ void ReplayAttackLoop() {
     prevDown = downPressed;
 
     if (autoScanEnabled) {
-      const uint32_t now = millis();
-      const bool scanLocked = (lockUntilMs != 0 && (int32_t)(now - lockUntilMs) < 0);
+      uint32_t now = millis();
+      if (lockUntilMs != 0 && (int32_t)(now - lockUntilMs) < 0) {
+        // 保持锁定状态
+      } else {
+        if (lastHopMs == 0 || (now - lastHopMs) >= SCAN_DWELL_MS) {
+          scanIndex = (uint16_t)((scanIndex + 1) % freqCount());
+          currentFrequencyIndex = scanIndex;
 
-      if (!scanLocked &&
-          (lastHopMs == 0 || (now - lastHopMs) >= replayScanDwellMs())) {
-        const uint16_t fromIdx = currentFrequencyIndex;
-        scanIndex = (uint16_t)((scanIndex + 1) % freqCount());
-        replayScanHopTo(scanIndex, fromIdx);
-        lastHopMs = now;
-        rssiHot = false;
-      }
+          // 调谐到新频率
+          tuneToIndex(scanIndex, false);
+          delay(10); // 等待CC1101稳定
+          lastHopMs = now;
 
-      replaySampleRssiForScan(now);
+          // 读取RSSI值
+          int rssi = ELECHOUSE_cc1101.getRssi();
+          Serial.print("[CC1101] Frequency: ");
+          Serial.print(subghz_frequency_list[scanIndex] / 1000000.0);
+          Serial.print(" MHz, RSSI: ");
+          Serial.println(rssi);
 
-      if (lastUiScanUpdateMs == 0 || (now - lastUiScanUpdateMs) >= UI_SCAN_UPDATE_MS) {
-        updateDisplay();
-        lastUiScanUpdateMs = now;
+          if (!rssiHot) {
+            if (rssi > RSSI_DETECT_THRESHOLD) {
+              // 连续检测计数
+              rssiDetectCount++;
+              Serial.print("[CC1101] RSSI detect count: ");
+              Serial.println(rssiDetectCount);
+
+              if (rssiDetectCount >= RSSI_DETECT_COUNT_THRESHOLD) {
+                rssiHot = true;
+                lockUntilMs = now + RSSI_LOCK_MS;
+
+                EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+                EEPROM.commit();
+                replayShowDetectNotice("RSSI", rssi);
+              }
+            } else {
+              // 信号消失，重置计数器
+              rssiDetectCount = 0;
+            }
+          } else if (rssiHot && rssi < RSSI_CLEAR_THRESHOLD) {
+            rssiHot = false;
+            rssiDetectCount = 0;
+          }
+
+          if (lastUiScanUpdateMs == 0 || (now - lastUiScanUpdateMs) >= UI_SCAN_UPDATE_MS) {
+            updateDisplay();
+            lastUiScanUpdateMs = now;
+          }
+        }
       }
     }
 
-    if (!autoScanEnabled) {
-      do_sampling();
-    }
+    do_sampling();
     delay(10);
     epochSUB++;
 
@@ -1554,38 +1801,55 @@ void ReplayAttackLoop() {
       epochSUB = 0;
 
     if (mySwitch.available()) {
-        const uint32_t val = mySwitch.getReceivedValue();
-        const uint16_t bits = mySwitch.getReceivedBitlength();
-        const uint16_t proto = mySwitch.getReceivedProtocol();
-        mySwitch.resetAvailable();
+        uint32_t newValue = mySwitch.getReceivedValue();
+        uint16_t newBitLength = mySwitch.getReceivedBitlength();
+        uint16_t newProtocol = mySwitch.getReceivedProtocol();
 
-        const uint32_t now = millis();
-        const bool validDecode = replayLooksLikeRealDecode(val, bits, proto) &&
-            (!autoScanEnabled || replayAutoScanReadyForDecode(now));
+        // 添加调试输出
+        Serial.print("[Replay] Signal received: value=0x");
+        Serial.print(newValue, HEX);
+        Serial.print(", bits=");
+        Serial.print(newBitLength);
+        Serial.print(", protocol=");
+        Serial.println(newProtocol);
 
-        if (validDecode) {
-          receivedValue = val;
-          receivedBitLength = bits;
-          receivedProtocol = proto;
+        // 信号验证：针对汽车遥控器、大门遥控器、安防遥控器等
+        // 常见协议：1-10 (RCSwitch标准协议)
+        // 常见比特长度：8-64 (PT2260/PT2262等编码)
+        bool isValidSignal = (newValue != 0) &&
+                            (newBitLength >= 8 && newBitLength <= 64) &&
+                            (newProtocol >= 1 && newProtocol <= 10);
 
-          EEPROM.put(ADDR_VALUE, receivedValue);
-          EEPROM.put(ADDR_BITLEN, receivedBitLength);
-          EEPROM.put(ADDR_PROTO, receivedProtocol);
-          EEPROM.commit();
+        if (isValidSignal) {
+            receivedValue = newValue;
+            receivedBitLength = newBitLength;
+            receivedProtocol = newProtocol;
 
-          updateDisplay();
-
-          if (autoScanEnabled) {
-            lockUntilMs = now + LOCK_HOLD_MS;
-            scanIndex = currentFrequencyIndex;
-            rssiHot = false;
-            rssiDetectStreak = 0;
-
-            EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+            EEPROM.put(ADDR_VALUE, receivedValue);
+            EEPROM.put(ADDR_BITLEN, receivedBitLength);
+            EEPROM.put(ADDR_PROTO, receivedProtocol);
             EEPROM.commit();
-            replayShowDetectNotice("DECODE", ELECHOUSE_cc1101.getRssi());
-          }
+
+            updateDisplay();
+
+            // 捕获到信号时发出提示音
+            #ifdef BUZZER_PIN
+            replayBeep(2200, 50);
+            #endif
+
+            if (autoScanEnabled) {
+              lockUntilMs = millis() + LOCK_HOLD_MS;
+              scanIndex = currentFrequencyIndex;
+              rssiHot = false;
+
+              EEPROM.put(ADDR_FREQ, currentFrequencyIndex);
+              EEPROM.commit();
+              replayShowDetectNotice("DECODE", rssi);
+            }
+        } else {
+            Serial.println("[Replay] Signal filtered - does not match valid criteria");
         }
+        mySwitch.resetAvailable();
     }
 
   }
@@ -1616,6 +1880,8 @@ struct __attribute__((packed)) Profile {
     uint32_t value;
     uint16_t bitLength;
     uint16_t protocol;
+    uint8_t  modulation;
+    uint8_t  reserved;
     char name[MAX_NAME_LENGTH];
 };
 
@@ -1741,6 +2007,8 @@ static bool loadSelectedFromSd(String* errOut = nullptr) {
     selectedProfile.value = p.value;
     selectedProfile.bitLength = p.bitLength;
     selectedProfile.protocol = p.protocol;
+    selectedProfile.modulation = p.modulation;
+    selectedProfile.reserved = p.reserved;
     memcpy(selectedProfile.name, p.name, MAX_NAME_LENGTH);
     selectedProfile.name[MAX_NAME_LENGTH - 1] = '\0';
     selectedValid = true;
@@ -2013,11 +2281,21 @@ void transmitProfile(int index) {
     Profile profileToSend = selectedProfile;
 
     ELECHOUSE_cc1101.setSidle();
+
+    // 使用Profile中保存的调制方式
+    uint8_t modulationToUse = profileToSend.modulation;
+    if (modulationToUse >= 5) {
+        modulationToUse = 2;  // 默认使用ASK/OOK
+    }
+    Serial.print("[transmitProfile] Using modulation: ");
+    static const char* modNames[] = {"2-FSK", "GFSK", "ASK/OOK", "4-FSK", "MSK"};
+    Serial.println(modNames[modulationToUse]);
+    replayat::setModulationWithConfigPub(modulationToUse);
+
     ELECHOUSE_cc1101.setMHZ(profileToSend.frequency / 1000000.0);
 
     mySwitch.disableReceive();
     delay(100);
-    pinMode(SUBGHZ_TX_PIN, OUTPUT);
     mySwitch.enableTransmit(SUBGHZ_TX_PIN);
     ELECHOUSE_cc1101.SetTx();
 
@@ -2039,11 +2317,9 @@ void transmitProfile(int index) {
     tft.setCursor(10, 30 + yshift);
     tft.print("Done!");
 
-    mySwitch.disableTransmit();
-    pinMode(SUBGHZ_TX_PIN, INPUT);
-    pinMode(SUBGHZ_RX_PIN, INPUT);
     ELECHOUSE_cc1101.SetRx();
-    delay(50);
+    mySwitch.disableTransmit();
+    delay(100);
     mySwitch.enableReceive(SUBGHZ_RX_PIN);
 
     delay(500);
@@ -2056,7 +2332,20 @@ void loadProfileCount() {
 }
 
 void printProfiles() {
+    Serial.println("Saved Profiles (SD index):");
+    String err;
     refreshSdIndex(false);
+    Serial.printf("Total profiles: %d\n", (int)sdTotalProfiles);
+    if (!sdTotalProfiles) return;
+
+    uint16_t n = sdTotalProfiles > 10 ? 10 : sdTotalProfiles;
+    for (uint16_t i = 0; i < n; i++) {
+      String pth; uint16_t li = 0;
+      if (!locateGlobalIndex(sdFiles, i, pth, li)) continue;
+      SubGhzProfile p{};
+      if (!readProfileAt(pth, li, p, &err)) continue;
+      Serial.printf("  [%d] %s @ %.2f MHz (val=%lu)\n", (int)i, p.name, p.frequency/1000000.0, (unsigned long)p.value);
+    }
 }
 
 void deleteProfile(int index) {
@@ -2212,8 +2501,11 @@ void saveSetup() {
     setTouchButtonInputEnabled(true);
     subghzSetProfileNavLabels();
 
+    // Release SPI bus before configuring for CC1101
+    spiRelease();
+    delay(5);
+
     ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
-    ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
 
     EEPROM.begin(EEPROM_SIZE);
     loadProfileCount();
@@ -2238,15 +2530,19 @@ void saveSetup() {
     uiDrawn = false;
 
     ELECHOUSE_cc1101.Init();
-    ELECHOUSE_cc1101.setCCMode(0);
-    ELECHOUSE_cc1101.setModulation(2);
-    pinMode(SUBGHZ_RX_PIN, INPUT);
-    pinMode(SUBGHZ_TX_PIN, INPUT);
+    ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
     ELECHOUSE_cc1101.SetRx();
 
     mySwitch.enableReceive(SUBGHZ_RX_PIN);
+    mySwitch.enableTransmit(SUBGHZ_TX_PIN);
     mySwitch.setRepeatTransmit(8);
 
+    // Ensure SD is properly mounted before reading profiles
+    if (!subghz_sd_mounted || !SD.exists("/")) {
+      spiEnsureSD();
+      subghz_sd_mounted = true;
+    }
+    
     refreshSdIndex(false);
     cacheDirty = true;
     deleteArmed = false;
@@ -2727,12 +3023,6 @@ void runUI() {
         }
         lastTouchCheck = millis();
     }
-#undef SCREEN_WIDTH
-#undef SCREENHEIGHT
-#undef STATUS_BAR_Y_OFFSET
-#undef STATUS_BAR_HEIGHT
-#undef ICON_SIZE
-#undef ICON_NUM
 }
 
 void subjammerSetup() {
@@ -2842,6 +3132,8 @@ void subjammerLoop() {
       }
   }
 }
+
+// ─── Ported from 1.7.2: SubGHz new features ───
 
 namespace SubBrute {
 
@@ -4277,486 +4569,3 @@ void Loop() {
 }
 
 }  // namespace jammingdetector
-
-/*──────────────────── Frequency Scanner ────────────────────*/
-// Sweeps a sub-GHz band back and forth, sampling CC1101 RSSI. Channels above
-// an adaptive activity threshold are listed by hit count. Exit via center/SELECT.
-namespace freqscanner {
-
-struct Band { uint32_t startHz; uint32_t endHz; uint32_t stepHz; const char* label; };
-
-static const Band kBands[] = {
-  {300000000UL, 348000000UL, 500000UL,  "300-348"},
-  {387000000UL, 464000000UL, 250000UL,  "387-464"},
-  {779000000UL, 928000000UL, 1000000UL, "779-928"},
-};
-static constexpr uint8_t kBandCount = sizeof(kBands) / sizeof(kBands[0]);
-static uint8_t bandIdx = 1;
-
-static uint32_t curHz = 0;
-static int8_t sweepDir = 1;
-static uint16_t stepTotal = 0;
-static uint16_t stepPos = 0;
-static bool paused = false;
-
-static constexpr int FS_ABS_FLOOR_DBM = -70;
-static constexpr int FS_MARGIN_DB = 18;
-static constexpr uint8_t FS_WARMUP_STEPS = 24;
-static float noiseFloor = -90.0f;
-static uint32_t totalHits = 0;
-static uint32_t sweepCount = 0;
-static uint8_t warmupLeft = FS_WARMUP_STEPS;
-
-static constexpr uint8_t FS_MAX_HITS = 14;
-struct Hit { uint32_t freqKHz; uint32_t count; int8_t lastRssi; int8_t peakRssi; };
-static Hit hits[FS_MAX_HITS];
-static uint8_t hitCount = 0;
-
-static uint32_t lastDrawMs = 0;
-static bool prevL = false, prevR = false, prevU = false, prevD = false;
-
-static constexpr int FS_BAR_Y  = 20;
-static constexpr int FS_BAR_H  = 16;
-static constexpr int FS_HDR_Y  = 40;
-static constexpr int FS_LIST_Y = 70;
-static constexpr int FS_ROW_H  = 16;
-static constexpr int FS_COL_FREQ = 6;
-static constexpr int FS_COL_HITS = 120;
-static constexpr int FS_COL_DBM  = 180;
-
-static char s_lastStatus[36];
-static uint16_t s_lastStatusColor = 0;
-static uint8_t s_lastDrawnCount = 255;
-static uint32_t s_lastFreqKHz[FS_MAX_HITS];
-static uint32_t s_lastHitN[FS_MAX_HITS];
-static int8_t s_lastPeak[FS_MAX_HITS];
-static bool s_showedListening = false;
-static bool s_fsUiDrawn = false;
-
-static constexpr int FS_ICON_SZ = 16;
-static constexpr int FS_BACK_X = 10;
-
-static void fsInvalidateDraw() {
-  s_lastStatus[0] = '\0';
-  s_lastStatusColor = 0;
-  s_lastDrawnCount = 255;
-  s_showedListening = false;
-  for (uint8_t i = 0; i < FS_MAX_HITS; i++) {
-    s_lastFreqKHz[i] = 0xFFFFFFFFu;
-    s_lastHitN[i] = 0xFFFFFFFFu;
-    s_lastPeak[i] = 127;
-  }
-}
-
-static bool fsEdge(int pin, bool& prev) {
-  const bool now = isPhysicalButtonPressed(pin);
-  const bool e = now && !prev;
-  prev = now;
-  return e;
-}
-
-static void fsCc1101Begin() {
-  ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
-  ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
-  ELECHOUSE_cc1101.Init();
-  ELECHOUSE_cc1101.setCCMode(0);
-  ELECHOUSE_cc1101.setModulation(2);
-  ELECHOUSE_cc1101.setRxBW(270.0);
-  ELECHOUSE_cc1101.SetRx();
-}
-
-static void fsResetStats() {
-  hitCount = 0;
-  totalHits = 0;
-  sweepCount = 0;
-  noiseFloor = -90.0f;
-  warmupLeft = FS_WARMUP_STEPS;
-}
-
-static void fsBuildBand() {
-  const Band& b = kBands[bandIdx];
-  stepTotal = (uint16_t)((b.endHz - b.startHz) / b.stepHz) + 1;
-  stepPos = 0;
-  sweepDir = 1;
-  curHz = b.startHz;
-}
-
-static void fsRecordHit(uint32_t hz, int rssi) {
-  totalHits++;
-  const uint32_t key = hz / 1000;
-  for (uint8_t i = 0; i < hitCount; i++) {
-    if (hits[i].freqKHz == key) {
-      hits[i].count++;
-      hits[i].lastRssi = (int8_t)rssi;
-      if (rssi > hits[i].peakRssi) hits[i].peakRssi = (int8_t)rssi;
-      return;
-    }
-  }
-  uint8_t slot;
-  if (hitCount < FS_MAX_HITS) {
-    slot = hitCount++;
-  } else {
-    slot = 0;
-    for (uint8_t i = 1; i < hitCount; i++) {
-      if (hits[i].count < hits[slot].count ||
-          (hits[i].count == hits[slot].count && hits[i].peakRssi < hits[slot].peakRssi)) {
-        slot = i;
-      }
-    }
-    if (hits[slot].count > 1) return;
-  }
-  hits[slot].freqKHz = key;
-  hits[slot].count = 1;
-  hits[slot].lastRssi = (int8_t)rssi;
-  hits[slot].peakRssi = (int8_t)rssi;
-}
-
-static void fsUpdateFloor(int rssi) {
-  // Fast drop / slow rise so urban noise isn't frozen as "signal".
-  if ((float)rssi < noiseFloor) {
-    noiseFloor = 0.70f * noiseFloor + 0.30f * (float)rssi;
-  } else {
-    noiseFloor = 0.98f * noiseFloor + 0.02f * (float)rssi;
-  }
-}
-
-static int fsSampleRssi(uint32_t hz, int samples[3]) {
-  ELECHOUSE_cc1101.setSidle();
-  ELECHOUSE_cc1101.setMHZ(hz / 1000000.0);
-  ELECHOUSE_cc1101.SetRx();
-  delayMicroseconds(1500);
-  for (uint8_t k = 0; k < 3; k++) {
-    samples[k] = ELECHOUSE_cc1101.getRssi();
-    delayMicroseconds(350);
-  }
-  int lo = samples[0], mid = samples[1], hi = samples[2];
-  if (lo > mid) { const int t = lo; lo = mid; mid = t; }
-  if (mid > hi) { const int t = mid; mid = hi; hi = t; }
-  if (lo > mid) { const int t = lo; lo = mid; mid = t; }
-  return mid;
-}
-
-static void fsAdvance() {
-  int samples[3];
-  const int rssi = fsSampleRssi(curHz, samples);
-  fsUpdateFloor(rssi);
-
-  const Band& b = kBands[bandIdx];
-  if (warmupLeft > 0) {
-    warmupLeft--;
-  } else {
-    const int thresh = max(FS_ABS_FLOOR_DBM, (int)(noiseFloor + FS_MARGIN_DB));
-    uint8_t above = 0;
-    int peak = samples[0];
-    for (uint8_t k = 0; k < 3; k++) {
-      if (samples[k] > peak) peak = samples[k];
-      if (samples[k] >= thresh) above++;
-    }
-    if (above >= 2 && peak >= thresh) {
-      fsRecordHit(curHz, peak);
-    }
-  }
-
-  if (sweepDir > 0) {
-    if (stepPos + 1 >= stepTotal) { sweepDir = -1; sweepCount++; }
-    else { stepPos++; curHz += b.stepHz; }
-  } else {
-    if (stepPos == 0) { sweepDir = 1; sweepCount++; }
-    else { stepPos--; curHz -= b.stepHz; }
-  }
-}
-
-static void fsSortIndices(uint8_t* order) {
-  for (uint8_t i = 0; i < hitCount; i++) order[i] = i;
-  for (uint8_t i = 0; i < hitCount; i++) {
-    for (uint8_t j = i + 1; j < hitCount; j++) {
-      if (hits[order[j]].count > hits[order[i]].count) {
-        const uint8_t t = order[i]; order[i] = order[j]; order[j] = t;
-      }
-    }
-  }
-}
-
-static void fsDrawStaticChrome() {
-  const int bottom = subghzContentBottom();
-  tft.fillRect(0, FS_HDR_Y, 240, bottom - FS_HDR_Y, TFT_BLACK);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-  tft.setCursor(FS_COL_FREQ, FS_LIST_Y - 12);
-  tft.print("FREQ(MHz)");
-  tft.setCursor(FS_COL_HITS, FS_LIST_Y - 12);
-  tft.print("HITS");
-  tft.setCursor(FS_COL_DBM, FS_LIST_Y - 12);
-  tft.print("dBm");
-  tft.drawFastHLine(0, FS_LIST_Y - 2, 240, UI_LINE);
-  fsInvalidateDraw();
-}
-
-static int fsListMaxRows() {
-  const int bottom = subghzContentBottom();
-  int maxRows = (bottom - FS_LIST_Y) / FS_ROW_H;
-  if (maxRows > FS_MAX_HITS) maxRows = FS_MAX_HITS;
-  if (maxRows < 0) maxRows = 0;
-  return maxRows;
-}
-
-static void fsDrawStatusLine() {
-  char buf[36];
-  const char dirc = paused ? '=' : (sweepDir > 0 ? '>' : '<');
-  snprintf(buf, sizeof(buf), "%c %7.2f Flr%4d Act%-5lu",
-           dirc, curHz / 1000000.0, (int)noiseFloor, (unsigned long)totalHits);
-  const uint16_t color = paused ? UI_WARN : UI_OK;
-  if (color == s_lastStatusColor && strcmp(buf, s_lastStatus) == 0) {
-    return;
-  }
-  tft.setTextSize(1);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.setCursor(6, FS_HDR_Y + 2);
-  tft.print(buf);
-  tft.print("   ");
-  strncpy(s_lastStatus, buf, sizeof(s_lastStatus) - 1);
-  s_lastStatus[sizeof(s_lastStatus) - 1] = '\0';
-  s_lastStatusColor = color;
-}
-
-static void fsDrawListRow(int row, const Hit& h) {
-  const int y = FS_LIST_Y + row * FS_ROW_H + 3;
-  char buf[16];
-  tft.setTextSize(1);
-  tft.setTextColor(UI_TEXT, TFT_BLACK);
-
-  snprintf(buf, sizeof(buf), "%7.2f", h.freqKHz / 1000.0);
-  tft.setCursor(FS_COL_FREQ, y);
-  tft.print(buf);
-
-  snprintf(buf, sizeof(buf), "x%-5lu", (unsigned long)h.count);
-  tft.setCursor(FS_COL_HITS, y);
-  tft.print(buf);
-
-  snprintf(buf, sizeof(buf), "%-4d", (int)h.peakRssi);
-  tft.setCursor(FS_COL_DBM, y);
-  tft.print(buf);
-}
-
-static void fsClearListRow(int row) {
-  tft.fillRect(0, FS_LIST_Y + row * FS_ROW_H, 240, FS_ROW_H, TFT_BLACK);
-}
-
-static void fsDrawDynamic() {
-  fsDrawStatusLine();
-
-  const int maxRows = fsListMaxRows();
-  uint8_t order[FS_MAX_HITS];
-  fsSortIndices(order);
-
-  if (hitCount == 0) {
-    if (!s_showedListening) {
-      tft.fillRect(0, FS_LIST_Y, 240, maxRows * FS_ROW_H, TFT_BLACK);
-      tft.setTextSize(1);
-      tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
-      tft.setCursor(6, FS_LIST_Y + 3);
-      tft.print("listening...");
-      s_showedListening = true;
-      s_lastDrawnCount = 0;
-      for (uint8_t i = 0; i < FS_MAX_HITS; i++) {
-        s_lastFreqKHz[i] = 0xFFFFFFFFu;
-        s_lastHitN[i] = 0xFFFFFFFFu;
-        s_lastPeak[i] = 127;
-      }
-    }
-    return;
-  }
-
-  if (s_showedListening) {
-    tft.fillRect(0, FS_LIST_Y, 240, FS_ROW_H, TFT_BLACK);
-    s_showedListening = false;
-  }
-
-  const int shown = (hitCount < maxRows) ? hitCount : maxRows;
-  for (int i = 0; i < shown; i++) {
-    const Hit& h = hits[order[i]];
-    if (s_lastFreqKHz[i] == h.freqKHz && s_lastHitN[i] == h.count && s_lastPeak[i] == h.peakRssi) {
-      continue;
-    }
-    fsDrawListRow(i, h);
-    s_lastFreqKHz[i] = h.freqKHz;
-    s_lastHitN[i] = h.count;
-    s_lastPeak[i] = h.peakRssi;
-  }
-
-  if (s_lastDrawnCount != 255 && s_lastDrawnCount > shown) {
-    for (int i = shown; i < s_lastDrawnCount && i < maxRows; i++) {
-      fsClearListRow(i);
-      s_lastFreqKHz[i] = 0xFFFFFFFFu;
-    }
-  }
-  s_lastDrawnCount = (uint8_t)shown;
-}
-
-static void fsSetNavLabels() {
-  setTouchNavLabels("Band-", "Clear", "Exit", paused ? "Resume" : "Pause", "Band+");
-  subghzRedrawNavChrome();
-}
-
-static void fsDrawToolbarTitle() {
-  const Band& b = kBands[bandIdx];
-  char title[28];
-  snprintf(title, sizeof(title), "SWEEP %s MHz", b.label);
-
-  tft.fillRect(30, FS_BAR_Y, 210, FS_BAR_H, DARK_GRAY);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_TEXT, DARK_GRAY);
-  const int tw = tft.textWidth(title);
-  const int x = 240 - tw - 6;
-  tft.setCursor(x < 30 ? 30 : x, FS_BAR_Y + 4);
-  tft.print(title);
-}
-
-static void fsDrawToolbar() {
-  tft.fillRect(0, FS_BAR_Y, 240, FS_BAR_H, DARK_GRAY);
-  tft.drawBitmap(FS_BACK_X, FS_BAR_Y, bitmap_icon_go_back, FS_ICON_SZ, FS_ICON_SZ, UI_ICON);
-  fsDrawToolbarTitle();
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  tft.drawFastHLine(0, FS_BAR_Y + FS_BAR_H, 240, UI_LINE);
-  s_fsUiDrawn = true;
-}
-
-static void fsChangeBand(int dir) {
-  bandIdx = (uint8_t)((bandIdx + kBandCount + dir) % kBandCount);
-  fsResetStats();
-  fsBuildBand();
-  fsDrawToolbarTitle();
-  fsDrawStaticChrome();
-  fsDrawDynamic();
-}
-
-static void fsClearHits() {
-  fsResetStats();
-  fsBuildBand();
-  fsDrawStaticChrome();
-  fsDrawDynamic();
-}
-
-static void fsTogglePause() {
-  paused = !paused;
-  s_lastStatus[0] = '\0';
-  fsSetNavLabels();
-  fsDrawStatusLine();
-}
-
-static void fsRunUI() {
-  if (!s_fsUiDrawn) {
-    fsDrawToolbar();
-  }
-
-  static unsigned long lastTouchCheck = 0;
-  if (millis() - lastTouchCheck >= 50) {
-    int x, y;
-    if (feature_active && readTouchXY(x, y)) {
-      if (y > FS_BAR_Y && y < FS_BAR_Y + FS_BAR_H &&
-          x > FS_BACK_X && x < FS_BACK_X + FS_ICON_SZ) {
-        feature_exit_requested = true;
-      }
-    }
-    lastTouchCheck = millis();
-  }
-}
-
-static void fsHandleInput() {
-  const bool navBandDown = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_LEFT);
-  const bool navBandUp   = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_RIGHT);
-  const bool navPause    = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_UP);
-  const bool navClear    = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_DOWN);
-
-  if (fsEdge(BTN_LEFT, prevL) || navBandDown) {
-    fsChangeBand(-1);
-  }
-  if (fsEdge(BTN_RIGHT, prevR) || navBandUp) {
-    fsChangeBand(+1);
-  }
-  if (fsEdge(BTN_UP, prevU) || navPause) {
-    fsTogglePause();
-  }
-  if (fsEdge(BTN_DOWN, prevD) || navClear) {
-    fsClearHits();
-  }
-}
-
-static void fsExitCleanup() {
-  ELECHOUSE_cc1101.setSidle();
-  restoreSdAfterSharedSpi();
-}
-
-void Setup() {
-  pauseBackgroundRadioTasks();
-  setTouchButtonInputEnabled(true);
-  paused = false;
-  fsSetNavLabels();
-
-  holdSdInactiveOnSharedSpi();
-  reclaimSharedSpiBus();
-#if defined(SD_CS)
-  pinMode(SD_CS, OUTPUT); digitalWrite(SD_CS, HIGH);
-#endif
-#if defined(CC1101_CS)
-  pinMode(CC1101_CS, OUTPUT); digitalWrite(CC1101_CS, HIGH);
-#endif
-
-#if HAS_PCF8574_BUTTONS
-  pcf.pinMode(BTN_LEFT, INPUT_PULLUP);
-  pcf.pinMode(BTN_RIGHT, INPUT_PULLUP);
-  pcf.pinMode(BTN_UP, INPUT_PULLUP);
-  pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
-  pcf.pinMode(BTN_SELECT, INPUT_PULLUP);
-#endif
-
-  fsCc1101Begin();
-  fsResetStats();
-  fsBuildBand();
-  paused = false;
-  prevL = prevR = prevU = prevD = false;
-  lastDrawMs = 0;
-  s_fsUiDrawn = false;
-
-  tft.setRotation(TFT_ROTATION);
-  subghzClearBody(TFT_BLACK);
-  drawStatusBar(readBatteryVoltage(), true);
-  fsDrawToolbar();
-  subghzRedrawNavChrome();
-  setupTouchscreen();
-  fsDrawStaticChrome();
-  fsDrawDynamic();
-}
-
-void Loop() {
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-    fsExitCleanup();
-    feature_exit_requested = true;
-    return;
-  }
-
-  maintainTouchNavBar();
-  fsRunUI();
-  fsHandleInput();
-
-  if (!paused) {
-    for (uint8_t n = 0; n < 6; n++) {
-      if (feature_exit_requested || featureExitButtonPressed()) {
-        fsExitCleanup();
-        feature_exit_requested = true;
-        return;
-      }
-      fsAdvance();
-    }
-  }
-
-  const uint32_t now = millis();
-  if (now - lastDrawMs >= 220) {
-    lastDrawMs = now;
-    fsDrawDynamic();
-  }
-}
-
-}  // namespace freqscanner

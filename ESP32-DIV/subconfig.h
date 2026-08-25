@@ -33,19 +33,4 @@ namespace subjammer {
   void subjammerLoop();
 }
 
-namespace SubBrute {
-  void subBruteSetup();
-  void subBruteLoop();
-}
-
-namespace jammingdetector {
-  void Setup();
-  void Loop();
-}
-
-namespace freqscanner {
-  void Setup();
-  void Loop();
-}
-
 #endif
