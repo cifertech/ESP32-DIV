@@ -2400,8 +2400,18 @@ static uint8_t        s_liveChannel   = 0;
 static bool           s_liveActive    = false;
 static uint32_t       s_liveLastMs    = 0;
 static const uint32_t kLiveSampleMs   = 400;    // sample cadence
-static const uint16_t kLiveDwellMs    = 160;    // per-scan listen time (ms)
+static const uint16_t kLiveDwellMs    = 200;    // per-scan listen time (ms) — long
+                                                // enough to reliably catch a ~100 ms
+                                                // beacon interval on the target channel
 static const int      kRssiLost       = -100;   // sentinel: AP not heard this round
+
+// A passive scan can miss a single beacon window even when the AP is well in range,
+// which used to flip the readout to "-- lost --" and dive the trace to the floor on
+// every transient miss. Hold the last good reading for a few rounds and only declare
+// the AP lost after this many consecutive misses.
+static const int      kLostAfterMisses = 3;     // ~1.2 s of real loss before "lost"
+static int            s_consecMiss     = 0;
+static int            s_lastGoodRssi   = kRssiLost;
 
 // Plot geometry. Sits below the "Est. Distance" text (now y=150 after removing the
 // static RSSI line). Bottom stays clear of the touch nav bar, which reserves the
@@ -2451,10 +2461,13 @@ static void drawRssiGraph(bool fullFrame) {
     tft.print("RSSI history (live)");
     tft.drawRect(kPlotX0 - 1, kPlotY0 - 1,
                  (kPlotX1 - kPlotX0) + 2, (kPlotY1 - kPlotY0) + 2, TFT_GRAY);
+    // dBm axis labels aligned to the gridlines drawn below (-50 / -70 / -90).
     tft.setTextColor(TFT_GRAY, TFT_BLACK);
-    tft.setCursor(2, kPlotY0 - 3);              tft.print("-35");
-    tft.setCursor(2, (kPlotY0 + kPlotY1)/2 - 3); tft.print("-67");
-    tft.setCursor(2, kPlotY1 - 7);              tft.print("-100");
+    for (int gr = -50; gr >= -90; gr -= 20) {
+      char lb[6]; snprintf(lb, sizeof(lb), "%d", gr);
+      tft.setCursor(2, rssiToY(gr) - 3);
+      tft.print(lb);
+    }
   }
 
   // Clear interior, redraw faint gridlines.
@@ -2475,12 +2488,13 @@ static void drawRssiGraph(bool fullFrame) {
     prevX = x; prevY = y;
   }
 
-  // Current reading readout (top-right inside the plot).
+  // Current reading readout — on the title row above the plot, so it never covers
+  // the newest trace samples (which ride near the top-right when signal is strong).
   const int latest = (s_rssiHistCount > 0)
       ? s_rssiHist[(s_rssiHistHead - 1 + kRssiHistLen) % kRssiHistLen] : 0;
   char buf[16];
   tft.setTextSize(1);
-  tft.fillRect(kPlotX1 - 62, kPlotY0 + 2, 60, 10, TFT_BLACK);
+  tft.fillRect(150, kPlotY0 - 15, 84, 12, TFT_BLACK);
   if (s_rssiHistCount > 0 && latest > kRssiLost) {
     snprintf(buf, sizeof(buf), "%d dBm", latest);
     tft.setTextColor(ORANGE, TFT_BLACK);
@@ -2488,7 +2502,7 @@ static void drawRssiGraph(bool fullFrame) {
     snprintf(buf, sizeof(buf), "-- lost --");
     tft.setTextColor(TFT_RED, TFT_BLACK);
   }
-  tft.setCursor(kPlotX1 - 60, kPlotY0 + 2);
+  tft.setCursor(178, kPlotY0 - 14);
   tft.print(buf);
 }
 
@@ -2498,6 +2512,8 @@ static void liveRssiStart(const uint8_t* bssid, int channel, int seedRssi) {
   s_liveChannel   = (uint8_t)channel;
   s_rssiHistCount = 0;
   s_rssiHistHead  = 0;
+  s_consecMiss    = 0;
+  s_lastGoodRssi  = seedRssi;
   liveRssiPush(seedRssi);     // seed with the cached reading so the graph isn't empty
   s_liveActive = true;
   s_liveLastMs = 0;           // force an immediate first sample
@@ -2513,7 +2529,16 @@ static void liveRssiTick() {
   if (s_liveLastMs != 0 && (now - s_liveLastMs) < kLiveSampleMs) return;
   s_liveLastMs = now;
   int r = 0;
-  liveRssiPush(liveRssiSample(&r) ? r : kRssiLost);
+  if (liveRssiSample(&r)) {
+    s_consecMiss   = 0;
+    s_lastGoodRssi = r;
+    liveRssiPush(r);
+  } else {
+    // Transient miss: hold the last good reading; only declare the AP lost after
+    // several consecutive misses so a single dropped beacon doesn't flicker "lost".
+    s_consecMiss++;
+    liveRssiPush(s_consecMiss >= kLostAfterMisses ? kRssiLost : s_lastGoodRssi);
+  }
   drawRssiGraph(/*fullFrame=*/false);
 }
 
