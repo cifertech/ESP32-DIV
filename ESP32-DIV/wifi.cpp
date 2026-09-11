@@ -2430,6 +2430,14 @@ static const int kPlotY1     = 288;   // bottom -> weak signal   (kRssiWeak)
 static const int kRssiStrong = -35;   // dBm mapped to kPlotY0
 static const int kRssiWeak   = -100;  // dBm mapped to kPlotY1
 
+// Detail-view text row layout — single source of truth for both displayWiFiDetails
+// (which prints the labels) and drawLiveFields (which overwrites Signal/Distance live),
+// so adding/reordering a row can't silently desync the two.
+static const int kDetailRowY0   = 50;   // y of the first row
+static const int kDetailRowStep = 20;   // row pitch
+enum { kRowSSID = 0, kRowBSSID, kRowSignal, kRowChannel, kRowEnc, kRowDist };
+static inline int detailRowY(int row) { return kDetailRowY0 + row * kDetailRowStep; }
+
 static int rssiToY(int rssi) {
   if (rssi > kRssiStrong) rssi = kRssiStrong;
   if (rssi < kRssiWeak)   rssi = kRssiWeak;
@@ -2515,6 +2523,7 @@ static void drawRssiGraph(bool fullFrame) {
 
 // Begin live sampling for the network shown on the detail screen.
 static void liveRssiStart(const uint8_t* bssid, int channel, int seedRssi) {
+  if (!bssid) { s_liveActive = false; return; }  // stale/empty scan cache — no target
   memcpy(s_liveBssid, bssid, 6);
   s_liveChannel   = (uint8_t)channel;
   s_rssiHistCount = 0;
@@ -2534,8 +2543,8 @@ static void liveRssiStop() { s_liveActive = false; }
 // (y positions match the layout in displayWiFiDetails). Distance is EMA-smoothed; on
 // real loss both freeze at their last value and dim (drawn in gray).
 static void drawLiveFields(int rssi, bool lost) {
-  const int SIGNAL_Y = 90;    // 3rd detail row
-  const int DIST_Y   = 150;   // 6th detail row
+  const int SIGNAL_Y = detailRowY(kRowSignal);
+  const int DIST_Y   = detailRowY(kRowDist);
   uint16_t col;
   if (!lost) {
     const float sig  = constrain(2 * (rssi + 100), 0, 100);
@@ -2622,7 +2631,6 @@ void displayWiFiDetails() {
   int channel = WiFi.channel(currentIndex);
   int encryption = WiFi.encryptionType(currentIndex);
   bool isHidden = (ssid.length() == 0);
-  int y = 50;
 
   float signalQuality = constrain(2 * (rssi + 100), 0, 100);
   float estimatedDistance = pow(10.0, (-69.0 - rssi) / (10.0 * 2.0));
@@ -2643,29 +2651,24 @@ void displayWiFiDetails() {
   tft.setTextColor(WHITE, TFT_BLACK);
   tft.setTextSize(1);
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowSSID));
   tft.print("SSID: "); tft.print(isHidden ? "(Hidden)" : ssid);
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowBSSID));
   tft.print("BSSID: "); tft.print(bssid);
-  y += 20;
 
   // (Static "RSSI:" line removed — the live graph below shows RSSI in real time.)
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowSignal));
   tft.print("Signal: "); tft.print(signalQuality); tft.print("%");
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowChannel));
   tft.print("Channel: "); tft.print(channel);
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowEnc));
   tft.print("Encryption: "); tft.print(encryptionType);
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowDist));
   tft.print("Est. Distance: "); tft.print(estimatedDistance, 1); tft.print("m");
 
   // Live scrolling RSSI history graph under the details.
@@ -2900,6 +2903,7 @@ void wifiscanSetup() {
 void wifiscanLoop() {
 
   if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    liveRssiStop();   // leaving the feature from the detail view: stop live sampling
     feature_exit_requested = true;
     return;
   }
