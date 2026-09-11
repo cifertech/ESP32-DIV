@@ -2413,6 +2413,13 @@ static const int      kLostAfterMisses = 3;     // ~1.2 s of real loss before "l
 static int            s_consecMiss     = 0;
 static int            s_lastGoodRssi   = kRssiLost;
 
+// Live "Signal %" and "Est. Distance" detail lines mirror the graph's sampling.
+// Distance is EMA-smoothed to tame RSSI jitter; on real loss both freeze and dim.
+static bool           s_fieldsInit     = false;
+static float          s_distEMA        = 0.0f;
+static float          s_shownSignal    = 0.0f;
+static float          s_shownDist      = 0.0f;
+
 // Plot geometry. Sits below the "Est. Distance" text (now y=150 after removing the
 // static RSSI line). Bottom stays clear of the touch nav bar, which reserves the
 // screen below y=293 on V2 (320 - TOUCH_NAV_BAR_H), and of the y=304 button tab bar.
@@ -2514,6 +2521,7 @@ static void liveRssiStart(const uint8_t* bssid, int channel, int seedRssi) {
   s_rssiHistHead  = 0;
   s_consecMiss    = 0;
   s_lastGoodRssi  = seedRssi;
+  s_fieldsInit    = false;    // reset distance smoothing for the new network
   liveRssiPush(seedRssi);     // seed with the cached reading so the graph isn't empty
   s_liveActive = true;
   s_liveLastMs = 0;           // force an immediate first sample
@@ -2522,6 +2530,34 @@ static void liveRssiStart(const uint8_t* bssid, int channel, int seedRssi) {
 
 static void liveRssiStop() { s_liveActive = false; }
 
+// Redraw the "Signal %" and "Est. Distance" detail lines from the current live RSSI
+// (y positions match the layout in displayWiFiDetails). Distance is EMA-smoothed; on
+// real loss both freeze at their last value and dim (drawn in gray).
+static void drawLiveFields(int rssi, bool lost) {
+  const int SIGNAL_Y = 90;    // 3rd detail row
+  const int DIST_Y   = 150;   // 6th detail row
+  uint16_t col;
+  if (!lost) {
+    const float sig  = constrain(2 * (rssi + 100), 0, 100);
+    const float dist = pow(10.0, (-69.0 - rssi) / (10.0 * 2.0));
+    if (!s_fieldsInit) { s_distEMA = dist; s_fieldsInit = true; }
+    else               { s_distEMA = 0.3f * dist + 0.7f * s_distEMA; }  // light smoothing
+    s_shownSignal = sig;
+    s_shownDist   = s_distEMA;
+    col = WHITE;
+  } else {
+    col = TFT_GRAY;   // frozen + dimmed
+  }
+  tft.setTextSize(1);
+  tft.setTextColor(col, TFT_BLACK);
+  tft.fillRect(10, SIGNAL_Y - 1, 200, 10, TFT_BLACK);
+  tft.setCursor(10, SIGNAL_Y);
+  tft.print("Signal: "); tft.print(s_shownSignal, 0); tft.print("%");
+  tft.fillRect(10, DIST_Y - 1, 200, 10, TFT_BLACK);
+  tft.setCursor(10, DIST_Y);
+  tft.print("Est. Distance: "); tft.print(s_shownDist, 1); tft.print("m");
+}
+
 // Called every loop tick while the detail view is open.
 static void liveRssiTick() {
   if (!s_liveActive) return;
@@ -2529,17 +2565,27 @@ static void liveRssiTick() {
   if (s_liveLastMs != 0 && (now - s_liveLastMs) < kLiveSampleMs) return;
   s_liveLastMs = now;
   int r = 0;
+  bool lost = false;
+  int displayRssi = s_lastGoodRssi;
   if (liveRssiSample(&r)) {
     s_consecMiss   = 0;
     s_lastGoodRssi = r;
+    displayRssi    = r;
     liveRssiPush(r);
   } else {
     // Transient miss: hold the last good reading; only declare the AP lost after
     // several consecutive misses so a single dropped beacon doesn't flicker "lost".
     s_consecMiss++;
-    liveRssiPush(s_consecMiss >= kLostAfterMisses ? kRssiLost : s_lastGoodRssi);
+    if (s_consecMiss >= kLostAfterMisses) {
+      lost = true;
+      liveRssiPush(kRssiLost);
+    } else {
+      displayRssi = s_lastGoodRssi;   // held
+      liveRssiPush(s_lastGoodRssi);
+    }
   }
   drawRssiGraph(/*fullFrame=*/false);
+  drawLiveFields(displayRssi, lost);
 }
 
 // After a full rescan, put the cursor back on the network we were viewing.
