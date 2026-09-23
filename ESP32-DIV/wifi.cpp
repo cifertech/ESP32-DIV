@@ -2384,6 +2384,234 @@ void startWiFiScan() {
   displayWiFiList(true);
 }
 
+/* ───────────────── Live RSSI history graph (network detail view) ─────────────────
+ * While the detail screen is open we repeatedly do a fast, single-channel passive
+ * scan of just the selected AP and plot its RSSI over time, so you can walk around
+ * and watch the signal rise and fall on a scrolling history trace. The single-channel
+ * scan replaces the driver's cached list with a one-channel subset, so on leaving the
+ * detail view we rebuild the full list and re-select the network we were viewing.
+ */
+static const int      kRssiHistLen = 198;      // one stored sample per plot column
+static int8_t         s_rssiHist[kRssiHistLen];
+static int            s_rssiHistCount = 0;      // valid samples so far (<= len)
+static int            s_rssiHistHead  = 0;      // ring-buffer write index
+static uint8_t        s_liveBssid[6]  = {0};
+static uint8_t        s_liveChannel   = 0;
+static bool           s_liveActive    = false;
+static uint32_t       s_liveLastMs    = 0;
+static const uint32_t kLiveSampleMs   = 400;    // sample cadence
+static const uint16_t kLiveDwellMs    = 200;    // per-scan listen time (ms) — long
+                                                // enough to reliably catch a ~100 ms
+                                                // beacon interval on the target channel
+static const int      kRssiLost       = -100;   // sentinel: AP not heard this round
+
+// A passive scan can miss a single beacon window even when the AP is well in range,
+// which used to flip the readout to "-- lost --" and dive the trace to the floor on
+// every transient miss. Hold the last good reading for a few rounds and only declare
+// the AP lost after this many consecutive misses.
+static const int      kLostAfterMisses = 3;     // ~1.2 s of real loss before "lost"
+static int            s_consecMiss     = 0;
+static int            s_lastGoodRssi   = kRssiLost;
+
+// Live "Signal %" and "Est. Distance" detail lines mirror the graph's sampling.
+// Distance is EMA-smoothed to tame RSSI jitter; on real loss both freeze and dim.
+static bool           s_fieldsInit     = false;
+static float          s_distEMA        = 0.0f;
+static float          s_shownSignal    = 0.0f;
+static float          s_shownDist      = 0.0f;
+
+// Plot geometry. Sits below the "Est. Distance" text (now y=150 after removing the
+// static RSSI line). Bottom stays clear of the touch nav bar, which reserves the
+// screen below y=293 on V2 (320 - TOUCH_NAV_BAR_H), and of the y=304 button tab bar.
+static const int kPlotX0     = 34;    // left edge of trace area
+static const int kPlotX1     = 232;   // right edge (newest sample)
+static const int kPlotY0     = 176;   // top    -> strong signal (kRssiStrong)
+static const int kPlotY1     = 288;   // bottom -> weak signal   (kRssiWeak)
+static const int kRssiStrong = -35;   // dBm mapped to kPlotY0
+static const int kRssiWeak   = -100;  // dBm mapped to kPlotY1
+
+// Detail-view text row layout — single source of truth for both displayWiFiDetails
+// (which prints the labels) and drawLiveFields (which overwrites Signal/Distance live),
+// so adding/reordering a row can't silently desync the two.
+static const int kDetailRowY0   = 50;   // y of the first row
+static const int kDetailRowStep = 20;   // row pitch
+enum { kRowSSID = 0, kRowBSSID, kRowSignal, kRowChannel, kRowEnc, kRowDist };
+static inline int detailRowY(int row) { return kDetailRowY0 + row * kDetailRowStep; }
+
+static int rssiToY(int rssi) {
+  if (rssi > kRssiStrong) rssi = kRssiStrong;
+  if (rssi < kRssiWeak)   rssi = kRssiWeak;
+  const long span = (long)(kRssiStrong - kRssiWeak);   // 65
+  const long frac = (long)(kRssiStrong - rssi);        // 0..span
+  return kPlotY0 + (int)((frac * (kPlotY1 - kPlotY0)) / span);
+}
+
+static void liveRssiPush(int rssi) {
+  s_rssiHist[s_rssiHistHead] = (int8_t)constrain(rssi, -120, 0);
+  s_rssiHistHead = (s_rssiHistHead + 1) % kRssiHistLen;
+  if (s_rssiHistCount < kRssiHistLen) s_rssiHistCount++;
+}
+
+// Single-channel passive scan of just the selected AP. Returns true and sets *out
+// when the target BSSID is heard this round.
+static bool liveRssiSample(int* out) {
+  // Passive scan restricted to the target's channel AND BSSID, so the driver only
+  // reports our AP (core >= 2.0.x supports the channel + bssid filter arguments).
+  int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true, /*passive=*/true,
+                            kLiveDwellMs, s_liveChannel, /*ssid=*/nullptr, s_liveBssid);
+  bool found = false;
+  for (int i = 0; i < n; i++) {
+    const uint8_t* b = WiFi.BSSID(i);
+    if (b && memcmp(b, s_liveBssid, 6) == 0) { *out = WiFi.RSSI(i); found = true; break; }
+  }
+  WiFi.scanDelete();
+  return found;
+}
+
+static void drawRssiGraph(bool fullFrame) {
+  if (fullFrame) {
+    tft.setTextSize(1);
+    tft.setTextColor(GREEN, TFT_BLACK);
+    tft.setCursor(10, kPlotY0 - 14);
+    tft.print("RSSI history (live)");
+    tft.drawRect(kPlotX0 - 1, kPlotY0 - 1,
+                 (kPlotX1 - kPlotX0) + 2, (kPlotY1 - kPlotY0) + 2, TFT_GRAY);
+    // dBm axis labels aligned to the gridlines drawn below (-50 / -70 / -90).
+    tft.setTextColor(TFT_GRAY, TFT_BLACK);
+    for (int gr = -50; gr >= -90; gr -= 20) {
+      char lb[6]; snprintf(lb, sizeof(lb), "%d", gr);
+      tft.setCursor(2, rssiToY(gr) - 3);
+      tft.print(lb);
+    }
+  }
+
+  // Clear interior, redraw faint gridlines.
+  tft.fillRect(kPlotX0, kPlotY0, kPlotX1 - kPlotX0, kPlotY1 - kPlotY0, TFT_BLACK);
+  for (int gr = -50; gr >= -90; gr -= 20) {
+    tft.drawFastHLine(kPlotX0, rssiToY(gr), kPlotX1 - kPlotX0, L_Dark);
+  }
+
+  // Trace: oldest on the left, newest at the right edge.
+  int prevX = -1, prevY = -1;
+  for (int k = 0; k < s_rssiHistCount; k++) {
+    const int idx  = (s_rssiHistHead - s_rssiHistCount + k + kRssiHistLen) % kRssiHistLen;
+    const int rssi = s_rssiHist[idx];
+    const int x    = kPlotX1 - s_rssiHistCount + k;
+    const int y    = rssiToY(rssi);
+    if (prevX >= 0) tft.drawLine(prevX, prevY, x, y, GREEN);
+    else            tft.drawPixel(x, y, GREEN);
+    prevX = x; prevY = y;
+  }
+
+  // Current reading readout — on the title row above the plot, so it never covers
+  // the newest trace samples (which ride near the top-right when signal is strong).
+  const int latest = (s_rssiHistCount > 0)
+      ? s_rssiHist[(s_rssiHistHead - 1 + kRssiHistLen) % kRssiHistLen] : 0;
+  char buf[16];
+  tft.setTextSize(1);
+  tft.fillRect(150, kPlotY0 - 15, 84, 12, TFT_BLACK);
+  if (s_rssiHistCount > 0 && latest > kRssiLost) {
+    snprintf(buf, sizeof(buf), "%d dBm", latest);
+    tft.setTextColor(ORANGE, TFT_BLACK);
+  } else {
+    snprintf(buf, sizeof(buf), "-- lost --");
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+  }
+  tft.setCursor(178, kPlotY0 - 14);
+  tft.print(buf);
+}
+
+// Begin live sampling for the network shown on the detail screen.
+static void liveRssiStart(const uint8_t* bssid, int channel, int seedRssi) {
+  if (!bssid) { s_liveActive = false; return; }  // stale/empty scan cache — no target
+  memcpy(s_liveBssid, bssid, 6);
+  s_liveChannel   = (uint8_t)channel;
+  s_rssiHistCount = 0;
+  s_rssiHistHead  = 0;
+  s_consecMiss    = 0;
+  s_lastGoodRssi  = seedRssi;
+  s_fieldsInit    = false;    // reset distance smoothing for the new network
+  liveRssiPush(seedRssi);     // seed with the cached reading so the graph isn't empty
+  s_liveActive = true;
+  s_liveLastMs = 0;           // force an immediate first sample
+  drawRssiGraph(/*fullFrame=*/true);
+}
+
+static void liveRssiStop() { s_liveActive = false; }
+
+// Redraw the "Signal %" and "Est. Distance" detail lines from the current live RSSI
+// (y positions match the layout in displayWiFiDetails). Distance is EMA-smoothed; on
+// real loss both freeze at their last value and dim (drawn in gray).
+static void drawLiveFields(int rssi, bool lost) {
+  const int SIGNAL_Y = detailRowY(kRowSignal);
+  const int DIST_Y   = detailRowY(kRowDist);
+  uint16_t col;
+  if (!lost) {
+    const float sig  = constrain(2 * (rssi + 100), 0, 100);
+    const float dist = pow(10.0, (-69.0 - rssi) / (10.0 * 2.0));
+    if (!s_fieldsInit) { s_distEMA = dist; s_fieldsInit = true; }
+    else               { s_distEMA = 0.3f * dist + 0.7f * s_distEMA; }  // light smoothing
+    s_shownSignal = sig;
+    s_shownDist   = s_distEMA;
+    col = WHITE;
+  } else {
+    col = TFT_GRAY;   // frozen + dimmed
+  }
+  tft.setTextSize(1);
+  tft.setTextColor(col, TFT_BLACK);
+  tft.fillRect(10, SIGNAL_Y - 1, 200, 10, TFT_BLACK);
+  tft.setCursor(10, SIGNAL_Y);
+  tft.print("Signal: "); tft.print(s_shownSignal, 0); tft.print("%");
+  tft.fillRect(10, DIST_Y - 1, 200, 10, TFT_BLACK);
+  tft.setCursor(10, DIST_Y);
+  tft.print("Est. Distance: "); tft.print(s_shownDist, 1); tft.print("m");
+}
+
+// Called every loop tick while the detail view is open.
+static void liveRssiTick() {
+  if (!s_liveActive) return;
+  const uint32_t now = millis();
+  if (s_liveLastMs != 0 && (now - s_liveLastMs) < kLiveSampleMs) return;
+  s_liveLastMs = now;
+  int r = 0;
+  bool lost = false;
+  int displayRssi = s_lastGoodRssi;
+  if (liveRssiSample(&r)) {
+    s_consecMiss   = 0;
+    s_lastGoodRssi = r;
+    displayRssi    = r;
+    liveRssiPush(r);
+  } else {
+    // Transient miss: hold the last good reading; only declare the AP lost after
+    // several consecutive misses so a single dropped beacon doesn't flicker "lost".
+    s_consecMiss++;
+    if (s_consecMiss >= kLostAfterMisses) {
+      lost = true;
+      liveRssiPush(kRssiLost);
+    } else {
+      displayRssi = s_lastGoodRssi;   // held
+      liveRssiPush(s_lastGoodRssi);
+    }
+  }
+  drawRssiGraph(/*fullFrame=*/false);
+  drawLiveFields(displayRssi, lost);
+}
+
+// After a full rescan, put the cursor back on the network we were viewing.
+static void wifiReselectByBssid(const uint8_t* bssid) {
+  const int n = WiFi.scanComplete();
+  if (n <= 0) return;
+  int sel = 0;
+  for (int i = 0; i < n; i++) {
+    const uint8_t* b = WiFi.BSSID(i);
+    if (b && memcmp(b, bssid, 6) == 0) { sel = i; break; }
+  }
+  currentIndex   = sel;
+  current_page   = currentIndex / max(1, wifiNetworksPerPage());
+  listStartIndex = current_page * wifiNetworksPerPage();
+  displayWiFiList(true);
+}
+
 void displayWiFiDetails() {
   uiDrawn = false;
   wifiScanClearBody();
@@ -2403,7 +2631,6 @@ void displayWiFiDetails() {
   int channel = WiFi.channel(currentIndex);
   int encryption = WiFi.encryptionType(currentIndex);
   bool isHidden = (ssid.length() == 0);
-  int y = 50;
 
   float signalQuality = constrain(2 * (rssi + 100), 0, 100);
   float estimatedDistance = pow(10.0, (-69.0 - rssi) / (10.0 * 2.0));
@@ -2424,32 +2651,28 @@ void displayWiFiDetails() {
   tft.setTextColor(WHITE, TFT_BLACK);
   tft.setTextSize(1);
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowSSID));
   tft.print("SSID: "); tft.print(isHidden ? "(Hidden)" : ssid);
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowBSSID));
   tft.print("BSSID: "); tft.print(bssid);
-  y += 20;
 
-  tft.setCursor(10, y);
-  tft.print("RSSI: "); tft.print(rssi); tft.print(" dBm");
-  y += 20;
+  // (Static "RSSI:" line removed — the live graph below shows RSSI in real time.)
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowSignal));
   tft.print("Signal: "); tft.print(signalQuality); tft.print("%");
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowChannel));
   tft.print("Channel: "); tft.print(channel);
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowEnc));
   tft.print("Encryption: "); tft.print(encryptionType);
-  y += 20;
 
-  tft.setCursor(10, y);
+  tft.setCursor(10, detailRowY(kRowDist));
   tft.print("Est. Distance: "); tft.print(estimatedDistance, 1); tft.print("m");
+
+  // Live scrolling RSSI history graph under the details.
+  liveRssiStart(WiFi.BSSID(currentIndex), channel, rssi);
 
   drawTabBar("Rescan", false, "", true, "Back", false);
 }
@@ -2680,6 +2903,7 @@ void wifiscanSetup() {
 void wifiscanLoop() {
 
   if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+    liveRssiStop();   // leaving the feature from the detail view: stop live sampling
     feature_exit_requested = true;
     return;
   }
@@ -2698,7 +2922,14 @@ void wifiscanLoop() {
       lastScanning = true;
     }
   } else if (!isDetailView) {
-    if (lastDetailView || lastScanning) {
+    if (lastDetailView) {
+      // Returning from the detail view: the live single-channel RSSI scans left the
+      // driver holding only that channel's APs. Rebuild the full multi-channel list
+      // and re-select the network we were just viewing.
+      liveRssiStop();
+      startWiFiScan();
+      wifiReselectByBssid(s_liveBssid);
+    } else if (lastScanning) {
       displayWiFiList(true);
     }
     lastDetailView = false;
@@ -2706,6 +2937,8 @@ void wifiscanLoop() {
   } else {
     if (!lastDetailView) {
       displayWiFiDetails();
+    } else {
+      liveRssiTick();
     }
     lastDetailView = true;
     }
