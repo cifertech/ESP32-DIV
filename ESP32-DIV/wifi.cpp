@@ -4840,7 +4840,7 @@ void deautherLoop() {
                  * a passphrase and should not be advertising one. It had a
                  * fixed key in the source, which made every AP this brought
                  * up a visible WPA2 network with a published password. */
-                ap_config.ap.password[0] = ' ';
+                ap_config.ap.password[0] = '\0';
                 ap_config.ap.authmode = WIFI_AUTH_OPEN;
                 ap_config.ap.ssid_hidden = 1;
                 ap_config.ap.max_connection = 4;
@@ -5534,7 +5534,7 @@ void probeRequestFloodLoop() {
                  * a passphrase and should not be advertising one. It had a
                  * fixed key in the source, which made every AP this brought
                  * up a visible WPA2 network with a published password. */
-                ap_config.ap.password[0] = ' ';
+                ap_config.ap.password[0] = '\0';
                 ap_config.ap.authmode = WIFI_AUTH_OPEN;
                 ap_config.ap.ssid_hidden = 1;
                 ap_config.ap.max_connection = 4;
