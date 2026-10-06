@@ -4834,9 +4834,15 @@ void deautherLoop() {
                 wifi_config_t ap_config = {0};
                 strncpy((char*)ap_config.ap.ssid, "ESP32-DIV", sizeof(ap_config.ap.ssid));
                 ap_config.ap.ssid_len = strlen("ESP32-DIV");
-                strncpy((char*)ap_config.ap.password, "deauth123", sizeof(ap_config.ap.password));
-                ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-                ap_config.ap.ssid_hidden = 0;
+                /* Hidden and open, matching startListening() below. This
+                 * interface exists to push raw frames through WIFI_IF_AP and
+                 * nothing is meant to associate with it, so it does not need
+                 * a passphrase and should not be advertising one. It had a
+                 * fixed key in the source, which made every AP this brought
+                 * up a visible WPA2 network with a published password. */
+                ap_config.ap.password[0] = '\0';
+                ap_config.ap.authmode = WIFI_AUTH_OPEN;
+                ap_config.ap.ssid_hidden = 1;
                 ap_config.ap.max_connection = 4;
                 ap_config.ap.beacon_interval = 100;
                 ap_config.ap.channel = selectedChannel;
@@ -5522,9 +5528,15 @@ void probeRequestFloodLoop() {
                 wifi_config_t ap_config = {0};
                 strncpy((char*)ap_config.ap.ssid, "ESP32-DIV", sizeof(ap_config.ap.ssid));
                 ap_config.ap.ssid_len = strlen("ESP32-DIV");
-                strncpy((char*)ap_config.ap.password, "deauth123", sizeof(ap_config.ap.password));
-                ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-                ap_config.ap.ssid_hidden = 0;
+                /* Hidden and open, matching startListening() below. This
+                 * interface exists to push raw frames through WIFI_IF_AP and
+                 * nothing is meant to associate with it, so it does not need
+                 * a passphrase and should not be advertising one. It had a
+                 * fixed key in the source, which made every AP this brought
+                 * up a visible WPA2 network with a published password. */
+                ap_config.ap.password[0] = '\0';
+                ap_config.ap.authmode = WIFI_AUTH_OPEN;
+                ap_config.ap.ssid_hidden = 1;
                 ap_config.ap.max_connection = 4;
                 ap_config.ap.beacon_interval = 100;
                 ap_config.ap.channel = selectedChannel;
