@@ -4430,3 +4430,668 @@ void loop() {
 }
 
 }  // namespace IRCopyController
+
+namespace IRUniversalAC {
+
+static constexpr const char* AC_DIR    = "/ir_ac";
+static constexpr const char* AC_RECENT = "/ir_ac/recent.txt";
+
+static constexpr int16_t kToolbarY = 20;
+static constexpr int16_t kToolbarH = 16;
+static constexpr int16_t kIconSize = 16;
+static constexpr int kToolbarBottom = kToolbarY + kToolbarH;  // 36
+static constexpr int kBodyTop = kToolbarBottom + 1;           // 37
+static constexpr int kPadX = 10;
+static constexpr int kIconBackX = 10;
+static constexpr int kIconReloadX = 210;
+static constexpr int LIST_ROW_H = 20;
+
+static IRLgAc s_lg(IR_TX_PIN);
+static IRsend s_rawSend(IR_TX_PIN);   // for direct commands (swing by position, light)
+static int s_swingIdx = -1;           // -1 = nenhuma posicao enviada ainda
+
+static uint32_t parseHex32(const char* s) {
+  if (!s) return 0;
+  String t(s); t.trim();
+  if (t.startsWith("0x") || t.startsWith("0X")) return (uint32_t)strtoul(t.c_str() + 2, nullptr, 16);
+  return (uint32_t)strtoul(t.c_str(), nullptr, 16);
+}
+static decode_type_t protoFromStr(const String& s, decode_type_t def) {
+  String u = s; u.toUpperCase();
+  if (u == "LG")  return decode_type_t::LG;
+  if (u == "LG2") return decode_type_t::LG2;
+  return def;
+}
+
+// ---------- modelos LG ----------
+static const lg_ac_remote_model_t kLgModels[] = {
+  AKB75215403, AKB74955603, AKB73757604, GE6711AR2853M, LG6711A20083V
+};
+static constexpr int kLgModelCount = sizeof(kLgModels) / sizeof(kLgModels[0]);
+
+static const char* lgModelName(lg_ac_remote_model_t m) {
+  switch (m) {
+    case AKB75215403:   return "AKB75215403";
+    case AKB74955603:   return "AKB74955603";
+    case AKB73757604:   return "AKB73757604";
+    case GE6711AR2853M: return "GE6711AR2853M";
+    case LG6711A20083V: return "LG6711A20083V";
+    default:            return "AKB75215403";
+  }
+}
+
+static lg_ac_remote_model_t lgModelFromString(const String& in) {
+  String s = in; s.toUpperCase();
+  if (s.indexOf("GE6711") >= 0)   return GE6711AR2853M;
+  if (s.indexOf("20083") >= 0)    return LG6711A20083V;
+  if (s.indexOf("74955603") >= 0) return AKB74955603;
+  if (s.indexOf("73757604") >= 0) return AKB73757604;
+  if (s.indexOf("75215403") >= 0) return AKB75215403;
+  return AKB75215403;  // default (inclui o AKB75215424 do usuario)
+}
+
+static const char* lgProtoName(lg_ac_remote_model_t m) {
+  return (m == GE6711AR2853M || m == LG6711A20083V) ? "LG" : "LG2";
+}
+
+// ---------- perfis ----------
+struct AcProfile {
+  String name;
+  String brand;
+  String model;
+  bool fromSd = false;
+  lg_ac_remote_model_t lgModel = AKB75215403;
+  std::vector<uint32_t> swingCodes;               // vane positions, in order
+  decode_type_t swingProto = decode_type_t::LG2;  // protocolo p/ enviar swing
+  uint32_t lightCode = 0x88C00A6;                 // display light toggle
+  decode_type_t lightProto = decode_type_t::LG2;
+};
+
+// Fills in default (library) swing/light codes; the SD card can override them.
+static void setAcDefaults(AcProfile& p) {
+  static const uint32_t def[] = {
+    kLgAcSwingVLowest, kLgAcSwingVLow, kLgAcSwingVMiddle,
+    kLgAcSwingVUpperMiddle, kLgAcSwingVHigh, kLgAcSwingVHighest,
+    kLgAcSwingVSwing, kLgAcSwingVOff
+  };
+  p.swingCodes.assign(def, def + (sizeof(def) / sizeof(def[0])));
+  p.swingProto = decode_type_t::LG2;
+  p.lightCode = kLgAcLightToggle;
+  p.lightProto = decode_type_t::LG2;
+}
+static std::vector<AcProfile> s_profs;
+static int s_profIdx = 0;
+static int s_sdCount = 0;
+static bool s_loadedSd = false;
+static String s_lastErr;
+
+static void loadBuiltinAc() {
+  auto add = [&](const char* n, const char* model) {
+    AcProfile p;
+    p.name = n; p.brand = "LG"; p.model = model; p.fromSd = false;
+    p.lgModel = lgModelFromString(model);
+    setAcDefaults(p);
+    s_profs.push_back(p);
+  };
+  add("LG Dual Inverter",        "AKB75215403");
+  add("LG (AKB75215403)",        "AKB75215403");
+  add("LG (AKB74955603)",        "AKB74955603");
+  add("LG (AKB73757604)",        "AKB73757604");
+  add("LG (GE6711AR2853M)",      "GE6711AR2853M");
+  add("LG (LG6711A20083V)",      "LG6711A20083V");
+}
+
+static bool loadAcFromSd() {
+  s_sdCount = 0;
+  if (!isSDCardAvailable()) return false;
+  if (!SD.exists(AC_DIR)) return false;
+  File d = SD.open(AC_DIR);
+  if (!d) return false;
+  for (;;) {
+    File f = d.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      String name = String(f.name());
+      if (name.endsWith(".json")) {
+        DynamicJsonDocument doc(2048);
+        if (!deserializeJson(doc, f)) {
+          JsonObject o = doc.as<JsonObject>();
+          String brand = String((const char*)(o["brand"] | ""));
+          brand.toUpperCase();
+          if (brand.length() == 0 || brand == "LG") {  // so LG por enquanto
+            AcProfile p;
+            p.name  = String((const char*)(o["name"]  | ""));
+            p.brand = "LG";
+            p.model = String((const char*)(o["model"] | "AKB75215403"));
+            p.fromSd = true;
+            p.lgModel = lgModelFromString(p.model);
+            if (!p.name.length()) p.name = String("LG ") + p.model;
+            setAcDefaults(p);
+            p.swingProto = protoFromStr(String((const char*)(o["swing_proto"] | "")), p.swingProto);
+            p.lightProto = protoFromStr(String((const char*)(o["light_proto"] | "")), p.lightProto);
+            if (o.containsKey("light")) { uint32_t lc = parseHex32(o["light"] | ""); if (lc) p.lightCode = lc; }
+            JsonArray sw = o["swing"].as<JsonArray>();
+            if (!sw.isNull()) {
+              std::vector<uint32_t> codes;
+              for (JsonVariant v : sw) { uint32_t c = parseHex32(v.as<const char*>()); if (c) codes.push_back(c); }
+              if (!codes.empty()) p.swingCodes = codes;
+            }
+            s_profs.push_back(p);
+            s_sdCount++;
+          }
+        }
+      }
+    }
+    f.close();
+    if ((int)s_profs.size() >= 200) break;
+  }
+  d.close();
+  return s_sdCount > 0;
+}
+
+static void refreshAc() {
+  s_profs.clear();
+  loadBuiltinAc();
+  s_loadedSd = loadAcFromSd();
+  s_lastErr = s_loadedSd ? (String(s_sdCount) + " do SD") : String("SD: nenhum");
+  if (s_profIdx < 0 || s_profIdx >= (int)s_profs.size()) s_profIdx = 0;
+}
+
+// ---------- estado do A/C ----------
+struct AcState {
+  bool power = false;
+  uint8_t mode = kLgAcCool;
+  uint8_t temp = 22;
+  uint8_t fan = kLgAcFanAuto;
+  bool swingV = false;
+  bool light = true;
+};
+static AcState s_st;
+
+static const uint8_t kFanCycle[] = { kLgAcFanAuto, kLgAcFanLow, kLgAcFanMedium, kLgAcFanMax };
+static constexpr int kFanCycleCount = sizeof(kFanCycle) / sizeof(kFanCycle[0]);
+
+static const char* fanName(uint8_t f) {
+  switch (f) {
+    case kLgAcFanAuto:   return "Auto";
+    case kLgAcFanLow:    return "Low";
+    case kLgAcFanMedium: return "Med";
+    case kLgAcFanMax:    return "Max";
+    case kLgAcFanLowest: return "Min";
+    case kLgAcFanHigh:   return "High";
+    default:             return "?";
+  }
+}
+static const char* modeName(uint8_t m) {
+  switch (m) {
+    case kLgAcCool: return "Cool";
+    case kLgAcDry:  return "Dry";
+    case kLgAcFan:  return "Fan";
+    case kLgAcAuto: return "Auto";
+    case kLgAcHeat: return "Heat";
+    default:        return "?";
+  }
+}
+
+static void acApplyAndSend() {
+  if (s_profs.empty()) return;
+  const AcProfile& p = s_profs[s_profIdx];
+  s_lg.setModel(p.lgModel);
+  s_lg.setPower(s_st.power);
+  s_lg.setMode(s_st.mode);
+  s_lg.setTemp(s_st.temp);
+  s_lg.setFan(s_st.fan);
+  // Swing and light are sent as a direct command (see acButton), not here.
+  s_lg.send();
+}
+
+// ---------- botoes do controle ----------
+enum AcBtn { B_PWR, B_MODE, B_TEMPUP, B_TEMPDN, B_SWING, B_SPEED, B_LIGHT, B_COUNT };
+static FeatureUI::Button s_btn[B_COUNT];
+
+static void acButton(int b) {
+  switch (b) {
+    case B_PWR:    s_st.power = !s_st.power; break;
+    case B_MODE:   s_st.power = true; s_st.mode = (uint8_t)((s_st.mode + 1) % 5); break;
+    case B_TEMPUP: s_st.power = true; if (s_st.temp < kLgAcMaxTemp) s_st.temp++; break;
+    case B_TEMPDN: s_st.power = true; if (s_st.temp > kLgAcMinTemp) s_st.temp--; break;
+    case B_SWING: {
+      s_st.power = true;
+      const AcProfile& p = s_profs[s_profIdx];
+      if (p.swingCodes.empty()) return;
+      s_swingIdx = (s_swingIdx + 1) % (int)p.swingCodes.size();
+      s_rawSend.send(p.swingProto, p.swingCodes[s_swingIdx], kLgBits);
+      return;  // direct command, doesn't resend the full state
+    }
+    case B_SPEED: {
+      s_st.power = true;
+      int i = 0; for (; i < kFanCycleCount; i++) if (kFanCycle[i] == s_st.fan) break;
+      if (i >= kFanCycleCount) i = -1;
+      s_st.fan = kFanCycle[(i + 1) % kFanCycleCount];
+      break;
+    }
+    case B_LIGHT: {
+      const AcProfile& p = s_profs[s_profIdx];
+      if (p.lightCode) s_rawSend.send(p.lightProto, p.lightCode, kLgBits);
+      return;  // direct toggle of the display light
+    }
+  }
+  acApplyAndSend();
+}
+
+// ---------- telas: estado de lista ----------
+enum class AScreen : uint8_t { List, Details, Control };
+static AScreen s_scr = AScreen::List;
+
+static std::vector<int> s_order;
+static std::vector<String> s_recentNames;
+static std::vector<int> s_recent;
+struct Row { int idx; bool header; const char* label; };
+static std::vector<Row> s_rows;
+static int s_sel = 0, s_top = 0, s_selProf = 0;
+static int s_navSel = 0;   // botao do controle selecionado (tela Control)
+static bool s_drawn = false;
+
+static int listTopY()   { return kBodyTop + 6; }
+static int listBottom() { return irContentBottom() - 4; }
+static int listRows()   { int r = (listBottom() - listTopY()) / LIST_ROW_H; return r < 1 ? 1 : r; }
+
+static String acTrunc(const String& s, int maxPx) {
+  if (maxPx <= 0 || !s.length()) return s;
+  if ((int)tft.textWidth(s, 1) <= maxPx) return s;
+  const int ell = tft.textWidth("...", 1);
+  String o = s;
+  while (o.length() && (int)tft.textWidth(o, 1) + ell > maxPx) o.remove(o.length() - 1);
+  return o + "...";
+}
+
+// ---------- recentes ----------
+static void loadRecentNames() {
+  s_recentNames.clear();
+  if (!isSDCardAvailable()) return;
+  File f = SD.open(AC_RECENT, FILE_READ);
+  if (!f) return;
+  while (f.available() && (int)s_recentNames.size() < 3) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length()) s_recentNames.push_back(line);
+  }
+  f.close();
+}
+static void saveRecentNames() {
+  if (!isSDCardAvailable()) return;
+  if (!SD.exists(AC_DIR)) SD.mkdir(AC_DIR);
+  if (SD.exists(AC_RECENT)) SD.remove(AC_RECENT);
+  File f = SD.open(AC_RECENT, FILE_WRITE);
+  if (!f) return;
+  for (auto& n : s_recentNames) f.println(n);
+  f.close();
+}
+static void pushRecent(const String& name) {
+  if (!name.length()) return;
+  for (int i = 0; i < (int)s_recentNames.size(); i++)
+    if (s_recentNames[i] == name) { s_recentNames.erase(s_recentNames.begin() + i); break; }
+  s_recentNames.insert(s_recentNames.begin(), name);
+  while ((int)s_recentNames.size() > 3) s_recentNames.pop_back();
+  saveRecentNames();
+}
+
+static void rebuildOrder() {
+  s_order.clear();
+  for (int i = 0; i < (int)s_profs.size(); i++) s_order.push_back(i);
+  std::sort(s_order.begin(), s_order.end(), [](int a, int b) {
+    const AcProfile& pa = s_profs[a];
+    const AcProfile& pb = s_profs[b];
+    auto up = [](String s) { s.toUpperCase(); return s; };
+    String x, y;
+    x = up(pa.brand); y = up(pb.brand); if (x != y) return x < y;
+    x = up(pa.model); y = up(pb.model); if (x != y) return x < y;
+    x = up(pa.name);  y = up(pb.name);  return x < y;
+  });
+}
+static void rebuildRecent() {
+  s_recent.clear();
+  for (auto& n : s_recentNames) {
+    for (int i = 0; i < (int)s_profs.size(); i++)
+      if (s_profs[i].name == n) { s_recent.push_back(i); break; }
+    if ((int)s_recent.size() >= 3) break;
+  }
+}
+static int firstSelectable() {
+  for (int i = 0; i < (int)s_rows.size(); i++) if (!s_rows[i].header) return i;
+  return 0;
+}
+static void rebuildRows() {
+  s_rows.clear();
+  if (!s_recent.empty()) {
+    s_rows.push_back({ -1, true, "Recentes" });
+    for (int idx : s_recent) s_rows.push_back({ idx, false, nullptr });
+    s_rows.push_back({ -1, true, "Todos" });
+  }
+  for (int idx : s_order) s_rows.push_back({ idx, false, nullptr });
+  if (s_sel < 0 || s_sel >= (int)s_rows.size() || s_rows[s_sel].header) s_sel = firstSelectable();
+}
+static void moveSel(int dir) {
+  int n = (int)s_rows.size();
+  if (n == 0) return;
+  int i = s_sel + dir;
+  while (i >= 0 && i < n && s_rows[i].header) i += dir;
+  if (i < 0 || i >= n) return;
+  s_sel = i;
+}
+static void ensureVisible() {
+  int rows = listRows();
+  if (s_sel < s_top) s_top = s_sel;
+  if (s_sel >= s_top + rows) s_top = s_sel - rows + 1;
+  if (s_top < 0) s_top = 0;
+}
+
+// ---------- desenho ----------
+static void drawToolbar() {
+  tft.fillRect(0, kToolbarY, 240, kToolbarH, UI_FG);
+  tft.drawBitmap(kIconBackX, kToolbarY, bitmap_icon_go_back, kIconSize, kIconSize, UI_ICON);
+  if (s_scr != AScreen::Details)
+    tft.drawBitmap(kIconReloadX, kToolbarY, bitmap_icon_undo, kIconSize, kIconSize, UI_ICON);
+  tft.drawFastHLine(0, kToolbarBottom, 240, UI_LINE);
+}
+
+static void drawList() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  tft.setTextFont(1); tft.setTextSize(1);
+  if (s_rows.empty()) {
+    tft.setTextColor(UI_WARN, FEATURE_BG);
+    tft.setCursor(kPadX, listTopY() + 4);
+    tft.print("Sem controles A/C");
+    return;
+  }
+  ensureVisible();
+  const int rows = listRows();
+  const int baseY = listTopY();
+  const int innerW = 240 - 2 * kPadX;
+  for (int r = 0; r < rows; r++) {
+    const int ri = s_top + r;
+    if (ri >= (int)s_rows.size()) break;
+    const Row& row = s_rows[ri];
+    const int ry = baseY + r * LIST_ROW_H;
+    if (row.header) {
+      tft.setTextColor(UI_ICON, FEATURE_BG);
+      tft.setCursor(kPadX, ry + 6);
+      tft.print(row.label);
+      tft.drawFastHLine(kPadX, ry + LIST_ROW_H - 2, innerW, UI_LINE);
+      continue;
+    }
+    const AcProfile& p = s_profs[row.idx];
+    const bool sel = (ri == s_sel);
+    const uint16_t bg = sel ? UI_FG : FEATURE_BG;
+    const uint16_t fg = sel ? UI_ICON : UI_TEXT;
+    tft.fillRect(kPadX, ry, innerW, LIST_ROW_H - 1, bg);
+    const char* tag = p.fromSd ? "SD" : "BI";
+    const int tagW = tft.textWidth(tag, 1);
+    tft.setTextColor(p.fromSd ? UI_OK : UI_DIM_TEXT, bg);
+    tft.setCursor(kPadX + innerW - tagW - 2, ry + 6);
+    tft.print(tag);
+    tft.setTextColor(fg, bg);
+    tft.setCursor(kPadX + 4, ry + 6);
+    tft.print(acTrunc(p.name, innerW - tagW - 14));
+  }
+}
+
+static void drawDetails() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  if (s_selProf < 0 || s_selProf >= (int)s_profs.size()) return;
+  const AcProfile& p = s_profs[s_selProf];
+  tft.setTextFont(1); tft.setTextSize(1);
+  int y = kBodyTop + 8;
+  const int step = 18;
+  const int valX = kPadX + 80;
+  auto line = [&](const char* label, const String& val, uint16_t vc) {
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.setCursor(kPadX, y); tft.print(label);
+    tft.setTextColor(vc, FEATURE_BG);
+    tft.setCursor(valX, y);
+    tft.print(acTrunc(val.length() ? val : String("-"), 240 - valX - kPadX));
+    y += step;
+  };
+  line("Nome:",     p.name, UI_TEXT);
+  line("Marca:",    p.brand, UI_TEXT);
+  line("Modelo:",   String(lgModelName(p.lgModel)), UI_OK);
+  line("Protocolo:",String(lgProtoName(p.lgModel)), UI_TEXT);
+  line("Temp:",     String(kLgAcMinTemp) + "-" + String(kLgAcMaxTemp) + "C", UI_TEXT);
+  line("Modos:",    "Cool/Dry/Fan/Auto/Heat", UI_TEXT);
+  line("Fonte:",    p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
+}
+
+// Desenha um botao do controle AC; selecionado = Primary (vermelho, como o PWR).
+static void acDrawBtn(int i, bool sel) {
+  const FeatureUI::Button& b = s_btn[i];
+  FeatureUI::drawButtonRect(b.x, b.y, b.w, b.h, b.label,
+                            sel ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary,
+                            false, b.disabled, 2);
+}
+
+static void acLayout() {
+  const int top = kBodyTop + 24;
+  const int bottom = irContentBottom() - 6;
+  const int unit = (bottom - top) / 5;
+  const int bh = unit - 6;
+  const int sideW = 80, centerW = 96;
+  const int xL = 8, xR = 240 - 8 - sideW, xC = (240 - centerW) / 2;
+  int y = top;
+  s_btn[B_PWR]    = { (int16_t)xL,(int16_t)y,(int16_t)sideW,(int16_t)bh,"PWR", FeatureUI::ButtonStyle::Primary,  false };
+  s_btn[B_MODE]   = { (int16_t)xR,(int16_t)y,(int16_t)sideW,(int16_t)bh,"MODE",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_TEMPUP] = { (int16_t)xC,(int16_t)y,(int16_t)centerW,(int16_t)bh,"TEMP +",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_TEMPDN] = { (int16_t)xC,(int16_t)y,(int16_t)centerW,(int16_t)bh,"TEMP -",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_SWING]  = { (int16_t)xL,(int16_t)y,(int16_t)sideW,(int16_t)bh,"SWING",FeatureUI::ButtonStyle::Secondary,false };
+  s_btn[B_SPEED]  = { (int16_t)xR,(int16_t)y,(int16_t)sideW,(int16_t)bh,"SPEED",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_LIGHT]  = { (int16_t)xC,(int16_t)y,(int16_t)centerW,(int16_t)bh,"LIGHT",FeatureUI::ButtonStyle::Secondary,false };
+}
+
+static void drawControl() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  if (s_profIdx < 0 || s_profIdx >= (int)s_profs.size()) return;
+  const AcProfile& p = s_profs[s_profIdx];
+  tft.setTextFont(1); tft.setTextSize(1);
+  tft.setTextColor(UI_ICON, FEATURE_BG);
+  tft.setCursor(kPadX, kBodyTop + 3);
+  tft.print(acTrunc(p.name, 240 - 2 * kPadX));
+  String stline = s_st.power
+      ? (String(modeName(s_st.mode)) + "  " + String(s_st.temp) + "C  Fan:" + fanName(s_st.fan)
+         + (s_swingIdx >= 0 ? (String("  Aba#") + String(s_swingIdx + 1)) : String("")))
+      : String("Desligado");
+  tft.setTextColor(s_st.power ? UI_OK : UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kPadX, kBodyTop + 13);
+  tft.print(acTrunc(stline, 240 - 2 * kPadX));
+  acLayout();
+  for (int i = 0; i < B_COUNT; i++) acDrawBtn(i, i == s_navSel);
+}
+
+static void drawFooter() {
+  if (s_scr == AScreen::List)
+    setTouchNavLabels("Voltar", "Baixo", "Load", "Cima", "Detalhes");
+  else if (s_scr == AScreen::Details)
+    setTouchNavLabels("Voltar", "", "", "", "");
+  else
+    setTouchNavLabels("Voltar", "", "OK", "", "");
+  irRedrawNavChrome();
+}
+
+static void drawAll() {
+  irClearBody(FEATURE_BG);
+  drawStatusBar(readBatteryVoltage(), true);
+  drawToolbar();
+  if (s_scr == AScreen::List)         drawList();
+  else if (s_scr == AScreen::Details) drawDetails();
+  else                                drawControl();
+  drawFooter();
+  s_drawn = true;
+}
+
+// ---------- acoes ----------
+static void doReload() {
+  refreshAc();
+  rebuildOrder();
+  rebuildRecent();
+  rebuildRows();
+  s_top = 0;
+  s_drawn = false;
+}
+static void goList()  { s_scr = AScreen::List; s_drawn = false; }
+static void openDetails() {
+  if (s_rows.empty()) return;
+  const Row& row = s_rows[s_sel];
+  if (row.header || row.idx < 0) return;
+  s_selProf = row.idx;
+  s_scr = AScreen::Details;
+  s_drawn = false;
+}
+static void loadSelected() {
+  if (s_rows.empty()) return;
+  const Row& row = s_rows[s_sel];
+  if (row.header || row.idx < 0) return;
+  s_profIdx = row.idx;
+  pushRecent(s_profs[s_profIdx].name);
+  rebuildRecent(); rebuildRows();
+  // reinicia estado ao abrir um controle
+  s_st = AcState();
+  s_swingIdx = -1;
+  s_lg.stateReset();
+  s_lg.setModel(s_profs[s_profIdx].lgModel);
+  s_navSel = 0;   // PWR
+  s_scr = AScreen::Control;
+  s_drawn = false;
+}
+
+static void ctrlGo(int ni) {
+  if (ni < 0 || ni == s_navSel) return;
+  const int o = s_navSel;
+  s_navSel = ni;
+  acDrawBtn(o, false);
+  acDrawBtn(s_navSel, true);
+}
+
+static void ctrlNav(int dir) {
+  ctrlGo(irNavSelect(s_btn, (int)B_COUNT, s_navSel, dir));
+}
+
+static void goList();
+static void ctrlLeft() {
+  const int ni = irNavSelect(s_btn, (int)B_COUNT, s_navSel, 2);
+  if (ni != s_navSel) { ctrlGo(ni); return; }
+  if (irIsLeftEdge(s_btn, (int)B_COUNT, s_navSel)) goList();  // so volta na coluna mais a esq
+}
+
+static void ctrlActivate() {
+  if (s_navSel < 0 || s_navSel >= (int)B_COUNT) return;
+  acDrawBtn(s_navSel, true);
+  acButton(s_navSel);
+  delay(90);
+  drawControl();   // atualiza linha de estado + mantem selecao
+}
+
+static bool handleToolbarTouch(int x, int y) {
+  if (y <= kToolbarY || y >= kToolbarBottom) return false;
+  if (x > kIconBackX && x < kIconBackX + kIconSize) {
+    if (s_scr == AScreen::List) feature_exit_requested = true;
+    else goList();
+    return true;
+  }
+  if (s_scr != AScreen::Details && x > kIconReloadX && x < kIconReloadX + kIconSize) {
+    doReload();
+    return true;
+  }
+  return false;
+}
+
+void setup() {
+  setTouchButtonInputEnabled(true);
+  s_lg.begin();
+  s_rawSend.begin();
+  s_scr = AScreen::List;
+  s_profIdx = 0;
+  s_drawn = false;
+  loadRecentNames();
+  refreshAc();
+  rebuildOrder();
+  rebuildRecent();
+  rebuildRows();
+  s_sel = firstSelectable();
+  s_top = 0;
+  drawAll();
+}
+
+void loop() {
+  if (feature_active && feature_exit_requested) {
+    return;
+  }
+  if (!s_drawn) drawAll();
+  maintainTouchNavBar();
+
+  if (s_scr == AScreen::List) {
+    if (isButtonPressedEdge(BTN_UP))     { moveSel(-1); drawList(); }
+    if (isButtonPressedEdge(BTN_DOWN))   { moveSel(+1); drawList(); }
+    if (isButtonPressedEdge(BTN_LEFT))   { feature_exit_requested = true; }   // volta/sai
+    if (isButtonPressedEdge(BTN_RIGHT))  { openDetails(); }
+    if (isButtonPressedEdge(BTN_SELECT)) { loadSelected(); }                  // meio = Load
+  } else if (s_scr == AScreen::Details) {
+    if (isButtonPressedEdge(BTN_LEFT))   { goList(); }
+  } else { // Control: setas movem (espacial); esq no canto = Voltar; meio aciona
+    const bool nUp = isButtonPressedEdge(BTN_UP);
+    const bool nDn = isButtonPressedEdge(BTN_DOWN);
+    const bool nRt = isButtonPressedEdge(BTN_RIGHT);
+    const bool nLf = isButtonPressedEdge(BTN_LEFT);
+    const bool nOk = isButtonPressedEdge(BTN_SELECT);
+    static uint32_t lastNavMs = 0;
+    const uint32_t nowNav = millis();
+    if ((uint32_t)(nowNav - lastNavMs) > 160) {   // anti-bounce (1 acao por toque)
+      if      (nUp) { ctrlNav(0);     lastNavMs = nowNav; }
+      else if (nDn) { ctrlNav(1);     lastNavMs = nowNav; }
+      else if (nRt) { ctrlNav(3);     lastNavMs = nowNav; }
+      else if (nLf) { ctrlLeft();     lastNavMs = nowNav; }
+      else if (nOk) { ctrlActivate(); lastNavMs = nowNav; }
+    }
+  }
+
+  static uint32_t lastTouchMs = 0;
+  static bool touchWas = false;
+  const uint32_t now = millis();
+  const bool touchNow = isTouchDownDismiss();
+  constexpr uint32_t kTouchDebounceMs = 280;
+  if (touchNow && !touchWas) {
+    int x, y;
+    touchWas = true;
+    if (!readTouchXY(x, y)) return;
+    if ((uint32_t)(now - lastTouchMs) < kTouchDebounceMs) return;
+    lastTouchMs = now;
+    if (handleToolbarTouch(x, y)) return;
+
+    if (s_scr == AScreen::List) {
+      const int rows = listRows();
+      const int ty = listTopY();
+      if (y >= ty && y < ty + rows * LIST_ROW_H) {
+        const int ri = s_top + (y - ty) / LIST_ROW_H;
+        if (ri >= 0 && ri < (int)s_rows.size() && !s_rows[ri].header) {
+          if (ri == s_sel) loadSelected();
+          else { s_sel = ri; drawList(); }
+        }
+      }
+    } else if (s_scr == AScreen::Control) {
+      const int k = FeatureUI::hit(s_btn, (int)B_COUNT, x, y);
+      if (k >= 0) {
+        s_navSel = k;
+        acDrawBtn(k, true);
+        acButton(k);
+        delay(90);
+        drawControl();   // atualiza linha de estado + botoes
+      }
+    }
+  }
+  if (!touchNow) touchWas = false;
+
+  delay(10);
+}
+
+}  // namespace IRUniversalAC
