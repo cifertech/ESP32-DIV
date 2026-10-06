@@ -2841,6 +2841,20 @@ void subjammerLoop() {
           }
       }
   }
+
+/* Stop transmitting when the feature is left.
+ *
+ * jammingRunning is only ever cleared by subjammerToggleJam(), so backing
+ * out of the jammer while it is running leaves the flag set, the CC1101 in
+ * TX, and in continuousMode TX_PIN HIGH. Nothing on screen says so.
+ *
+ * Same three lines the stop button already runs. */
+void exit() {
+  jammingRunning = false;
+  ELECHOUSE_cc1101.setSidle();
+  digitalWrite(TX_PIN, LOW);
+}
+
 }
 
 namespace SubBrute {

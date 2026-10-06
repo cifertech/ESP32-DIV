@@ -31,6 +31,7 @@ namespace SavedProfile {
 namespace subjammer {
   void subjammerSetup();
   void subjammerLoop();
+  void exit();
 }
 
 namespace SubBrute {
