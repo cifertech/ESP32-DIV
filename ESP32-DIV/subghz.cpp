@@ -440,6 +440,110 @@ static void subghzSetBruteNavLabels() {
   setTouchNavLabels("Prev", "Sel", "Exit", "Go", "Next");
 }
 
+
+/* ── Is there actually a CC1101 on the bus? ────────────────────────────────
+ *
+ * ELECHOUSE_CC1101::Init() and Reset() both open with
+ *
+ *     while(digitalRead(MISO_PIN));
+ *
+ * and there are eight of those in the driver. They wait for the chip to
+ * pull MISO low when its crystal settles, with no deadline. If no module is
+ * fitted, or MISO is not wired, the pin floats and that loop never returns:
+ * the board stops with the feature's screen already drawn and nothing
+ * responding. The task watchdog does not fire, because the spin keeps
+ * interrupts enabled, so it presents as a freeze rather than a reset.
+ *
+ * This asks the chip who it is, first, with deadlines on every wait.
+ *
+ * Bit-banged rather than done through SPI, because it has to run before any
+ * driver setup has configured the bus. Not SpiReadStatus() either, which
+ * opens with the same unbounded wait and would move the hang into the check
+ * meant to prevent it.
+ */
+static uint8_t cc1101ProbeByte(uint8_t out) {
+  uint8_t in = 0;
+  for (int i = 7; i >= 0; i--) {
+    digitalWrite(CC1101_MOSI, (out >> i) & 0x01);
+    digitalWrite(CC1101_SCK, HIGH);            // CC1101 samples on the rise
+    in = (uint8_t)((in << 1) | (digitalRead(CC1101_MISO) ? 1 : 0));
+    digitalWrite(CC1101_SCK, LOW);
+  }
+  return in;
+}
+
+/* Status registers need the burst bit as well as the read bit: addr | 0xC0. */
+static uint8_t cc1101ProbeStatus(uint8_t addr) {
+  digitalWrite(CC1101_CS, LOW);
+  const uint32_t deadline = millis() + 5;
+  while (digitalRead(CC1101_MISO) == HIGH && millis() < deadline) {
+  }
+  cc1101ProbeByte((uint8_t)(addr | 0xC0));
+  const uint8_t value = cc1101ProbeByte(0x00);
+  digitalWrite(CC1101_CS, HIGH);
+  return value;
+}
+
+static bool cc1101Present() {
+  pinMode(CC1101_SCK, OUTPUT);
+  pinMode(CC1101_MOSI, OUTPUT);
+  pinMode(CC1101_MISO, INPUT);
+  pinMode(CC1101_CS, OUTPUT);
+
+  digitalWrite(CC1101_CS, HIGH);
+  digitalWrite(CC1101_SCK, LOW);
+  delayMicroseconds(50);
+
+  /* PARTNUM is 0x00 on every CC1101. VERSION is 0x04 or 0x14 on genuine
+   * parts and 0x07 or 0x17 on the clones these modules are usually built
+   * from, so it is checked for being plausible rather than against a list
+   * that would reject a working radio.
+   *
+   * Read twice. An absent chip leaves MISO floating, and a floating line can
+   * return something that looks like a version once. Twice, the same, is
+   * what a real part does. */
+  uint8_t part[2], ver[2];
+  for (int pass = 0; pass < 2; pass++) {
+    part[pass] = cc1101ProbeStatus(0x30);
+    delayMicroseconds(50);
+    ver[pass] = cc1101ProbeStatus(0x31);
+    delayMicroseconds(200);
+  }
+
+  return part[0] == 0x00 && part[1] == 0x00 &&
+         ver[0] == ver[1] && ver[0] != 0x00 && ver[0] != 0xFF;
+}
+
+static void cc1101ReportMissing(const char* feature) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString("No CC1101", 12, 40);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(feature, 12, 66);
+  tft.drawString("needs the sub-GHz radio, and nothing", 12, 84);
+  tft.drawString("answered on the SPI bus.", 12, 96);
+  tft.drawString("Check the module is fitted and that", 12, 116);
+  tft.drawString("MISO, CS, SCK and MOSI are wired.", 12, 128);
+  delay(2500);
+}
+
+/* Init() if there is something to initialise. Returns false when the caller
+ * must give up, and asks the dispatch loop to unwind the feature the way a
+ * normal exit does, so the caller's `return` leaves rather than dropping
+ * into a loop with no radio under it. */
+static bool cc1101InitIfPresent(const char* feature) {
+  if (!cc1101Present()) {
+    cc1101ReportMissing(feature);
+    feature_exit_requested = true;
+    return false;
+  }
+  ELECHOUSE_cc1101.Init();
+  return true;
+}
+
+
 namespace replayat { void replayHandleNavButtons(); }
 namespace subjammer { void subjammerHandleNavButtons(); }
 namespace SavedProfile { void profileHandleNavButtons(); }
@@ -1393,7 +1497,7 @@ void ReplayAttackSetup() {
   subghzRedrawNavChrome();
 
   /* Bring radio up after UI/SPI activity so first entry RX matches re-entry. */
-  ELECHOUSE_cc1101.Init();
+  if (!cc1101InitIfPresent("Replay Attack")) return;
   ELECHOUSE_cc1101.setCCMode(0);
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(500.0);
@@ -2237,7 +2341,7 @@ void saveSetup() {
     subghzRedrawNavChrome();
     uiDrawn = false;
 
-    ELECHOUSE_cc1101.Init();
+    if (!cc1101InitIfPresent("Saved Profile")) return;
     ELECHOUSE_cc1101.setCCMode(0);
     ELECHOUSE_cc1101.setModulation(2);
     pinMode(SUBGHZ_RX_PIN, INPUT);
@@ -2745,7 +2849,7 @@ void subjammerSetup() {
 
     ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 
-    ELECHOUSE_cc1101.Init();
+    if (!cc1101InitIfPresent("SubGHz Jammer")) return;
     ELECHOUSE_cc1101.setModulation(0);
     ELECHOUSE_cc1101.setRxBW(500.0);
     ELECHOUSE_cc1101.setPA(12);
@@ -3599,7 +3703,7 @@ void subBruteSetup() {
 
   ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
-  ELECHOUSE_cc1101.Init();
+  if (!cc1101InitIfPresent("De Bruijn / Brute")) return;
   ELECHOUSE_cc1101.setCCMode(0);
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(500.0);
@@ -3763,7 +3867,7 @@ static JdDisp s_disp;
 
 static void cc1101BeginRx() {
   ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
-  ELECHOUSE_cc1101.Init();
+  if (!cc1101InitIfPresent("Jamming Detector")) return;
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(JD_RXBW);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
