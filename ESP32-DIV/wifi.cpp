@@ -938,6 +938,65 @@ static const char* ssidList[] = {
 
 static const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
 
+// ── Custom SSID list from SD (/ssid_list.txt) ──────────────────────────────
+// Optional: one SSID per line (<=32 chars, blank lines ignored). When present
+// with >=1 valid name it replaces the built-in array; otherwise we fall back
+// to ssidList[] above. SD is mounted via the shared isSDCardAvailable() helper
+// so the SPI-bus hand-off (SD shares the bus with the NRF24 radio) is honored.
+#ifndef BEACON_SD_MAX_SSIDS
+#define BEACON_SD_MAX_SSIDS 64
+#endif
+static String s_sdSsids[BEACON_SD_MAX_SSIDS];
+static int    s_sdSsidCount = 0;
+static bool   s_usingSdList = false;
+
+static inline int activeSsidCount() {
+  return s_usingSdList ? s_sdSsidCount : ssidCount;
+}
+static inline const char* activeSsid(int i) {
+  return s_usingSdList ? s_sdSsids[i].c_str() : ssidList[i];
+}
+
+// Returns number of names loaded from SD (0 = keep built-in list).
+static int loadSsidListFromSd() {
+  s_usingSdList = false;
+  s_sdSsidCount = 0;
+
+  if (!isSDCardAvailable()) {
+    Serial.println("[Beacon] SD not available; using built-in SSID list");
+    return 0;
+  }
+  if (!SD.exists("/ssid_list.txt")) {
+    Serial.println("[Beacon] /ssid_list.txt not found; using built-in SSID list");
+    return 0;
+  }
+  File f = SD.open("/ssid_list.txt", FILE_READ);
+  if (!f) {
+    Serial.println("[Beacon] could not open /ssid_list.txt; using built-in list");
+    return 0;
+  }
+
+  int n = 0;
+  while (f.available() && n < BEACON_SD_MAX_SSIDS) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line.length() > 32) line = line.substring(0, 32);
+    s_sdSsids[n++] = line;
+  }
+  f.close();
+
+  if (n >= 1) {
+    s_sdSsidCount = n;
+    s_usingSdList = true;
+    Serial.printf("[Beacon] loaded %d SSID(s) from /ssid_list.txt\n", n);
+  } else {
+    Serial.println("[Beacon] /ssid_list.txt empty; using built-in SSID list");
+  }
+  return n;
+}
+
 uint8_t spamchannel = 1;
 bool    spam        = false;
 int     y_offset    = 20;
@@ -1124,7 +1183,7 @@ void output() {
   printLine(110 + y_offset, UI_TEXT, "[*] Starting broadcast");
   delay(150);
 
-  const int maxLines = min(ssidCount, min(18, spamMaxListLines()));
+  const int maxLines = min(activeSsidCount(), min(18, spamMaxListLines()));
   for (int i = 0; i < maxLines; i++) {
     const int y = 130 + i * 10 + y_offset;
     if (!spamYFits(y, 10)) {
@@ -1133,7 +1192,7 @@ void output() {
     tft.setTextColor(WHITE, TFT_BLACK);
     tft.setCursor(2, y);
     tft.print("[+] ");
-    tft.print(ssidList[i]);
+    tft.print(activeSsid(i));
     delay(40);
   }
 
@@ -1145,9 +1204,10 @@ void spammer() {
     spamchannel = 1;
   }
 
-  const int idx = s_ssidIdx % ssidCount;
-  s_ssidIdx = (uint8_t)((s_ssidIdx + 1) % ssidCount);
-  const char* ssid = ssidList[idx];
+  const int count = activeSsidCount();
+  const int idx = s_ssidIdx % count;
+  s_ssidIdx = (uint8_t)((s_ssidIdx + 1) % count);
+  const char* ssid = activeSsid(idx);
 
   // Stable locally-administered MAC per SSID index so phones keep distinct APs.
   uint8_t mac[6] = {
@@ -1227,7 +1287,7 @@ void beaconSpam() {
         channel = (uint8_t)random(1, kMaxChannel + 1);
         esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 
-        const char* ssid = ssidList[floodIdx % ssidCount];
+        const char* ssid = activeSsid(floodIdx % activeSsidCount());
         floodIdx++;
 
         uint8_t mac[6] = {
@@ -1382,6 +1442,9 @@ void beaconSpamSetup() {
   setTouchButtonInputEnabled(true);
   spam = false;
   s_ssidIdx = 0;
+
+  // Load custom names from /ssid_list.txt on SD (falls back to built-in list).
+  loadSsidListFromSd();
   if (spamchannel < 1 || spamchannel > kMaxChannel) {
     spamchannel = 1;
   }
