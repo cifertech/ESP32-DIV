@@ -4584,32 +4584,33 @@ void handleButtons() {
             delay(200);
         }
 
+        // Grade de 2 colunas x 4 linhas (col = indice/4, linha = indice%4).
+        // LEFT/RIGHT andam na ordem de "leitura": mesma linha troca de coluna,
+        // na volta da coluna direita passa pra proxima linha (e vice-versa).
         if (isButtonPressed(BTN_LEFT) && !is_main_menu) {
             int row = current_menu_index % 4;
-            if (current_menu_index >= 4) {
-                current_menu_index = row;
-            } else if (current_menu_index == 0) {
-                current_menu_index = 3;
+            int col = current_menu_index / 4;
+            if (col == 1) {
+                current_menu_index = row;                    // mesma linha, coluna esquerda
             } else {
-                current_menu_index = row - 1;
+                current_menu_index = ((row - 1 + 4) % 4) + 4; // linha anterior, coluna direita
             }
             last_interaction_time = millis();
             displayMenu();
-            delay(200);
+            waitButtonReleased(BTN_LEFT);
         }
 
         if (isButtonPressed(BTN_RIGHT) && !is_main_menu) {
             int row = current_menu_index % 4;
-            if (current_menu_index < 4) {
-                current_menu_index = row + 4;
-            } else if (current_menu_index == 7) {
-                current_menu_index = 0;
+            int col = current_menu_index / 4;
+            if (col == 0) {
+                current_menu_index = row + 4;       // mesma linha, coluna direita
             } else {
-                current_menu_index = row + 5;
+                current_menu_index = (row + 1) % 4; // proxima linha, coluna esquerda
             }
             last_interaction_time = millis();
             displayMenu();
-            delay(200);
+            waitButtonReleased(BTN_RIGHT);
         }
 
         if (isButtonPressed(BTN_SELECT)) {
