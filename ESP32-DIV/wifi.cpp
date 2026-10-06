@@ -743,6 +743,22 @@ static void ptmDrawWaitCard() {
   tft.setTextColor(UI_TEXT, FEATURE_BG);
 }
 
+/* Called when the feature is left, from both dispatch sites.
+ *
+ * The exit branches in ptmLoop() are not reached on a touch exit: the tap
+ * is latched inside runUI(), after ptmLoop()'s own check has already read
+ * the latch as clear, and ptmLoop()'s second check tests
+ * feature_exit_requested, which the touch path does not set. The dispatch
+ * then breaks on the latch. Without this, leaving Packet Monitor leaves the
+ * radio promiscuous and the pcap open and still being written.
+ *
+ * Safe to call twice; pcapStop() is idempotent. */
+void ptmTeardown() {
+  esp_wifi_set_promiscuous(false);
+  pcapStop();
+  s_ptmHwReady = false;
+}
+
 void ptmSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);

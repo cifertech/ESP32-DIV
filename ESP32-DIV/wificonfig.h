@@ -37,6 +37,7 @@ using namespace std;
 namespace PacketMonitor {
   void ptmSetup();
   void ptmLoop();
+  void ptmTeardown();
 }
 
 namespace BeaconSpammer {
