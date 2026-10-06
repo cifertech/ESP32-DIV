@@ -9,6 +9,7 @@
 #include "icon.h"
 #include "ir.h"
 #include "gps.h"
+#include "hwdetect.h"
 #include "rfid.h"
 #include "shared.h"
 #include "utils.h"
@@ -4424,6 +4425,52 @@ void handleAboutPage() {
   tft.setCursor(xValue, y);
   tftPrintObf(OBF_WB, sizeof(OBF_WB));
 
+  // ---- HARDWARE section (grouped by status, from boot-time detection) ----
+  // Slot modules fall into Installed (detected) or Supported (absent); the
+  // SoC/board items are fixed. Labels right-pad so the ':' column lines up.
+  {
+    String installed, supported;
+    auto add = [](String& s, const char* name) {
+      if (s.length()) s += ", ";
+      s += name;
+    };
+    g_hwPresence.cc1101 ? add(installed, "Sub-GHz")  : add(supported, "Sub-GHz");
+    g_hwPresence.nrf24  ? add(installed, "2.4GHz")   : add(supported, "2.4GHz");
+    g_hwPresence.gps    ? add(installed, "GPS")      : add(supported, "GPS");
+    g_hwPresence.pn532  ? add(installed, "NFC/RFID") : add(supported, "NFC/RFID");
+    if (!installed.length()) installed = "-";
+    if (!supported.length()) supported = "-";
+
+    tft.drawFastHLine(12, 186, 216, UI_LINE);
+
+    tft.setTextColor(UI_ICON, UI_BG);
+    tft.setCursor(16, 194);
+    tft.print("HARDWARE");
+
+    const int hwLabelX = 16;
+    const int hwColonX = 16 + 11 * 6 + 2;   // 11 chars (longest = "Unsupported")
+    const int hwValueX = hwColonX + 8;
+    int hy = 214;
+    const int hstep = 20;
+
+    auto row = [&](const char* label, const String& value) {
+      tft.setTextColor(UI_DIM_TEXT, UI_BG);
+      tft.setCursor(hwLabelX, hy);
+      tft.print(label);
+      tft.setCursor(hwColonX, hy);
+      tft.print(":");
+      tft.setTextColor(UI_TEXT, UI_BG);
+      tft.setCursor(hwValueX, hy);
+      tft.print(value);
+      hy += hstep;
+    };
+
+    row("Built-in",    "WiFi 2.4GHz, BLE, IR, SD");
+    row("Installed",   installed);
+    row("Supported",   supported);
+    row("Unsupported", "WiFi 5GHz");
+  }
+
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(16, 300);
   tft.print("SELECT / tap to go back");
@@ -4698,6 +4745,11 @@ void setup() {
 #if FEATURE_BLE_DUCKY
   Ducky::setup();
 #endif
+
+  // Probe optional radios/modules once, before the scanners start and before
+  // the touchscreen setup (several share GPIO5 / the SPI buses). For the About
+  // screen's HARDWARE section.
+  hwDetectAll();
 
 #if BOARD_HAS_ESP32S3
   WifiScan::startBackgroundScanner();
