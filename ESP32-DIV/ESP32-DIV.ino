@@ -1241,6 +1241,18 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
 }
 
 void handleWiFiSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // physical "<" goes back to the main menu
+        waitButtonReleased(BTN_LEFT);  // wait for a real release (avoid re-reading the same press)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        wifi_submenu_page = 0;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
@@ -2062,6 +2074,18 @@ void handleWiFiSubmenuButtons() {
 }
 
 void handleBluetoothSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // physical "<" goes back to the main menu
+        waitButtonReleased(BTN_LEFT);  // wait for a real release (avoid re-reading the same press)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        bluetooth_submenu_page = 0;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
@@ -2707,6 +2731,17 @@ void handleBluetoothSubmenuButtons() {
 }
 
 void handleNRFSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // physical "<" goes back to the main menu
+        waitButtonReleased(BTN_LEFT);  // wait for a real release (avoid re-reading the same press)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         if (current_submenu_index < 0) {
@@ -3182,6 +3217,17 @@ void handleNRFSubmenuButtons() {
 }
 
 void handleSubGHzSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // physical "<" goes back to the main menu
+        waitButtonReleased(BTN_LEFT);  // wait for a real release (avoid re-reading the same press)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         if (current_submenu_index < 0) {
@@ -3710,6 +3756,17 @@ static void launchToolsFeature(int idx) {
 }
 
 void handleToolsSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // physical "<" goes back to the main menu
+        waitButtonReleased(BTN_LEFT);  // wait for a real release (avoid re-reading the same press)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
@@ -3971,6 +4028,24 @@ void handleOtherSubmenuButtons() {
             last_interaction_time = millis();
             displaySubmenu();
             delay(200);
+        }
+
+        // Physical "<" in the IR/RFID/NFC/GPS sub-layers goes back to "More".
+        if (isButtonPressed(BTN_LEFT)) {
+            waitButtonReleased(BTN_LEFT);  // wait for a real release (avoid re-reading the same press)
+            other_layer = OTHER_LAYER_HOME;
+            other_menu_grid_initialized = false;
+            last_other_menu_index = -1;
+            current_submenu_index = 0;
+            feature_active = false;
+            feature_exit_requested = false;
+            updateActiveSubmenu();
+            submenu_initialized = false;
+            last_interaction_time = millis();
+            displaySubmenu();
+            is_main_menu = false;
+            delay(200);
+            return;
         }
     }
 
