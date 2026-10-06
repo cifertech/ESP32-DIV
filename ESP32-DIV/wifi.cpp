@@ -3091,7 +3091,6 @@ static void cpSendDeauthFrame() {
   memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
   memcpy(&cp_deauth_frame[10], cp_target_ap.bssid, 6);
   memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
-  cp_deauth_frame[26] = 7;
   Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
 
   memcpy(cp_deauth_frame, cp_deauth_frame_default, 26);
@@ -3099,7 +3098,6 @@ static void cpSendDeauthFrame() {
   memcpy(&cp_deauth_frame[16], cp_target_ap.bssid, 6);
 
   memset(&cp_deauth_frame[4], 0xFF, 6);
-  cp_deauth_frame[26] = 7;
   Deauther::wsl_bypasser_send_raw_frame(cp_deauth_frame, 26);
 
   cp_deauth_packet_count += 2;
