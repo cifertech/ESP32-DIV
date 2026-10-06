@@ -1667,6 +1667,12 @@ static bool dragging = false;
 
 static uint32_t lastChangeMs = 0;
 
+// --- new physical input model: only edit after pressing the center button ---
+static bool editing = false;        // true = < and > change the current option's value
+static bool saveDialog = false;     // true = "Salvar / Nao salvar" (Save/Don't save) dialog open
+static int  saveSel = 1;            // 0=Salvar (Save), 1=Nao salvar (Don't save, pre-selected)
+static AppSettings snapshot;        // state on entry (to revert on "Don't save")
+
 static Rect rowRect(int i) { return makeRect(PAD_X, rowY(i), SCREEN_W - PAD_X*2, ROW_H); }
 
 static void setTitleFont() { tft.setTextFont(2); }
@@ -1685,7 +1691,9 @@ static void drawCardStatic(int i, bool selected) {
   tft.fillRect(0, r.y, SCREEN_W, r.h, UI_BG);
 
   if (selected) {
-    tft.fillRect(0, r.y, 3, r.h, UI.accent);
+    const uint16_t barColor = editing ? UI.ok : UI.accent;  // green = editing
+    const int barW = editing ? 6 : 3;
+    tft.fillRect(0, r.y, barW, r.h, barColor);
   }
 
   setLabelFont();
@@ -2226,12 +2234,60 @@ static void handleTouch() {
   }
 }
 
+// Redraws only the selected row (reflects the "editing" bar).
+static void drawSelRow() {
+  auto& s = settings();
+  drawCardStatic(sel, true);
+  switch (sel) {
+    case 0: drawBrightnessWidget(s.brightness, true); break;
+    case 1: drawThemeWidget(s.theme, true); break;
+    case 2: drawAccentWidget(s.accentColor, true); break;
+    case 3: drawSwitchWidgetRow(s.neopixelEnabled, true, 3); break;
+    case 4: { bool a = (s.autoWifiScan || s.autoBleScan); drawSwitchWidgetRow(a, true, 4); break; }
+    case 5: drawSwitchWidgetRow(s.showBatteryPercent, true, 5); break;
+  }
+}
+
+// Waits for the button to be continuously released (anti-bounce) before proceeding.
+static void waitReleaseBtn(int pin) {
+  uint32_t t = millis();
+  while ((uint32_t)(millis() - t) < 60) {
+    if (isButtonPressed(pin)) t = millis();
+    delay(5);
+  }
+}
+
+static void drawSaveDialog() {
+  const int w = 224, h = 96;
+  const int x = (SCREEN_W - w) / 2, y = 64;
+  tft.fillRoundRect(x, y, w, h, 8, UI_FG);
+  tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
+
+  tft.setTextFont(2);
+  tft.setTextColor(UI_TEXT, UI_FG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Salvar alteracoes?", x + w / 2, y + 20, 2);
+  tft.setTextDatum(TL_DATUM);
+
+  const int bw = 100, bh = 28, gap = 8;
+  const int by = y + h - bh - 12;
+  const int b0x = x + (w - 2 * bw - gap) / 2;
+  const int b1x = b0x + bw + gap;
+  FeatureUI::drawButtonRect(b0x, by, bw, bh, "Salvar",
+                            saveSel == 0 ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
+  FeatureUI::drawButtonRect(b1x, by, bw, bh, "Nao salvar",
+                            saveSel == 1 ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
+}
+
 void setup(){
 
   applyThemeToPalette(settings().theme);
   buildPalette();
   ::setBrightness(settings().brightness);
   sel = 0; dirtySettings = false; uiDirty = false; dragging = false;
+  editing = false; saveDialog = false; saveSel = 1;
+  snapshot = settings();
+  waitReleaseBtn(BTN_SELECT);   // consume the press that opened Settings
   drawAll();
 }
 
@@ -2245,8 +2301,8 @@ void loop(){
   static bool selectWasDown = false;
   static uint32_t lastNavMs = 0;
   static uint32_t lastActionMs = 0;
-  const uint32_t NAV_DEBOUNCE_MS    = 140;
-  const uint32_t ACTION_DEBOUNCE_MS = 140;
+  const uint32_t NAV_DEBOUNCE_MS    = 220;   // maior: evita pular opcoes
+  const uint32_t ACTION_DEBOUNCE_MS = 180;
 
   uint32_t now = millis();
 
@@ -2256,49 +2312,76 @@ void loop(){
   bool rightNow  = isButtonPressed(BTN_RIGHT);
   bool selectNow = isButtonPressed(BTN_SELECT);
 
-  if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
-    feature_exit_requested = true;
-    lastActionMs = now;
+  // ================= "Salvar / Nao salvar" (Save/Don't save) dialog =================
+  if (saveDialog) {
+    if (leftNow  && !leftWasDown  && (now - lastNavMs > NAV_DEBOUNCE_MS)) { if (saveSel != 0) { saveSel = 0; drawSaveDialog(); } lastNavMs = now; }
+    if (rightNow && !rightWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) { if (saveSel != 1) { saveSel = 1; drawSaveDialog(); } lastNavMs = now; }
+    if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      lastActionMs = now;
+      if (saveSel == 0) {
+        settingsSave();
+      } else {
+        settings() = snapshot;                       // reverte as mudancas
+        applyThemeToPalette(settings().theme);
+        buildPalette();
+        ::setBrightness(settings().brightness);
+      }
+      waitReleaseBtn(BTN_SELECT);
+      feature_exit_requested = true;
+    }
+    upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
+    delay(2);
     return;
   }
 
-  if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
-    sel=(sel+N-1)%N; changedByButtons=true;
-    lastNavMs = now;
-  }
-  if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
-    sel=(sel+1)%N;   changedByButtons=true;
-    lastNavMs = now;
+  // ================= EDIT mode (after pressing the center button) =================
+  if (editing) {
+    if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      editing = false; drawSelRow(); lastActionMs = now;          // center button exits editing
+    }
+    else if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      auto& s=settings();
+      if (sel==0 && s.brightness>0) applyBrightness(s.brightness>8? s.brightness-8:0);
+      else if (sel==1) applyTheme(Theme::Dark);
+      else if (sel==2) applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT);
+      else if (sel==3) applyNeoPixel(false);
+      else if (sel==4) applyAutoScan(false);
+      else if (sel==5) applyShowBatteryPercent(false);
+      changedByButtons=true; lastActionMs = now;
+    }
+    else if (rightNow && !rightWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      auto& s=settings();
+      if (sel==0 && s.brightness<255) applyBrightness(s.brightness+8);
+      else if (sel==1) applyTheme(Theme::Light);
+      else if (sel==2) applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT);
+      else if (sel==3) applyNeoPixel(true);
+      else if (sel==4) applyAutoScan(true);
+      else if (sel==5) applyShowBatteryPercent(true);
+      changedByButtons=true; lastActionMs = now;
+    }
+    upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
+    handleTouch();
+    if (changedByButtons || uiDirty) redrawIfChanged();
+    delay(2);
+    return;
   }
 
-  if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)){
-    auto& s=settings();
-    if (sel==0 && s.brightness>0)      { applyBrightness(s.brightness>8? s.brightness-8:0); }
-    else if (sel==1)                   { applyTheme(Theme::Dark); }
-    else if (sel==2)                   { applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT); }
-    else if (sel==3)                   { applyNeoPixel(false); }
-    else if (sel==4)                   { applyAutoScan(false); }
-    else if (sel==5)                   { applyShowBatteryPercent(false); }
-    changedByButtons=true;
-    lastActionMs = now;
-  }
-  if ((rightNow && !rightWasDown) && (now - lastActionMs > ACTION_DEBOUNCE_MS)){
-    auto& s=settings();
-    if (sel==0 && s.brightness<255)    { applyBrightness(s.brightness+8); }
-    else if (sel==1)                   { applyTheme(Theme::Light); }
-    else if (sel==2)                   { applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT); }
-    else if (sel==3)                   { applyNeoPixel(true); }
-    else if (sel==4)                   { applyAutoScan(true); }
-    else if (sel==5)                   { applyShowBatteryPercent(true); }
-    changedByButtons=true;
-    lastActionMs = now;
+  // ================= NAVIGATION mode =================
+  if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS))   { sel=(sel+N-1)%N; changedByButtons=true; lastNavMs = now; }
+  if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)){ sel=(sel+1)%N;   changedByButtons=true; lastNavMs = now; }
+
+  if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+    editing = true; drawSelRow(); lastActionMs = now;              // center button enters editing
   }
 
-  upWasDown     = upNow;
-  downWasDown   = downNow;
-  leftWasDown   = leftNow;
-  rightWasDown  = rightNow;
-  selectWasDown = selectNow;
+  if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+    lastActionMs = now;
+    if (dirtySettings) { saveSel = 1; saveDialog = true; drawSaveDialog(); }  // mudou algo -> pergunta
+    else { waitReleaseBtn(BTN_LEFT); feature_exit_requested = true; }         // nada mudou -> volta
+  }
+  // ">" in navigation mode: does nothing (only edits after pressing the center button)
+
+  upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
 
   handleTouch();
 
