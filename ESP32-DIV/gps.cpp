@@ -41,7 +41,7 @@ static bool gScanPanelReady = false;
 static int gScanPanelAllocW = 0;
 static int gScanPanelAllocH = 0;
 
-static constexpr int kScanSpriteHMin = 200;
+static constexpr int kScanSpriteHMin = 90;
 
 static bool ensureScanPanelSprite(int panelW, int panelH) {
   if (panelW <= 0 || panelH <= 32) {
@@ -1200,13 +1200,13 @@ void redrawFeaturePanel(bool statusBarForceFull) {
     return;
   }
 
-  tft.fillRect(0, kGfxTop, tft.width(), tft.height() - kGfxTop,
-               FEATURE_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(1);
-  tft.setTextColor(UI_WARN, FEATURE_BG);
-  tft.drawString("Display buffer failed", tft.width() / 2,
-                 kGfxTop + (tft.height() - kGfxTop) / 2);
+  // No sprite memory available — draw the panel straight to the TFT instead of
+  // showing an error. A viewport remaps the panel-relative coordinates in
+  // renderPanelGx() so they land below the status bar, and clips to the panel.
+  const int panelH = tft.height() - kGfxTop;
+  tft.setViewport(0, kGfxTop, tft.width(), panelH);
+  renderPanelGx(tft);
+  tft.resetViewport();
   tft.setTextFont(2);
   tft.setTextDatum(TL_DATUM);
 }
