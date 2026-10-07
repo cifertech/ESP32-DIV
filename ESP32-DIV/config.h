@@ -182,6 +182,17 @@ namespace Deauther {
   void deautherSetup();
   void deautherLoop();
 }
+namespace Tetris {
+  // Easter egg launched from inside Settings (AppSettingsUI::loop(), see
+  // utils.cpp) via the sequence UP, UP, DOWN, SELECT. tetrisEnter() repaints
+  // from the persisted game state (or starts a new game if none is in
+  // progress / after game over -- it never resets an in-progress game).
+  // tetrisLoop() returns true once the player holds LEFT long enough to
+  // request exit; the caller (AppSettingsUI::loop()) then redraws Settings
+  // itself, since it's the one place this is reachable from.
+  void tetrisEnter();
+  bool tetrisLoop();
+}
 namespace ProbeRequestFlood {
   void probeRequestFloodSetup();
   void probeRequestFloodLoop();

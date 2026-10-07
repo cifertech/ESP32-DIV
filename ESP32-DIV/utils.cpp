@@ -2168,6 +2168,43 @@ void loop(){
   bool rightNow  = isButtonPressed(BTN_RIGHT);
   bool selectNow = isButtonPressed(BTN_SELECT);
 
+  // ================= Easter egg: UP, UP, DOWN, SELECT =================
+  // Launches Tetris. Checked before the plain SELECT-exits-Settings check
+  // below, so the completing tap launches the game instead of just leaving
+  // Settings. A wrong press (or LEFT/RIGHT) resets the sequence; it doesn't
+  // block normal navigation below, which still runs on the very same
+  // presses.
+  static int tetrisSeqStep = 0;
+  static uint32_t tetrisSeqLastMs = 0;
+  constexpr uint32_t TETRIS_SEQ_TIMEOUT_MS = 2000;
+  if (tetrisSeqStep != 0 && now - tetrisSeqLastMs > TETRIS_SEQ_TIMEOUT_MS) {
+    tetrisSeqStep = 0;
+  }
+  if (upNow && !upWasDown) {
+    tetrisSeqStep = (tetrisSeqStep == 0 || tetrisSeqStep == 1) ? tetrisSeqStep + 1 : 1;
+    tetrisSeqLastMs = now;
+  } else if (downNow && !downWasDown) {
+    tetrisSeqStep = (tetrisSeqStep == 2) ? 3 : 0;
+    tetrisSeqLastMs = now;
+  } else if (selectNow && !selectWasDown) {
+    if (tetrisSeqStep == 3) {
+      tetrisSeqStep = 0;
+      upWasDown = upNow; downWasDown = downNow; leftWasDown = leftNow;
+      rightWasDown = rightNow; selectWasDown = selectNow;
+      Tetris::tetrisEnter();
+      bool exitTetris = false;
+      while (!exitTetris) {
+        exitTetris = Tetris::tetrisLoop();
+        delay(1);
+      }
+      drawAll();   // our own screen was frozen underneath, state untouched
+      return;
+    }
+    tetrisSeqStep = 0;
+  } else if ((leftNow && !leftWasDown) || (rightNow && !rightWasDown)) {
+    tetrisSeqStep = 0;
+  }
+
   if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
     feature_exit_requested = true;
     lastActionMs = now;
