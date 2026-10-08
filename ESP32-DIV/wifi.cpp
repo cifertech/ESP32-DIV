@@ -1604,20 +1604,6 @@ void displayPrint(String text, uint16_t color, bool extraSpace = false) {
   }
 }
 
-void checkButtonPress() {
-  if (!isButtonPressed(BTN_UP)) {
-    return;
-  }
-  delay(200);
-  if (!stopScan) {
-    stopScan = true;
-    displayPrint("[!] Scanning Stopped", UI_WARN, true);
-    displayPrint("[!] Press [Select] to Exit", UI_WARN, false);
-  } else {
-    exitMode = true;
-  }
-}
-
 void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (!feature_active || stopScan || exitMode) return;
 
@@ -1902,7 +1888,7 @@ void runUI() {
 void deauthdetectSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
-  setTouchNavLabels(nullptr, nullptr, "Exit", "Pause", nullptr);
+  setTouchNavLabels("Back", nullptr, "Pause", nullptr, nullptr);
   stopScan = false;
   exitMode = false;
   lineIndex = 0;
@@ -1954,12 +1940,18 @@ void deauthdetectSetup() {
 
 void deauthdetectLoop() {
 
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    stopScan = true;
+  // LEFT exits (matches every other feature's "back" convention); SELECT
+  // toggles pause/resume instead of exiting -- reuses the existing stopScan
+  // flag, which snifferCallback() already gates on.
+  if (feature_active && isButtonPressedEdge(BTN_LEFT)) {
     exitMode = true;
   }
+  if (feature_active && isButtonPressedEdge(BTN_SELECT)) {
+    stopScan = !stopScan;
+    setTouchNavLabels("Back", nullptr, stopScan ? "Play" : "Pause", nullptr, nullptr);
+    displayPrint(stopScan ? "[!] Paused" : "[*] Resumed", UI_WARN, true);
+  }
 
-  checkButtonPress();
   runUI();
   deauthFlushPendingAlert();
   updateStatusBar();
@@ -1972,10 +1964,12 @@ void deauthdetectLoop() {
     return;
   }
 
-  if (s_phase == DeauthPhase::Scanning) {
-    deauthStepScan();
-  } else {
-    deauthStepListen();
+  if (!stopScan) {
+    if (s_phase == DeauthPhase::Scanning) {
+      deauthStepScan();
+    } else {
+      deauthStepListen();
+    }
   }
 
   delay(20);
@@ -2181,9 +2175,9 @@ static void wifiScanUpdateNavLabels() {
     return;
   }
   if (isDetailView) {
-    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "Back");
+    setTouchNavLabels("Back", nullptr, nullptr, nullptr, "Scan");
   } else {
-    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "View");
+    setTouchNavLabels("Back", "Next", "View", "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -2484,20 +2478,31 @@ void handleButton() {
   if (isButtonPressed(BTN_RIGHT)) {
     delay(200);
     if (!isScanning) {
-      isDetailView = !isDetailView;
+      startWiFiScan();
       updated = true;
     }
     lastButtonPress = currentMillis;
   }
 
-  if (isButtonPressed(BTN_LEFT)) {
-    delay(200);
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    // Edge, not level: unlike the other branches here, LEFT's meaning
+    // changes depending on state (close detail vs. exit the feature), so a
+    // held press must not re-fire it a second time with the new meaning.
     if (isDetailView) {
       isDetailView = false;
-    } else if (!isScanning) {
-      startWiFiScan();
+      updated = true;
+    } else {
+      feature_exit_requested = true;
     }
-    updated = true;
+    lastButtonPress = currentMillis;
+  }
+
+  if (isButtonPressed(BTN_SELECT)) {
+    delay(200);
+    if (!isDetailView && !isScanning) {
+      isDetailView = true;
+      updated = true;
+    }
     lastButtonPress = currentMillis;
   }
 
@@ -2678,11 +2683,6 @@ void wifiscanSetup() {
 }
 
 void wifiscanLoop() {
-
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    feature_exit_requested = true;
-    return;
-  }
 
   tft.drawFastHLine(0, 19, 240, UI_LINE);
   static bool lastDetailView = false;
@@ -3402,8 +3402,7 @@ static CpCloneAction cpCloneWaitInput(bool prevEnabled, bool nextEnabled, bool p
                                       int& tx, int& ty) {
   tx = ty = -1;
   while (true) {
-    if (feature_exit_requested || featureExitButtonPressed()) {
-      feature_exit_requested = true;
+    if (feature_exit_requested) {
       return CpCloneAction::Exit;
     }
 
@@ -3425,7 +3424,7 @@ static CpCloneAction cpCloneWaitInput(bool prevEnabled, bool nextEnabled, bool p
       if (isButtonPressedEdge(BTN_UP) && prevEnabled) {
         return CpCloneAction::Prev;
       }
-      if (isButtonPressedEdge(BTN_RIGHT) && pickMode) {
+      if (isButtonPressedEdge(BTN_SELECT) && pickMode) {
         return CpCloneAction::Pick;
       }
       if (readTouchXY(tx, ty) && ty >= cpCloneFirstRowY() && ty < cpCloneListAreaBottom()) {
@@ -3471,9 +3470,9 @@ static void cpDrawCloneFooter(bool prevEnabled, bool nextEnabled, bool pickMode 
   if (featureHasTouchNavBar()) {
     setTouchNavLabels("Back",
                       pickMode ? (nextEnabled ? "Next" : nullptr) : "Scan",
-                      "Exit",
+                      pickMode ? "Pick" : nullptr,
                       prevEnabled ? "Prev" : nullptr,
-                      pickMode ? "Pick" : nullptr);
+                      nullptr);
     redrawTouchButtonBar();
     return;
   }
@@ -4032,13 +4031,10 @@ static void cportalUpdateNavLabels() {
                       s_clonePrevEn ? "Prev" : nullptr,
                       s_clonePickMode ? "Pick" : nullptr);
   } else if (currentScreen == CRED_LIST) {
-    const int count = EEPROM.read(COUNT_ADDR);
-    const bool hasPrev = credPage > 0;
-    const bool hasNext = count > (credPage + 1) * kCredRowsPerPage;
-    setTouchNavLabels("Back", "Clear", "Exit", "Export", hasNext ? "Next" : (hasPrev ? "Prev" : nullptr));
+    setTouchNavLabels("Back", nullptr, "Clear", nullptr, "Export");
   } else {
-    setTouchNavLabels("SSID", "Creds", "Exit",
-                      attackActive ? "Stop" : "Start", "Clone");
+    setTouchNavLabels("Back", "Clone",
+                      attackActive ? "Stop" : "Start", "SSID", "Creds");
   }
   redrawTouchButtonBar();
 }
@@ -4059,33 +4055,38 @@ static void cportalHandleMainNavButtons() {
   }
 
   if (isButtonPressedEdge(BTN_LEFT)) {
-    cpEditSsid();
-    cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_LEFT);
+    cportalTeardown();
+    feature_exit_requested = true;
     return;
   }
   if (isButtonPressedEdge(BTN_DOWN)) {
-    currentScreen = CRED_LIST;
-    credPage = 0;
-    drawCredList();
+    cpCloneExistingAPFlow();
     cportalLastBtnMs = now;
     cportalWaitButtonRelease(BTN_DOWN);
     return;
   }
   if (isButtonPressedEdge(BTN_UP)) {
+    cpEditSsid();
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_UP);
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    currentScreen = CRED_LIST;
+    credPage = 0;
+    drawCredList();
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_RIGHT);
+    return;
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (attackActive) {
       stopAttack();
     } else {
       startAttack();
     }
     cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_UP);
-    return;
-  }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    cpCloneExistingAPFlow();
-    cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_RIGHT);
+    cportalWaitButtonRelease(BTN_SELECT);
   }
 }
 
@@ -4097,11 +4098,6 @@ static void cportalHandleCredNavButtons() {
   if (now - cportalLastBtnMs < cportalDebounceMs) {
     return;
   }
-  const int count = EEPROM.read(COUNT_ADDR);
-
-  const bool hasPrev = credPage > 0;
-  const bool hasNext = count > (credPage + 1) * kCredRowsPerPage;
-
   if (isButtonPressedEdge(BTN_LEFT)) {
     currentScreen = MAIN_MENU;
     drawMainMenu();
@@ -4109,15 +4105,7 @@ static void cportalHandleCredNavButtons() {
     cportalWaitButtonRelease(BTN_LEFT);
     return;
   }
-  if (isButtonPressedEdge(BTN_DOWN)) {
-    clearAllCredentials();
-    credPage = 0;
-    drawCredList();
-    cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_DOWN);
-    return;
-  }
-  if (isButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     int dumped = 0;
     if (cpDumpAllCredentialsToSD(&dumped)) {
       cpCredListStatus("Exported " + String(dumped) + " -> SD:/captive_portal/eeprom_dump.csv", UI_OK);
@@ -4125,19 +4113,15 @@ static void cportalHandleCredNavButtons() {
       cpCredListStatus("Export failed: SD not ready", UI_WARN);
     }
     cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_UP);
+    cportalWaitButtonRelease(BTN_RIGHT);
     return;
   }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    if (hasNext) {
-      credPage++;
-      drawCredList();
-    } else if (hasPrev) {
-      credPage--;
-      drawCredList();
-    }
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    clearAllCredentials();
+    credPage = 0;
+    drawCredList();
     cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_RIGHT);
+    cportalWaitButtonRelease(BTN_SELECT);
   }
 }
 
@@ -4173,7 +4157,7 @@ void cportalSetup() {
 
 void cportalLoop() {
 
-  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  if (feature_active && feature_exit_requested) {
     cportalTeardown();
     feature_exit_requested = true;
     return;
@@ -5633,10 +5617,10 @@ static void updateNavLabels(bool onRevealScreen) {
     return;
   }
   if (onRevealScreen) {
-    setTouchNavLabels(s_forcing ? "Stop" : "Force", nullptr, "Exit",
-                      s_listening ? nullptr : "Listen", "Back");
+    setTouchNavLabels("Back", nullptr, s_forcing ? "Stop" : "Force",
+                      nullptr, s_listening ? nullptr : "Listen");
   } else {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "Reveal");
+    setTouchNavLabels("Back", "Next", "Reveal", "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -6344,6 +6328,7 @@ static void handleNavButtons() {
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_SELECT);
     return;
   }
 
@@ -6351,24 +6336,24 @@ static void handleNavButtons() {
 
   if (onReveal) {
     if (isButtonPressedEdge(BTN_LEFT)) {
-      toggleForce();
-      s_lastBtnMs = now;
-      return;
-    }
-    if (isButtonPressedEdge(BTN_UP) && !s_listening) {
-      startListening(false);
-      updateRevealStats();
-      updateNavLabels(true);
-      s_lastBtnMs = now;
-      return;
-    }
-    if (isButtonPressedEdge(BTN_RIGHT)) {
       stopListening();
       s_selectedIndex = -1;
       s_listenAll = false;
       s_revealUiDrawn = false;
       drawScanScreen(true);
       updateNavLabels(false);
+      s_lastBtnMs = now;
+      return;
+    }
+    if (isButtonPressedEdge(BTN_RIGHT) && !s_listening) {
+      startListening(false);
+      updateRevealStats();
+      updateNavLabels(true);
+      s_lastBtnMs = now;
+      return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT)) {
+      toggleForce();
       s_lastBtnMs = now;
       return;
     }
@@ -6380,9 +6365,7 @@ static void handleNavButtons() {
   }
 
   if (isButtonPressedEdge(BTN_LEFT)) {
-    scanHiddenNetworks();
-    drawScanScreen(true);
-    s_lastBtnMs = now;
+    feature_exit_requested = true;
     return;
   }
   if (isButtonPressedEdge(BTN_UP) && s_currentIndex > 0) {
@@ -6397,7 +6380,13 @@ static void handleNavButtons() {
     s_lastBtnMs = now;
     return;
   }
-  if (isButtonPressedEdge(BTN_RIGHT) && s_count > 0) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    scanHiddenNetworks();
+    drawScanScreen(true);
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_SELECT) && s_count > 0) {
     openRevealTarget(s_currentIndex, false);
     s_lastBtnMs = now;
   }
@@ -6625,12 +6614,6 @@ void hiddenSsidLoop() {
     return;
   }
 
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    teardown();
-    feature_exit_requested = true;
-    return;
-  }
-
   tft.drawFastHLine(0, 19, 240, UI_LINE);
 
   handleNavButtons();
@@ -6698,11 +6681,13 @@ static int s_currentIndex = 0;
 static int s_currentPage = 0;
 static bool s_scanning = false;
 static bool s_uiDrawn = false;
+static bool s_detailView = false;
 static unsigned long s_lastBtnMs = 0;
 static int s_lastRenderedIndex = -1;
 static int s_lastRenderedPage = -1;
 
 static void drawScanScreen(bool fullRedraw);
+static void drawApDetail();
 static void updateNavLabels();
 static void runScan();
 
@@ -6714,7 +6699,11 @@ static void updateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels("Rescan", "Next", "Exit", "Prev", nullptr);
+  if (s_detailView) {
+    setTouchNavLabels("Back", nullptr, nullptr, nullptr, "Scan");
+  } else {
+    setTouchNavLabels("Back", "Next", "View", "Prev", "Rescan");
+  }
   redrawTouchButtonBar();
 }
 
@@ -6821,6 +6810,57 @@ static void displayScanning() {
   tft.println("Looking for WPS APs.");
 }
 
+static void drawApDetail() {
+  if (s_count <= 0) {
+    s_detailView = false;
+    drawScanScreen(true);
+    return;
+  }
+  if (s_currentIndex < 0) s_currentIndex = 0;
+  if (s_currentIndex >= s_count) s_currentIndex = s_count - 1;
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  wifiClearBody(TFT_BLACK);
+
+  const WpsAp& ap = s_aps[s_currentIndex];
+  char buf[64];
+  int y = 50;
+
+  tft.setTextColor(WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+
+  tft.setCursor(10, y);
+  tft.print("SSID: ");
+  tft.print(ap.ssid[0] ? ap.ssid : "(hidden)");
+  y += 20;
+
+  tft.setCursor(10, y);
+  snprintf(buf, sizeof(buf), "BSSID: %02X:%02X:%02X:%02X:%02X:%02X",
+           ap.bssid[0], ap.bssid[1], ap.bssid[2], ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+  tft.print(buf);
+  y += 20;
+
+  tft.setCursor(10, y);
+  snprintf(buf, sizeof(buf), "Channel: %d", (int)ap.channel);
+  tft.print(buf);
+  y += 20;
+
+  tft.setCursor(10, y);
+  snprintf(buf, sizeof(buf), "Signal: %d dBm", (int)ap.rssi);
+  tft.print(buf);
+  y += 20;
+
+  tft.setCursor(10, y);
+  tft.print("Security: ");
+  tft.print(authShort(ap.authmode));
+  y += 20;
+
+  tft.setCursor(10, y);
+  tft.print("WPS: Enabled");
+
+  updateNavLabels();
+}
+
 static void drawScanScreen(bool fullRedraw) {
   tft.drawFastHLine(0, 19, 240, UI_LINE);
   tft.setTextSize(1);
@@ -6902,6 +6942,7 @@ static void drawScanScreen(bool fullRedraw) {
 
 static void runScan() {
   s_scanning = true;
+  s_detailView = false;
   s_count = 0;
   s_currentIndex = 0;
   s_currentPage = 0;
@@ -6958,16 +6999,31 @@ static void handleNavButtons() {
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_SELECT);
     return;
   }
 
   if (isButtonPressedEdge(BTN_LEFT)) {
+    if (s_detailView) {
+      s_detailView = false;
+      drawScanScreen(true);
+    } else {
+      feature_exit_requested = true;
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     runScan();
     s_lastBtnMs = now;
     return;
   }
 
-  const int perPage = networksPerPage();
+  if (s_detailView) {
+    // UP/DOWN/SELECT do nothing on the detail ("View") screen.
+    return;
+  }
+
   if (isButtonPressedEdge(BTN_DOWN)) {
     if (s_count > 0) {
       s_currentIndex = (s_currentIndex + 1) % s_count;
@@ -6984,12 +7040,10 @@ static void handleNavButtons() {
     s_lastBtnMs = now;
     return;
   }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    if (s_count > perPage) {
-      const int pages = (s_count + perPage - 1) / perPage;
-      s_currentPage = (s_currentPage + 1) % pages;
-      s_currentIndex = s_currentPage * perPage;
-      drawScanScreen(true);
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    if (s_count > 0) {
+      s_detailView = true;
+      drawApDetail();
     }
     s_lastBtnMs = now;
     return;
@@ -6998,7 +7052,7 @@ static void handleNavButtons() {
 
 static void handleTouch() {
   int x, y;
-  if (!feature_active || !readTouchXY(x, y)) {
+  if (!feature_active || s_detailView || !readTouchXY(x, y)) {
     return;
   }
 
@@ -7008,7 +7062,8 @@ static void handleTouch() {
     const int idx = s_currentPage * perPage + row;
     if (row >= 0 && row < perPage && idx < s_count) {
       s_currentIndex = idx;
-      drawScanScreen(false);
+      s_detailView = true;
+      drawApDetail();
       delay(120);
     }
   }
@@ -7122,11 +7177,6 @@ void wpsScannerLoop() {
     teardown();
     return;
   }
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    teardown();
-    feature_exit_requested = true;
-    return;
-  }
 
   handleNavButtons();
   handleTouch();
@@ -7210,9 +7260,9 @@ static void updateNavLabels() {
     return;
   }
   if (s_phase == Phase::ApList) {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "Join");
+    setTouchNavLabels("Back", "Next", "Join", "Prev", "Rescan");
   } else {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "Back");
+    setTouchNavLabels("Back", "Next", nullptr, "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -7812,6 +7862,7 @@ static void handleNavButtons() {
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_SELECT);
     return;
   }
 
@@ -7823,17 +7874,7 @@ static void handleNavButtons() {
 
   if (isButtonPressedEdge(BTN_LEFT)) {
     if (s_phase == Phase::ApList) {
-      scanAccessPoints();
-    } else {
-      runArpSweep();
-    }
-    s_lastBtnMs = now;
-    return;
-  }
-
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    if (s_phase == Phase::ApList) {
-      joinSelectedAp();
+      feature_exit_requested = true;
     } else {
       disconnectSta();
       s_phase = Phase::ApList;
@@ -7842,6 +7883,24 @@ static void handleNavButtons() {
       s_currentPage = 0;
       s_lastRenderedPage = -1;
       drawScreen(true);
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    if (s_phase == Phase::ApList) {
+      scanAccessPoints();
+    } else {
+      runArpSweep();
+    }
+    s_lastBtnMs = now;
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    if (s_phase == Phase::ApList) {
+      joinSelectedAp();
     }
     s_lastBtnMs = now;
     return;
@@ -8003,11 +8062,6 @@ void arpScannerSetup() {
 void arpScannerLoop() {
   if (feature_exit_requested) {
     teardown();
-    return;
-  }
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    teardown();
-    feature_exit_requested = true;
     return;
   }
 
@@ -8346,7 +8400,7 @@ static void updateNavLabels(bool force) {
   }
   s_navDrawnRunning = s_running;
   s_navDrawn = true;
-  setTouchNavLabels(s_running ? "Stop" : "Start", "Clear", "Exit", "Add", nullptr);
+  setTouchNavLabels("Back", "Clear", s_running ? "Stop" : "Start", nullptr, "Add");
   redrawTouchButtonBar();
 }
 
@@ -9046,15 +9100,12 @@ static void handleNavButtons() {
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_SELECT);
     return;
   }
 
   if (isButtonPressedEdge(BTN_LEFT)) {
-    if (s_running) {
-      stopKarma();
-    } else {
-      startKarma();
-    }
+    feature_exit_requested = true;
     s_lastBtnMs = now;
     return;
   }
@@ -9063,8 +9114,17 @@ static void handleNavButtons() {
     s_lastBtnMs = now;
     return;
   }
-  if (isButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     promptAddSsid();
+    s_lastBtnMs = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    if (s_running) {
+      stopKarma();
+    } else {
+      startKarma();
+    }
     s_lastBtnMs = now;
     return;
   }
@@ -9190,11 +9250,6 @@ void karmaSetup() {
 void karmaLoop() {
   if (feature_exit_requested) {
     teardown();
-    return;
-  }
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-    teardown();
-    feature_exit_requested = true;
     return;
   }
 
