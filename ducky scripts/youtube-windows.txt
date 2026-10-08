@@ -1,0 +1,12 @@
+REM Name: YouTube (Windows)
+REM Description: Opens the clip via the Run box (Win+R), then fullscreen with f.
+REM LAYOUT US
+DEFAULT_DELAY 30
+DELAY 800
+GUI r
+DELAY 900
+STRING https://youtu.be/SjHUb7NSrNk
+DELAY 300
+ENTER
+DELAY 6000
+STRING f
