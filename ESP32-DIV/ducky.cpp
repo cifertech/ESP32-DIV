@@ -2,6 +2,7 @@
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <PCF8574.h>
+#include <Preferences.h>
 #include <SD.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
@@ -47,7 +48,44 @@ extern TFT_eSPI tft;
 namespace Ducky {
 
 static const char* DUCKY_DIR = "/ducky";
-static const char* DEV_NAME  = "ESP32S3 Ducky";
+
+// User-selectable BLE advertised name. Cycled on the info screen (Select),
+// persisted in NVS so it survives a reboot. Index 0 is the original default,
+// so an untouched device behaves exactly as before.
+static const char* const DEV_NAME_PRESETS[] = {
+  "ESP32S3 Ducky",
+  "Magic Keyboard",
+  "Logitech K380",
+  "Apple Wireless KB",
+  "Cool Device",
+  "My Evil Keyboard",
+  "BT Speaker",
+  "=)"
+};
+static const uint8_t DEV_NAME_COUNT = sizeof(DEV_NAME_PRESETS) / sizeof(DEV_NAME_PRESETS[0]);
+static uint8_t devNameIdx = 0;
+static bool devNameLoaded = false;
+
+static inline const char* currentDevName() {
+  return DEV_NAME_PRESETS[devNameIdx % DEV_NAME_COUNT];
+}
+static void loadDevName() {
+  if (devNameLoaded) return;
+  Preferences p;
+  if (p.begin("ducky", true)) {          // read-only
+    devNameIdx = p.getUChar("nameidx", 0);
+    p.end();
+  }
+  if (devNameIdx >= DEV_NAME_COUNT) devNameIdx = 0;
+  devNameLoaded = true;
+}
+static void saveDevName() {
+  Preferences p;
+  if (p.begin("ducky", false)) {
+    p.putUChar("nameidx", devNameIdx);
+    p.end();
+  }
+}
 
 #define COL_BG     TFT_BLACK
 #define COL_FG     TFT_WHITE
@@ -145,7 +183,7 @@ static void duckyUpdateNavLabels() {
   } else if (page == Page::Details) {
     setTouchNavLabels("Back", "Delete", "Run", "List", "Run");
   } else if (page == Page::Settings) {
-    setTouchNavLabels("Back", "Reload", "Open", "Prev", "Next");
+    setTouchNavLabels("Back", "", "Name", "", "");
   }
   redrawTouchButtonBar();
 }
@@ -726,6 +764,7 @@ static FeatureUI::Button listBtns[3];
 static FeatureUI::Button detailsBtns[3];
 static FeatureUI::Button confirmBtns[2];
 static FeatureUI::Button infoBtn;
+static FeatureUI::Button settingsBtns[2];
 
 enum class HeaderType { TextOnly, IconBar, TextWithInfo };
 
@@ -1210,20 +1249,23 @@ static void drawSettingsPage() {
   y += rowGap;
 
   tft.drawString("Device Name:", PADDING, y, 2);
-  tft.drawString(DEV_NAME, 150, y, 2);
+  tft.drawString(currentDevName(), 150, y, 2);
   y += rowGap;
 
   y += 4;
   tft.setTextFont(1);
   tft.drawString("Use icons above for quick actions", PADDING, y, 1);
   y += 14;
-  tft.drawString("Touch and hold for more options", PADDING, y, 1);
+  tft.drawString("Name: cycle the BLE device name", PADDING, y, 1);
 
   if (featureHasTouchNavBar()) {
     duckyUpdateNavLabels();
   } else {
-    FeatureUI::layoutFooter1(infoBtn, "Back", FeatureUI::ButtonStyle::Secondary);
-    FeatureUI::drawButton(infoBtn);
+    FeatureUI::layoutFooter2(settingsBtns,
+                             "Back", FeatureUI::ButtonStyle::Secondary,
+                             "Name", FeatureUI::ButtonStyle::Primary);
+    FeatureUI::drawButton(settingsBtns[0]);
+    FeatureUI::drawButton(settingsBtns[1]);
   }
 }
 
@@ -1251,6 +1293,40 @@ static void drawConfirmDelete() {
 
   FeatureUI::drawButton(confirmBtns[0]);
   FeatureUI::drawButton(confirmBtns[1]);
+}
+
+// (Re)program the advertisement + scan response with the given name. Used both
+// on first keyboard start and when the user cycles the device name at runtime.
+// HID service (0x1812) + keyboard appearance (0x03C1) go in the advertisement so
+// iOS/macOS/Windows pairing UIs list it; the name goes in the scan response to
+// keep the 31-byte advertisement within budget.
+static void setDuckyAdvertising(const char* name) {
+  NimBLEAdvertisementData advData;
+  advData.setFlags(0x06);
+  advData.setAppearance(0x03C1);
+  advData.setCompleteServices(NimBLEUUID((uint16_t)0x1812));
+  NimBLEAdvertisementData scanRsp; scanRsp.setName(name);
+
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  if (!adv) return;
+  adv->stop();
+  adv->setAdvertisementData(advData);
+  adv->setScanResponseData(scanRsp);
+  adv->setAdvertisementType(BLE_GAP_CONN_MODE_UND);
+  adv->setMinInterval(0x00A0);
+  adv->setMaxInterval(0x0140);
+  adv->start();
+}
+
+// Advance to the next preset name, persist it, and re-advertise under it so the
+// change is visible to a scanning host right away. Repaint the info screen to
+// show the new name. A host that is already bonded keeps its connection under
+// the old name until it reconnects.
+static void cycleDuckyName() {
+  devNameIdx = (devNameIdx + 1) % DEV_NAME_COUNT;
+  saveDevName();
+  setDuckyAdvertising(currentDevName());
+  drawSettingsPage();
 }
 
 static void startBleKeyboard(const char* devName) {
@@ -1287,26 +1363,7 @@ static void startBleKeyboard(const char* devName) {
   sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
   sec->setCapability(BLE_HS_IO_NO_INPUT_OUTPUT);
 
-  NimBLEAdvertisementData advData;
-  advData.setFlags(0x06);
-  advData.setAppearance(0x03C1);
-  // Advertise the HID service (0x1812) so iOS/macOS/Windows list the device
-  // as a pairable keyboard. Without it the OS pairing UIs hide the device,
-  // even though it is advertising (raw BLE scanners still see it).
-  advData.setCompleteServices(NimBLEUUID((uint16_t)0x1812));
-
-  // Name lives in the scan response so the (31-byte) advertisement packet
-  // has room for the HID service UUID above.
-  NimBLEAdvertisementData scanRsp; scanRsp.setName(devName);
-
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  if (adv) adv->stop();
-  adv->setAdvertisementData(advData);
-  adv->setScanResponseData(scanRsp);
-  adv->setAdvertisementType(BLE_GAP_CONN_MODE_UND);
-  adv->setMinInterval(0x00A0);
-  adv->setMaxInterval(0x0140);
-  adv->start();
+  setDuckyAdvertising(devName);
 }
 
 void enter() {
@@ -1335,27 +1392,9 @@ void enter() {
   dialog = Dialog::None;
   ui_inited = false;
 
-  if (!hid) startBleKeyboard(DEV_NAME);
-  else {
-    NimBLEAdvertisementData advData;
-    advData.setFlags(0x06);
-    advData.setAppearance(0x03C1);
-    // HID service (0x1812) in the advertisement -> listed as a keyboard by
-    // iOS/macOS/Windows pairing UIs. Name goes in the scan response to fit.
-    advData.setCompleteServices(NimBLEUUID((uint16_t)0x1812));
-    NimBLEAdvertisementData scanRsp; scanRsp.setName(DEV_NAME);
-
-    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-    if (adv) {
-      adv->stop();
-      adv->setAdvertisementData(advData);
-      adv->setScanResponseData(scanRsp);
-      adv->setAdvertisementType(BLE_GAP_CONN_MODE_UND);
-      adv->setMinInterval(0x00A0);
-      adv->setMaxInterval(0x0140);
-      adv->start();
-    }
-  }
+  loadDevName();
+  if (!hid) startBleKeyboard(currentDevName());
+  else setDuckyAdvertising(currentDevName());
 
   if (hid && inputChr && bleConnected) {
     KbdReport idle{}; inputChr->setValue((uint8_t*)&idle, sizeof(idle)); inputChr->notify();
@@ -1508,6 +1547,7 @@ void loop() {
       }
     } else if (page == Page::Settings) {
       if (pcfPressedEdge(ebLeft)) { page = Page::List; drawListPage(false); return; }
+      if (pcfPressedEdge(ebSelect) || pcfPressedEdge(ebRight)) { cycleDuckyName(); return; }
     }
   }
 Tap tap = readTap();
@@ -1610,9 +1650,11 @@ Tap tap = readTap();
     }
   } else if (page == Page::Settings) {
     if (!featureHasTouchNavBar()) {
-      int id = FeatureUI::hit(&infoBtn, 1, tap.x, tap.y);
+      int id = FeatureUI::hit(settingsBtns, 2, tap.x, tap.y);
       if (id == 0) {
         page = Page::List; drawListPage(false);
+      } else if (id == 1) {
+        cycleDuckyName();
       }
     }
   }
