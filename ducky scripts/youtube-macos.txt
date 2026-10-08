@@ -1,0 +1,17 @@
+REM Name: YouTube (macOS)
+REM Description: Opens the clip in Safari via the address bar, then fullscreen with f.
+REM LAYOUT US
+DELAY 1500
+GUI SPACE
+DELAY 700
+STRING Safari
+DELAY 700
+ENTER
+DELAY 2500
+GUI l
+DELAY 600
+STRING https://www.youtube.com/watch?v=SjHUb7NSrNk
+DELAY 300
+ENTER
+DELAY 6000
+STRING f

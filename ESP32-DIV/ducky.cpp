@@ -389,7 +389,7 @@ enum : uint8_t {
   KEY_HOME = 0x4A, KEY_PAGEUP = 0x4B, KEY_DELETE = 0x4C, KEY_END = 0x4D, KEY_PAGEDOWN = 0x4E,
   KEY_RIGHT = 0x4F, KEY_LEFT = 0x50, KEY_DOWN = 0x51, KEY_UP = 0x52
 };
-enum : uint8_t { MOD_CTRL=0x01, MOD_SHIFT=0x02, MOD_ALT=0x04, MOD_GUI=0x08 };
+enum : uint8_t { MOD_CTRL=0x01, MOD_SHIFT=0x02, MOD_ALT=0x04, MOD_GUI=0x08, MOD_ALTGR=0x40 };
 struct __attribute__((packed)) KbdReport { uint8_t modifiers; uint8_t reserved; uint8_t keys[6]; };
 
 class ServerCB : public NimBLEServerCallbacks {
@@ -437,8 +437,139 @@ static uint8_t keyFromChar(char c, bool& needShift) {
   return 0;
 }
 
+// --- Swedish (SE) keyboard layout -------------------------------------------
+// Maps a desired OUTPUT character to the HID usage + modifiers that produce it
+// on a host set to the Swedish layout, so a STRING with a normal ASCII URL
+// (https://host/path?v=...) types correctly WITHOUT switching the host to US.
+// The main cluster (letters, digits, . , : ; - _ + ? / = ( ) ! " # % &)
+// is identical on Windows/Linux and macOS Swedish layouts. The AltGr symbols
+// (@ $ { } [ ] \ |) follow the PC (Windows/Linux) Swedish layout; macOS uses
+// Option for those and differs, but they rarely occur in URLs/commands.
+static const uint8_t KEY_ISO102 = 0x64;  // "Non-US \ and |" key (the <>| key)
+static uint8_t keyFromCharSE(char c, uint8_t& mods) {
+  mods = 0;
+  if (c >= 'a' && c <= 'z') return KEY_A + (c - 'a');
+  if (c >= 'A' && c <= 'Z') { mods = MOD_SHIFT; return KEY_A + (c - 'A'); }
+  if (c >= '1' && c <= '9') return KEY_1 + (c - '1');
+  if (c == '0') return KEY_0;
+  if (c == ' ') return KEY_SPACE;
+  if (c == '\n' || c == '\r') return KEY_ENTER;
+  switch (c) {
+    case '.': return KEY_DOT;
+    case ':': mods = MOD_SHIFT; return KEY_DOT;
+    case ',': return KEY_COMMA;
+    case ';': mods = MOD_SHIFT; return KEY_COMMA;
+    case '-': return KEY_SLASH;                   // '-' sits on the US '/' key
+    case '_': mods = MOD_SHIFT; return KEY_SLASH;
+    case '+': return KEY_MINUS;                   // '+' sits on the US '-' key
+    case '?': mods = MOD_SHIFT; return KEY_MINUS;
+    case '\'': return KEY_BACKSLASH;              // ''' sits on the US '\' key
+    case '*': mods = MOD_SHIFT; return KEY_BACKSLASH;
+    case '/': mods = MOD_SHIFT; return KEY_7;      // Shift+7
+    case '=': mods = MOD_SHIFT; return KEY_0;      // Shift+0
+    case '!': mods = MOD_SHIFT; return KEY_1;
+    case '"': mods = MOD_SHIFT; return KEY_2;
+    case '#': mods = MOD_SHIFT; return KEY_3;
+    case '%': mods = MOD_SHIFT; return KEY_5;
+    case '&': mods = MOD_SHIFT; return KEY_6;
+    case '(': mods = MOD_SHIFT; return KEY_8;
+    case ')': mods = MOD_SHIFT; return KEY_9;
+    case '<': return KEY_ISO102;
+    case '>': mods = MOD_SHIFT; return KEY_ISO102;
+    case '@': mods = MOD_ALTGR; return KEY_2;      // AltGr (PC Swedish)
+    case '$': mods = MOD_ALTGR; return KEY_4;
+    case '{': mods = MOD_ALTGR; return KEY_7;
+    case '[': mods = MOD_ALTGR; return KEY_8;
+    case ']': mods = MOD_ALTGR; return KEY_9;
+    case '}': mods = MOD_ALTGR; return KEY_0;
+    case '\\': mods = MOD_ALTGR; return KEY_MINUS;
+    case '|': mods = MOD_ALTGR; return KEY_ISO102;
+  }
+  return 0;
+}
+
+// --- UK (British ISO) layout -------------------------------------------------
+// Identical to US for letters/digits and most punctuation (so URLs match US);
+// only the few keys below move. '£' is non-ASCII and omitted.
+static uint8_t keyFromCharUK(char c, uint8_t& mods) {
+  mods = 0;
+  switch (c) {
+    case '"':  mods = MOD_SHIFT; return KEY_2;
+    case '@':  mods = MOD_SHIFT; return KEY_APOSTROPHE;  // Shift+' (0x34)
+    case '#':  return 0x32;                              // "Non-US # and ~" key
+    case '~':  mods = MOD_SHIFT; return 0x32;
+    case '\\': return KEY_ISO102;                        // the <> \ | key (0x64)
+    case '|':  mods = MOD_SHIFT; return KEY_ISO102;
+  }
+  bool sh = false; uint8_t u = keyFromChar(c, sh); mods = sh ? MOD_SHIFT : 0; return u;
+}
+
+// --- DE (German QWERTZ) layout ----------------------------------------------
+// Y and Z are swapped vs US; shifted digits and several symbols move. The
+// AltGr symbols (@ { } [ ] \ | ~) follow Windows/Linux German (macOS differs).
+static uint8_t keyFromCharDE(char c, uint8_t& mods) {
+  mods = 0;
+  if (c == 'y') return KEY_A + 25;                       // US 'z' key
+  if (c == 'z') return KEY_A + 24;                       // US 'y' key
+  if (c == 'Y') { mods = MOD_SHIFT; return KEY_A + 25; }
+  if (c == 'Z') { mods = MOD_SHIFT; return KEY_A + 24; }
+  if (c >= 'a' && c <= 'z') return KEY_A + (c - 'a');
+  if (c >= 'A' && c <= 'Z') { mods = MOD_SHIFT; return KEY_A + (c - 'A'); }
+  if (c >= '1' && c <= '9') return KEY_1 + (c - '1');
+  if (c == '0') return KEY_0;
+  if (c == ' ') return KEY_SPACE;
+  if (c == '\n' || c == '\r') return KEY_ENTER;
+  switch (c) {
+    case '.':  return KEY_DOT;
+    case ':':  mods = MOD_SHIFT; return KEY_DOT;
+    case ',':  return KEY_COMMA;
+    case ';':  mods = MOD_SHIFT; return KEY_COMMA;
+    case '-':  return KEY_SLASH;
+    case '_':  mods = MOD_SHIFT; return KEY_SLASH;
+    case '+':  return KEY_RIGHTBRACE;                    // 0x30
+    case '*':  mods = MOD_SHIFT; return KEY_RIGHTBRACE;
+    case '#':  return KEY_BACKSLASH;                     // 0x31
+    case '\'': mods = MOD_SHIFT; return KEY_BACKSLASH;
+    case '<':  return KEY_ISO102;
+    case '>':  mods = MOD_SHIFT; return KEY_ISO102;
+    case '!':  mods = MOD_SHIFT; return KEY_1;
+    case '"':  mods = MOD_SHIFT; return KEY_2;
+    case '$':  mods = MOD_SHIFT; return KEY_4;
+    case '%':  mods = MOD_SHIFT; return KEY_5;
+    case '&':  mods = MOD_SHIFT; return KEY_6;
+    case '/':  mods = MOD_SHIFT; return KEY_7;
+    case '(':  mods = MOD_SHIFT; return KEY_8;
+    case ')':  mods = MOD_SHIFT; return KEY_9;
+    case '=':  mods = MOD_SHIFT; return KEY_0;
+    case '?':  mods = MOD_SHIFT; return KEY_MINUS;       // Shift+ß key (0x2D)
+    case '@':  mods = MOD_ALTGR; return KEY_A + 16;      // AltGr+Q
+    case '{':  mods = MOD_ALTGR; return KEY_7;
+    case '[':  mods = MOD_ALTGR; return KEY_8;
+    case ']':  mods = MOD_ALTGR; return KEY_9;
+    case '}':  mods = MOD_ALTGR; return KEY_0;
+    case '\\': mods = MOD_ALTGR; return KEY_MINUS;       // AltGr+ß key
+    case '~':  mods = MOD_ALTGR; return KEY_RIGHTBRACE;  // AltGr+ + key
+    case '|':  mods = MOD_ALTGR; return KEY_ISO102;
+  }
+  return 0;
+}
+
+// Active typing layout for the running script (reset per run in execFile()).
+// Default is US (backward compatible); a "REM LAYOUT xx" line switches it.
+enum DuckyLayout : uint8_t { DKL_US = 0, DKL_SE, DKL_UK, DKL_DE };
+static DuckyLayout duckyLayout = DKL_US;
+
 static void typeASCII(const String& s, uint16_t charDown = 10) {
-  for (size_t i=0;i<s.length();++i){ bool shift=false; uint8_t u=keyFromChar(s[i],shift); if(u) sendKey(u, shift?MOD_SHIFT:0, charDown); }
+  for (size_t i=0;i<s.length();++i){
+    uint8_t mods = 0, u = 0;
+    switch (duckyLayout) {
+      case DKL_SE: u = keyFromCharSE(s[i], mods); break;
+      case DKL_UK: u = keyFromCharUK(s[i], mods); break;
+      case DKL_DE: u = keyFromCharDE(s[i], mods); break;
+      default: { bool sh = false; u = keyFromChar(s[i], sh); mods = sh ? MOD_SHIFT : 0; } break;
+    }
+    if(u) sendKey(u, mods, charDown);
+  }
 }
 
 static bool resolveKeyWord(const String& kw, uint8_t& usage, uint8_t& mods) {
@@ -484,7 +615,21 @@ static void pressCombo(uint8_t usage, uint8_t mods, uint16_t downMs=50){
 }
 static bool execLine(const String& raw, uint32_t& interDelay, String& err){
   String line=raw; line.trim(); if(!line.length()) return true;
-  if(line.startsWith("REM")) return true;
+  if(line.startsWith("REM")){
+    // Layout directive carried inside a comment so stock firmware ignores it:
+    //   REM LAYOUT SE   -> Swedish    |    REM LAYOUT US   -> US (default)
+    String u=line; u.toUpperCase();
+    if(u.startsWith("REM LAYOUT")){
+      String lay=u.substring(10); lay.trim();
+      // Nordic layouts (SE/FI/NO/DK) share all ASCII symbol positions -> one table.
+      if(lay=="SE"||lay=="SV"||lay=="SWE"||lay=="SWEDISH"||lay=="FI"||lay=="FIN"||
+         lay=="NO"||lay=="NB"||lay=="NOR"||lay=="DK"||lay=="DA"||lay=="DAN"||lay=="NORDIC") duckyLayout=DKL_SE;
+      else if(lay=="UK"||lay=="GB"||lay=="BRITISH") duckyLayout=DKL_UK;
+      else if(lay=="DE"||lay=="GER"||lay=="GERMAN"||lay=="AT") duckyLayout=DKL_DE;
+      else if(lay=="US"||lay=="EN"||lay=="ANSI") duckyLayout=DKL_US;
+    }
+    return true;
+  }
 
   std::vector<String> tok; { String tmp; for(size_t i=0;i<line.length();++i){ char c=line[i]; if(c==' '||c=='\t'){ if(tmp.length()){tok.push_back(tmp); tmp="";}} else tmp+=c;} if(tmp.length()) tok.push_back(tmp); }
   if(tok.empty()) return true;
@@ -531,6 +676,7 @@ static bool execFile(const String& path) {
   File f = SD.open(path, FILE_READ); if(!f){ lastError="Open failed"; return false; }
 
   defaultDelay = 0; uint32_t interDelay = 0;
+  duckyLayout = DKL_US;  // US default each run; a "REM LAYOUT xx" line opts in
 
   const int execTop = TOOLBAR_Y + HEADER_H + HEADER_H + 1;
   tft.fillRect(0, execTop, DISPLAY_WIDTH, DISPLAY_HEIGHT - execTop, COL_BG);
@@ -1144,12 +1290,13 @@ static void startBleKeyboard(const char* devName) {
   NimBLEAdvertisementData advData;
   advData.setFlags(0x06);
   advData.setAppearance(0x03C1);
+  // Advertise the HID service (0x1812) so iOS/macOS/Windows list the device
+  // as a pairable keyboard. Without it the OS pairing UIs hide the device,
+  // even though it is advertising (raw BLE scanners still see it).
+  advData.setCompleteServices(NimBLEUUID((uint16_t)0x1812));
 
-  advData.setName(devName);
-
-  std::string msd; msd.push_back(0x06); msd.push_back(0x00); msd.push_back(0x00); msd.push_back(0x00); msd.push_back((char)0x80);
-  advData.setManufacturerData(msd);
-
+  // Name lives in the scan response so the (31-byte) advertisement packet
+  // has room for the HID service UUID above.
   NimBLEAdvertisementData scanRsp; scanRsp.setName(devName);
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -1193,9 +1340,9 @@ void enter() {
     NimBLEAdvertisementData advData;
     advData.setFlags(0x06);
     advData.setAppearance(0x03C1);
-    advData.setName(DEV_NAME);
-    std::string msd; msd.push_back(0x06); msd.push_back(0x00); msd.push_back(0x00); msd.push_back(0x00); msd.push_back((char)0x80);
-    advData.setManufacturerData(msd);
+    // HID service (0x1812) in the advertisement -> listed as a keyboard by
+    // iOS/macOS/Windows pairing UIs. Name goes in the scan response to fit.
+    advData.setCompleteServices(NimBLEUUID((uint16_t)0x1812));
     NimBLEAdvertisementData scanRsp; scanRsp.setName(DEV_NAME);
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
