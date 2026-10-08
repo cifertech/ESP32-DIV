@@ -61,6 +61,9 @@ bool isTouchNavButtonPressedEdge(int buttonPin);
 bool isButtonPressedEdge(int buttonPin);
 /** Exit/back: level-sensitive so slow feature loops still catch PCF + touch nav. */
 bool featureExitButtonPressed();
+/** Blocks until actually released (physical or touch nav) for ~60ms continuously.
+ *  Avoids re-reading the same touch as a 2nd action (double channel step, cascading exit, etc). */
+void waitButtonReleased(int buttonPin);
 void setTouchButtonInputEnabled(bool enabled);
 void drawTouchButtonCue();
 void invalidateTouchButtonCue();

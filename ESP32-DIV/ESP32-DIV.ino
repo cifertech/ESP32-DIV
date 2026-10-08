@@ -731,13 +731,64 @@ static bool isTouchNavSlotDown(int idx) {
   return FeatureUI::hit(s_touchNavBtns, 5, x, y) == idx;
 }
 
-bool isPhysicalButtonPressed(int buttonPin) {
+// ---------------------------------------------------------------------------
+// CENTRAL debounce for the physical buttons (PCF8574).
+// The "pressed" state only changes after staying stable for BTN_DEBOUNCE_MS.
+// This eliminates the "pressed once, device counted it twice" bug for good.
+// Every feature should go through isButtonPressed / isPhysicalButtonPressed /
+// isButtonPressedEdge (which route through here) and NOT read the PCF raw.
+// ---------------------------------------------------------------------------
+// ASYMMETRIC debounce (robust and responsive):
+//  - PRESS: accepted immediately, on the first reading (responsive; doesn't
+//    depend on the polling rate; buttons never "disappear").
+//  - RELEASE: only accepted once it reads released continuously for
+//    BTN_RELEASE_MS. Since the PCF8574 is read over I2C shared with another
+//    core, a single spurious reading (a momentary "release" mid-press) is
+//    discarded -> this is what ends the "pressed once, counted twice" bug
+//    (a false release+press pair sampled during the hold).
+static constexpr uint32_t BTN_RELEASE_MS = 40;
+static bool     s_physStable[8]    = {false,false,false,false,false,false,false,false};
+static bool     s_physRelPending[8]= {false,false,false,false,false,false,false,false};
+static uint32_t s_physRelStart[8]  = {0,0,0,0,0,0,0,0};
+static bool     s_physEdgeLast[8]  = {false,false,false,false,false,false,false,false};
+
+// Diagnostic counters (read from the Settings screen): how many RAW (raw
+// reading) and STB (debounced state) falling edges happened per button.
+uint16_t g_btnRawDown[8] = {0,0,0,0,0,0,0,0};
+uint16_t g_btnStbDown[8] = {0,0,0,0,0,0,0,0};
+
+static bool physButtonDebounced(int buttonPin) {
 #if HAS_PCF8574_BUTTONS
   if (getPcf8574Address() != 0) {
-    return !pcf.digitalRead(buttonPin);
+    const int idx = buttonPin & 7;
+    const bool rawPressed = !pcf.digitalRead(buttonPin);   // active low
+    const uint32_t now = millis();
+    static bool s_rawPrev[8] = {false,false,false,false,false,false,false,false};
+    if (rawPressed != s_rawPrev[idx]) { s_rawPrev[idx] = rawPressed; if (rawPressed) g_btnRawDown[idx]++; }
+    const bool before = s_physStable[idx];
+    if (rawPressed) {
+      s_physRelPending[idx] = false;       // any press reading cancels a pending release
+      s_physStable[idx] = true;            // press accepted immediately
+    } else if (s_physStable[idx]) {
+      if (!s_physRelPending[idx]) {
+        s_physRelPending[idx] = true;      // release candidate: start the timer
+        s_physRelStart[idx] = now;
+      } else if ((uint32_t)(now - s_physRelStart[idx]) >= BTN_RELEASE_MS) {
+        s_physStable[idx] = false;         // release confirmed (held) -> ignore glitch
+        s_physRelPending[idx] = false;
+      }
+    } else {
+      s_physRelPending[idx] = false;
+    }
+    if (s_physStable[idx] != before && s_physStable[idx]) g_btnStbDown[idx]++;
+    return s_physStable[idx];
   }
 #endif
   return false;
+}
+
+bool isPhysicalButtonPressed(int buttonPin) {
+  return physButtonDebounced(buttonPin);
 }
 
 bool isTouchNavButtonPressed(int buttonPin) {
@@ -774,10 +825,10 @@ bool isTouchNavButtonPressedEdge(int buttonPin) {
 bool isButtonPressedEdge(int buttonPin) {
 #if HAS_PCF8574_BUTTONS
   if (getPcf8574Address() != 0) {
-    const int idx = buttonPin % 8;
-    const bool cur = pcf.digitalRead(buttonPin);
-    const bool edge = !cur && s_pcfButtonLastState[idx];
-    s_pcfButtonLastState[idx] = cur;
+    const int idx = buttonPin & 7;
+    const bool stable = physButtonDebounced(buttonPin);       // already-debounced state
+    const bool edge = stable && !s_physEdgeLast[idx];         // press edge
+    s_physEdgeLast[idx] = stable;
     if (edge) {
       return true;
     }
@@ -785,6 +836,24 @@ bool isButtonPressedEdge(int buttonPin) {
 #endif
 
   return isTouchNavButtonPressedEdge(buttonPin);
+}
+
+// Blocks until a REAL release of the button (physical or touch-nav) before
+// letting the action proceed. A human press can last longer than the
+// ~200ms previously used as "debounce" here in the menu handlers, which
+// made the SAME press still read as "pressed" on the handler's next call
+// and get counted as a 2nd (or 3rd) action -- e.g. the menu cursor moving
+// several positions, or the press that OPENED a submenu being re-read as
+// its first option. The central debounce (physButtonDebounced) already
+// correctly confirms 1 edge per press (measured on hardware); the bug was
+// here, in the menu layer. Same pattern already used just for "<" (back).
+static const uint32_t BTN_ACTION_RELEASE_MS = 60;
+void waitButtonReleased(int buttonPin) {
+    uint32_t t = millis();
+    while ((uint32_t)(millis() - t) < BTN_ACTION_RELEASE_MS) {
+        if (isButtonPressed(buttonPin)) t = millis();
+        delay(5);
+    }
 }
 
 bool featureExitButtonPressed() {
