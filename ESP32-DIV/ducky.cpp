@@ -54,12 +54,16 @@ static const char* DUCKY_DIR = "/ducky";
 // so an untouched device behaves exactly as before.
 static const char* const DEV_NAME_PRESETS[] = {
   "ESP32S3 Ducky",
+  "ESP32-DIV",
   "Magic Keyboard",
   "Logitech K380",
   "Apple Wireless KB",
   "Cool Device",
   "My Evil Keyboard",
   "BT Speaker",
+  "Connect to me",
+  "CiferTechs Headphones",
+  "Press to Pair",
   "=)"
 };
 static const uint8_t DEV_NAME_COUNT = sizeof(DEV_NAME_PRESETS) / sizeof(DEV_NAME_PRESETS[0]);
