@@ -299,6 +299,39 @@ OnScreenKeyboardResult showOnScreenKeyboard(const OnScreenKeyboardConfig& cfg,
       lastBlink = now;
     }
 
+    // Physical-button equivalents of the three on-screen buttons below
+    // (UP/DOWN are unused here -- this is a flat keyboard, not a list).
+    // Mirrors the touch handling for each button exactly.
+    if (isButtonPressedEdge(BTN_LEFT)) {
+      res.cancelled = true;
+      res.accepted  = false;
+      dismissKeyboardTouch();
+      restoreTftAfterOsKeyboard();
+      return res;
+    }
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+      if (cfg.enableShuffle && cfg.shuffleNames && cfg.shuffleCount > 0) {
+        res.text = cfg.shuffleNames[shuffleIndex];
+        shuffleIndex = (shuffleIndex + 1) % cfg.shuffleCount;
+        drawInputField(res.text, cursorOn);
+      } else if (res.text.length() > 0) {
+        res.text.remove(res.text.length() - 1);
+        drawInputField(res.text, cursorOn);
+      }
+      continue;
+    }
+    if (isButtonPressedEdge(BTN_SELECT)) {
+      if (cfg.requireNonEmpty && res.text.length() == 0) {
+        showEmptyError(cfg);
+        continue;
+      }
+      res.accepted  = true;
+      res.cancelled = false;
+      dismissKeyboardTouch();
+      restoreTftAfterOsKeyboard();
+      return res;
+    }
+
     int tx, ty;
     if (!readKeyboardTouch(tx, ty)) {
       delay(10);

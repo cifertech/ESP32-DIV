@@ -1352,20 +1352,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 4;
                 in_sub_menu = true;
                 DeauthDetect::deauthdetectLoop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1386,20 +1375,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 5;
                 in_sub_menu = true;
                 WifiScan::wifiscanLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1419,20 +1397,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 6;
                 in_sub_menu = true;
                 CaptivePortal::cportalLoop();
-                if (isButtonPressed(BTN_SELECT)) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1452,20 +1419,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 7;
                 in_sub_menu = true;
                 HiddenSsidReveal::hiddenSsidLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1485,20 +1441,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 0;
                 in_sub_menu = true;
                 WpsScanner::wpsScannerLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1518,20 +1463,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 1;
                 in_sub_menu = true;
                 ArpScanner::arpScannerLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1551,20 +1485,9 @@ void handleWiFiSubmenuButtons() {
                 current_submenu_index = 2;
                 in_sub_menu = true;
                 KarmaAttack::karmaLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1765,20 +1688,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 4;
                         in_sub_menu = true;
                         DeauthDetect::deauthdetectLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1797,20 +1709,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 5;
                         in_sub_menu = true;
                         WifiScan::wifiscanLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1829,20 +1730,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 6;
                         in_sub_menu = true;
                         CaptivePortal::cportalLoop();
-                        if (isButtonPressed(BTN_SELECT)) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1861,20 +1751,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 7;
                         in_sub_menu = true;
                         HiddenSsidReveal::hiddenSsidLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1893,20 +1772,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 0;
                         in_sub_menu = true;
                         WpsScanner::wpsScannerLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1925,20 +1793,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 1;
                         in_sub_menu = true;
                         ArpScanner::arpScannerLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1957,20 +1814,9 @@ void handleWiFiSubmenuButtons() {
                         current_submenu_index = 2;
                         in_sub_menu = true;
                         KarmaAttack::karmaLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
