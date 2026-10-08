@@ -1301,6 +1301,12 @@ static void drawConfirmDelete() {
 // iOS/macOS/Windows pairing UIs list it; the name goes in the scan response to
 // keep the 31-byte advertisement within budget.
 static void setDuckyAdvertising(const char* name) {
+  // The global BLEDevice::init() set the GAP device name (0x2A00) to
+  // "ESP32-DIV". Hosts show the advertised name while scanning but switch to
+  // the GAP name once connected (macOS prefers it outright), so update it too
+  // or the chosen name only shows up until pairing completes.
+  NimBLEDevice::setDeviceName(name);
+
   NimBLEAdvertisementData advData;
   advData.setFlags(0x06);
   advData.setAppearance(0x03C1);
