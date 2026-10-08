@@ -746,7 +746,8 @@ static void ptmDrawWaitCard() {
 void ptmSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
-  setTouchNavLabels("Ch-", nullptr, "Exit", nullptr, "Ch+");
+  // Layout remapeado: LEFT=Exit, UP=Ch+, DOWN=Ch-, SELECT e RIGHT livres.
+  setTouchNavLabels("Exit", "Ch-", nullptr, "Ch+", nullptr);
   s_ptmHwReady = false;
 
 #if HAS_PCF8574_BUTTONS
@@ -818,7 +819,13 @@ void ptmLoop() {
     }
   }
 
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Remapped layout: physical LEFT exits (instead of the center SELECT). The
+  // touch nav slot showing "Exit" is now the LEFT one (see ptmSetup) --
+  // isButtonPressed(BTN_LEFT) already covers that press alone (physical OR
+  // touch nav on the same slot); no need to also add
+  // isTouchNavButtonPressed(BTN_SELECT), which is now a free slot (no label)
+  // and shouldn't exit the screen when tapped.
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
 
     esp_wifi_set_promiscuous(false);
     if (pcapPacketsWritten || pcapDropped) {
@@ -887,8 +894,11 @@ void ptmLoop() {
   static uint32_t lastButtonTime = 0;
   const uint32_t debounceDelay = 200;
 
-  bool leftButtonState = isButtonPressed(BTN_LEFT);
-  bool rightButtonState = isButtonPressed(BTN_RIGHT);
+  // Remapped layout: physical DOWN = Ch- (used to be LEFT), physical UP = Ch+
+  // (used to be RIGHT). LEFT is now free to exit (see the exit check above)
+  // and RIGHT has no function on this screen.
+  bool leftButtonState = isButtonPressed(BTN_DOWN);
+  bool rightButtonState = isButtonPressed(BTN_UP);
 
   uint32_t currentTime = millis();
 
@@ -976,14 +986,15 @@ static void spamDrawIdleHint() {
   tft.setTextSize(1);
   tft.setTextColor(UI_WARN, TFT_BLACK);
   tft.setCursor(2, 30 + y_offset);
-  tft.print("[!] Press [UP] to start");
+  tft.print("[!] Press [Select] to start");
 }
 
 static void spamUpdateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels("Ch-", "Flood", "Exit", spam ? "Stop" : "Start", "Ch+");
+  // Layout remapeado: LEFT=Exit, UP=Ch+, DOWN=Ch-, SELECT=Start/Stop, RIGHT=Flood.
+  setTouchNavLabels("Exit", "Ch-", spam ? "Stop" : "Start", "Ch+", "Flood");
   redrawTouchButtonBar();
 }
 
@@ -1185,8 +1196,12 @@ void beaconSpam() {
     if (spamYFits(50 + y_offset, 10)) {
       tft.setTextColor(UI_TEXT, TFT_BLACK);
       tft.setCursor(2, 50 + y_offset);
-      tft.print("[!!] Press [Select] to exit");
+      tft.print("[!!] Press [Select] to stop");
     }
+    // While the flood is running, SELECT stops IT (not the normal spam) --
+    // the footer shouldn't keep showing "Start" (a reflection of the normal
+    // spam's state, which is false here).
+    setTouchNavLabels("Exit", "Ch-", "Stop", "Ch+", "Flood");
     maintainTouchNavBar();
 
     delay(300);
@@ -1437,7 +1452,13 @@ void beaconSpamSetup() {
 
 void beaconSpamLoop() {
 
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Remapped layout: physical LEFT exits (instead of the center SELECT). The
+  // touch nav slot showing "Exit" is now the LEFT one (see
+  // spamUpdateNavLabels) -- isButtonPressed(BTN_LEFT) already covers that
+  // press alone (physical OR touch nav on the same slot), so it does NOT
+  // also add isTouchNavButtonPressed(BTN_SELECT) here (that slot now shows
+  // "Start/Stop" and tapping it would exit by mistake).
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }
@@ -1446,20 +1467,29 @@ void beaconSpamLoop() {
   updateStatusBar();
   spamRedrawChrome();
 
-  btnLeftPress = isButtonPressed(BTN_LEFT);
-  btnRightPress = isButtonPressed(BTN_RIGHT);
-  btnSelectPress = isButtonPressed(BTN_UP);
-  btnDownPress = isButtonPressed(BTN_DOWN);
+  // Remapped layout (variable names kept, only the source changed):
+  //   btnLeftPress  (channel -) <- physical DOWN
+  //   btnRightPress (channel +) <- physical UP
+  //   btnSelectPress (start/stop) <- physical SELECT (used to be UP)
+  //   btnDownPress  (flood)  <- physical RIGHT (used to be DOWN)
+  btnLeftPress = isButtonPressed(BTN_DOWN);
+  btnRightPress = isButtonPressed(BTN_UP);
+  btnSelectPress = isButtonPressed(BTN_SELECT);
+  btnDownPress = isButtonPressed(BTN_RIGHT);
 
   delay(10);
 
+  // waitButtonReleased() (not just delay(200)) consumes the button's real
+  // release before letting the loop read the same press again -- otherwise a
+  // slightly longer press (>200ms, common in a normal human press) would be
+  // read as 2 actions (e.g. "skip 2 channels" on a single press).
   if (btnLeftPress) {
     handleLeftButton();
-    delay(200);
+    waitButtonReleased(BTN_DOWN);
   }
   if (btnRightPress) {
     handleRightButton();
-    delay(200);
+    waitButtonReleased(BTN_UP);
   }
   if (btnDownPress) {
     // Random flood mode (same as toolbar nuke).
@@ -1472,6 +1502,7 @@ void beaconSpamLoop() {
     while (isButtonPressed(BTN_SELECT)) {
       delay(10);
     }
+    waitButtonReleased(BTN_RIGHT);
     delay(150);
     spamClearBody();
     spamDrawIdleHint();
@@ -1481,7 +1512,7 @@ void beaconSpamLoop() {
   if (btnSelectPress) {
     const bool wasRunning = spam;
     handleSelectButton();
-    delay(200);
+    waitButtonReleased(BTN_SELECT);
     if (!wasRunning && spam) {
       spamClearBody();
       output();
@@ -1503,8 +1534,11 @@ void beaconSpamLoop() {
   }
 
   // Keep transmitting while enabled — do not require holding UP.
+  // (Remapped layout: same exit criterion as the top of the function -- only
+  // physical LEFT, which already covers the "Exit" slot press via
+  // isButtonPressed. NOT physical SELECT anymore, which is now start/stop.)
   if (spam) {
-    if (feature_exit_requested || featureExitButtonPressed()) {
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
       spam = false;
       return;
     }
@@ -4252,10 +4286,13 @@ static void deautherUpdateNavLabels(bool onAttackScreen) {
   if (!featureHasTouchNavBar()) {
     return;
   }
+  // Remapped layout:
+  //  scan list: LEFT=Exit, DOWN=Next, SELECT=View, UP=Prev, RIGHT=Rescan.
+  //  attack screen (View): LEFT=Back (to the list), SELECT=Start/Stop, rest unused.
   if (onAttackScreen) {
-    setTouchNavLabels(attack_running ? "Stop" : "Start", nullptr, "Exit", nullptr, "Back");
+    setTouchNavLabels("Back", nullptr, attack_running ? "Stop" : "Start", nullptr, nullptr);
   } else {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "View");
+    setTouchNavLabels("Exit", "Next", "View", "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -4527,24 +4564,28 @@ static void deautherHandleNavButtons() {
         (void)isButtonPressedEdge(BTN_RIGHT);
         (void)isButtonPressedEdge(BTN_UP);
         (void)isButtonPressedEdge(BTN_DOWN);
+        (void)isButtonPressedEdge(BTN_SELECT);
         return;
     }
 
+    // Remapped layout: attack screen (View) -- LEFT goes back to the scan
+    // list (used to be RIGHT); SELECT starts/stops the attack (used to be
+    // LEFT). UP/DOWN/RIGHT are unused here.
     if (selected_ap_index >= 0) {
         if (isButtonPressedEdge(BTN_LEFT)) {
+            attack_running = false;
+            last_packet_time = 0;
+            selected_ap_index = -1;
+            drawScanScreen();
+            deautherLastButtonPress = now;
+            return;
+        }
+        if (isButtonPressedEdge(BTN_SELECT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
-            deautherLastButtonPress = now;
-            return;
-        }
-        if (isButtonPressedEdge(BTN_RIGHT)) {
-            attack_running = false;
-            last_packet_time = 0;
-            selected_ap_index = -1;
-            drawScanScreen();
             deautherLastButtonPress = now;
             return;
         }
@@ -4555,10 +4596,12 @@ static void deautherHandleNavButtons() {
         return;
     }
 
+    // Remapped layout: scan list -- LEFT exits the Deauther (used to be
+    // SELECT, now global); RIGHT rescans (used to be LEFT); SELECT opens
+    // the selected target / View (used to be RIGHT). UP/DOWN stay Prev/Next,
+    // unchanged.
     if (isButtonPressedEdge(BTN_LEFT)) {
-        if (scanNetworks()) {
-            drawScanScreen();
-        }
+        feature_exit_requested = true;
         deautherLastButtonPress = now;
         return;
     }
@@ -4574,7 +4617,14 @@ static void deautherHandleNavButtons() {
         deautherLastButtonPress = now;
         return;
     }
-    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+        if (scanNetworks()) {
+            drawScanScreen();
+        }
+        deautherLastButtonPress = now;
+        return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT) && network_count > 0) {
         deautherOpenTarget(currentIndex);
         deautherLastButtonPress = now;
     }
@@ -4787,10 +4837,10 @@ void deautherSetup() {
 
 void deautherLoop() {
 
-    if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-        feature_exit_requested = true;
-        return;
-    }
+    // Remapped layout: exit is now handled inside deautherHandleNavButtons()
+    // -- LEFT on the scan list exits the Deauther; LEFT on the attack screen
+    // (View) only goes back to the list (does not exit the feature). SELECT
+    // is no longer the global exit (it's now "View"/start-stop).
 
     tft.drawFastHLine(0, 19, 240, UI_LINE);
 
@@ -4897,10 +4947,13 @@ static void probeUpdateNavLabels(bool onAttackScreen) {
   if (!featureHasTouchNavBar()) {
     return;
   }
+  // Remapped layout:
+  //  scan list: LEFT=Exit, DOWN=Next, SELECT=View, UP=Prev, RIGHT=Rescan.
+  //  attack screen (View): LEFT=Back (to the list), SELECT=Start/Stop, rest unused.
   if (onAttackScreen) {
-    setTouchNavLabels(attack_running ? "Stop" : "Start", nullptr, "Exit", nullptr, "Back");
+    setTouchNavLabels("Back", nullptr, attack_running ? "Stop" : "Start", nullptr, nullptr);
   } else {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "View");
+    setTouchNavLabels("Exit", "Next", "View", "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -5217,24 +5270,28 @@ static void probeHandleNavButtons() {
         (void)isButtonPressedEdge(BTN_RIGHT);
         (void)isButtonPressedEdge(BTN_UP);
         (void)isButtonPressedEdge(BTN_DOWN);
+        (void)isButtonPressedEdge(BTN_SELECT);
         return;
     }
 
+    // Remapped layout: attack screen (View) -- LEFT goes back to the scan
+    // list (used to be RIGHT); SELECT starts/stops the attack (used to be
+    // LEFT). UP/DOWN/RIGHT are unused here.
     if (selected_ap_index >= 0) {
         if (isButtonPressedEdge(BTN_LEFT)) {
+            attack_running = false;
+            last_packet_time = 0;
+            selected_ap_index = -1;
+            drawScanScreen();
+            probeLastButtonPress = now;
+            return;
+        }
+        if (isButtonPressedEdge(BTN_SELECT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
-            probeLastButtonPress = now;
-            return;
-        }
-        if (isButtonPressedEdge(BTN_RIGHT)) {
-            attack_running = false;
-            last_packet_time = 0;
-            selected_ap_index = -1;
-            drawScanScreen();
             probeLastButtonPress = now;
             return;
         }
@@ -5245,10 +5302,12 @@ static void probeHandleNavButtons() {
         return;
     }
 
+    // Remapped layout: scan list -- LEFT exits Probe Request Flood (used to
+    // be SELECT, now global); RIGHT rescans (used to be LEFT); SELECT opens
+    // the selected target / View (used to be RIGHT). UP/DOWN stay Prev/Next,
+    // unchanged.
     if (isButtonPressedEdge(BTN_LEFT)) {
-        if (scanNetworks()) {
-            drawScanScreen();
-        }
+        feature_exit_requested = true;
         probeLastButtonPress = now;
         return;
     }
@@ -5264,7 +5323,14 @@ static void probeHandleNavButtons() {
         probeLastButtonPress = now;
         return;
     }
-    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+        if (scanNetworks()) {
+            drawScanScreen();
+        }
+        probeLastButtonPress = now;
+        return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT) && network_count > 0) {
         probeOpenTarget(currentIndex);
         probeLastButtonPress = now;
     }
@@ -5475,10 +5541,10 @@ void probeRequestFloodSetup() {
 
 void probeRequestFloodLoop() {
 
-    if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-        feature_exit_requested = true;
-        return;
-    }
+    // Remapped layout: exit is now handled inside probeHandleNavButtons()
+    // -- LEFT on the scan list exits Probe Request Flood; LEFT on the attack
+    // screen (View) only goes back to the list (does not exit the feature).
+    // SELECT is no longer the global exit (it's now "View"/start-stop).
 
     tft.drawFastHLine(0, 19, 240, UI_LINE);
 
