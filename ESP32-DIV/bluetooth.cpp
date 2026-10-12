@@ -3130,13 +3130,15 @@ OperationMode currentMode = BLE_MODULE;
 
 bool jammerActive = false;
 
-int bluetooth_channels[] = {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
+// Bluetooth BR/EDR channels 2402 to 2480 MHz (RF_CH 2 to 80)
+int bluetooth_channels[] = {32, 34, 46, 48, 50, 52, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
 int ble_channels[] = {2, 26, 80};
 
 const byte BLE_channels[] = {2, 26, 80};
 byte channelGroup1[] = {2, 5, 8, 11};
 byte channelGroup2[] = {26, 29, 32, 35};
-byte channelGroup3[] = {80, 83, 86, 89};
+// Kept within ISM band limit (<= 2483.5 MHz, RF_CH <= 83) around BLE adv ch 39 (80)
+byte channelGroup3[] = {74, 77, 80, 83};
 
 #define SCREEN_HEIGHT 320
 #define LINE_HEIGHT 12
@@ -5005,19 +5007,23 @@ OperationMode currentMode = WiFi_MODULE;
 
 bool jammerActive = false;
 
-const byte bluetooth_channels[] =        {32, 34, 46, 48, 50, 52, 0, 1, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
+// Bluetooth BR/EDR channels 2402 to 2480 MHz (RF_CH 2 to 80)
+const byte bluetooth_channels[] =        {32, 34, 46, 48, 50, 52, 2, 4, 6, 8, 22, 24, 26, 28, 30, 74, 76, 78, 80};
 const byte ble_channels[] =              {2, 26, 80};
-const byte WiFi_channels[] =             {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+// 802.11 channels 1 to 13 at 2412 + 5(k-1) MHz -> RF_CH = Fc - 2400 (12 to 72)
+const byte WiFi_channels[] =             {12, 17, 22, 27, 32, 37, 42, 47, 52, 57, 62, 67, 72};
 const byte usbWireless_channels[] =      {40, 50, 60};
 const byte videoTransmitter_channels[] = {70, 75, 80};
 const byte rc_channels[] =               {1, 3, 5, 7};
-const byte zigbee_channels[] =           {11, 15, 20, 25};
+// 802.15.4 channels 11 to 26 at 2405 + 5(k-11) MHz -> RF_CH = Fc - 2400 (5 to 80)
+const byte zigbee_channels[] =           {5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80};
 const byte nrf24_channels[] =            {76, 78, 79};
 
 const byte BLE_channels[] = {2, 26, 80};
 byte channelGroup1[] = {2, 5, 8, 11};
 byte channelGroup2[] = {26, 29, 32, 35};
-byte channelGroup3[] = {80, 83, 86, 89};
+// Kept within ISM band limit (<= 2483.5 MHz, RF_CH <= 83) around BLE adv ch 39 (80)
+byte channelGroup3[] = {74, 77, 80, 83};
 
 #define SCREEN_HEIGHT 320
 #define LINE_HEIGHT 12
