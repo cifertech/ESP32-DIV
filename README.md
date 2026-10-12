@@ -235,6 +235,61 @@ ESP32DIV consists of two boards:
 
 <div>&nbsp;</div>
 
+<!-- Firmware Setup & Compilation -->
+## 💻 Firmware Setup & Compilation Guide
+
+### 1. Board Package & Toolchain Setup
+- **Arduino IDE:** 2.x recommended (or `arduino-cli`).
+- **ESP32 Core Package:** Espressif `esp32` board package **v2.0.14 - v2.0.17** (installed via Arduino Boards Manager: `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`).
+- **Target Boards & Settings:**
+  - **ESP32-DIV V2:** Board: `ESP32S3 Dev Module`
+    - Flash Size: `16MB (128Mb)`
+    - Partition Scheme: `16M Flash (3MB APP/9.9MB FATFS)` or `Huge APP (3MB No OTA/1MB SPIFFS)`
+    - PSRAM: `OPI PSRAM` (or Disabled depending on module variant)
+    - USB CDC On Boot: `Enabled`
+  - **ESP32-DIV V1 / CYD (ESP32-2432S028R):** Board: `ESP32 Dev Module`
+    - Flash Size: `4MB`
+    - Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`
+
+---
+
+### 2. Required Libraries & Version Matrix
+
+All external dependencies must be installed either through the Arduino Library Manager or placed into your `libraries/` directory:
+
+| Library Name | Author / Repository | Tested Version | Purpose / Notes |
+|---|---|---|---|
+| **TFT_eSPI** | Bodmer | `^2.5.43` | UI rendering. Requires copying corresponding `User_Setup.h` from `Libraries/` |
+| **SmartRC-CC1101-Driver-Lib** | LSatan / SmartRC | Bundled | Sub-GHz radio control (use bundled `.zip` in `Libraries/`) |
+| **RF24** | TMRh20 / nRF24 | `^1.4.11` | 2.4 GHz nRF24L01+ transceiver management |
+| **PCF8574 library** | **Renzo Mischianti** (`xreef`) | `^2.4.0` | **Important:** Do *not* install Rob Tillaart's PCF8574; API is incompatible |
+| **NimBLE-Arduino** | h2zero | `^1.4.3` | Lightweight BLE stack for sniffer, spoofing, and ducky |
+| **IRremoteESP8266** | crankyoldgit | `^2.8.6` | Infrared capture, demodulation, and transmission |
+| **Adafruit PN532** | Adafruit | `^1.3.4` | 13.56 MHz RFID / NFC tag read and emulation |
+| **Adafruit BusIO** | Adafruit | `^1.17.4` | Low-level SPI/I2C abstraction for Adafruit sensors |
+| **rc-switch** | sui77 | `^2.6.4` | 315/433 MHz fixed-code RF transmitter/receiver protocol |
+| **XPT2046_Touchscreen** | Paul Stoffregen | `^1.4.0` | Resistive touch controller driver |
+| **ArduinoJson** | Benoît Blanchon | `^7.2.0` | Configuration serialization and WiGLE parsing |
+| **arduinoFFT** | kosme | `^1.6.1` | Spectrum analysis routines for RF / Audio monitors |
+| **Adafruit NeoPixel** | Adafruit | `^1.12.3` | Status and feedback addressable RGB LED control |
+
+---
+
+### 3. Display Configuration (`TFT_eSPI`)
+Before compiling, you must copy the target display profile from `Libraries/` into your `TFT_eSPI` library root directory as `User_Setup.h`:
+- For **ESP32-DIV V2:** Copy `Libraries/User_Setup v2.h` $\rightarrow$ `libraries/TFT_eSPI/User_Setup.h`
+- For **ESP32-DIV V1:** Copy `Libraries/User_Setup v1.h` $\rightarrow$ `libraries/TFT_eSPI/User_Setup.h`
+- For **CYD (ESP32-2432S028R):** Copy `Libraries/User_Setup cyd.h` $\rightarrow$ `libraries/TFT_eSPI/User_Setup.h`
+
+---
+
+### 4. Common Build Troubleshooting
+- **`PCF8574.h: No such file or directory` or undefined `pcf.pinMode`:** Install `PCF8574 library` by **Renzo Mischianti** via the Library Manager.
+- **`Sketch too big / Sketch uses ... of program storage space`:** Change **Partition Scheme** in the Tools menu to `Huge APP (3MB No OTA/1MB SPIFFS)`.
+- **Linker error: `multiple definition of 'spi'` on ESP32-S3:** If using core 2.0.17+ with standalone SmartRC-CC1101, ensure CC1101 driver's internal boolean flag symbol is namespace-isolated from TFT_eSPI's hardware SPI instance.
+
+<div>&nbsp;</div>
+
 <!-- License --> 
 ## :warning: License
  
