@@ -8892,7 +8892,7 @@ static const unsigned char* icons[ICON_NUM] = {
 #define STATUS_DOT_SIZE 8
 #define LINE_HEIGHT 16
 #define MAX_LINES 16
-#define MAX_DEVICES 32
+#define MAX_DEVICES 128
 #define SCAN_INTERVAL 5000
 #define MAX_LINE_LENGTH 38
 #define BEACON_PREFIX "4c000215"
@@ -9116,7 +9116,11 @@ private:
 
   void processNewDevice(BLEAdvertisedDevice* bleDevice, esp_bt_gap_cb_param_t* btDevice, unsigned long timestamp, bool isBLE) {
     if (deviceCount >= MAX_DEVICES) {
-      addLine("Max devices reached!", RED, true, MessageType::ALERT);
+      static unsigned long lastMaxDevicesAlert = 0;
+      if (millis() - lastMaxDevicesAlert >= 5000) {
+        addLine("Max devices reached!", RED, true, MessageType::ALERT);
+        lastMaxDevicesAlert = millis();
+      }
       return;
     }
     newDevicesThisScan++;
@@ -9502,6 +9506,7 @@ public:
         return;
       }
       pBLEScan->start(kScanChunkSec, false);
+      vTaskDelay(pdMS_TO_TICKS(20));
     }
     addLine("BLE Scan Started T:" + String(millis()), DARK_GRAY, true, MessageType::STATUS);
     updateHeader();
